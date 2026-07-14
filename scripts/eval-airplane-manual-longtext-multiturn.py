@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query-id", default=DEFAULT_QUERY_ID)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--poll-timeout", type=float, default=180.0)
-    parser.add_argument("--poll-interval", type=float, default=0.5)
+    parser.add_argument("--poll-interval", type=float, default=0.25)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--fail-on-targets", action="store_true")
     return parser.parse_args()

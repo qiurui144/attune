@@ -38,6 +38,11 @@ export const zh = {
   'settings.power.tasks.resumed_ok': '后台任务已恢复',
   'settings.power.tasks.toggle_fail': '操作失败：{message}',
   'settings.power.tasks.count': '{count} 个调度器',
+  'sidebar.background.aria': '后台任务',
+  'sidebar.background.title': '后台任务',
+  'sidebar.background.running': '运行中',
+  'sidebar.background.done': '完成',
+  'sidebar.background.failed': '失败',
   // ─── 通用 ──────────────────────────────────────────────
   'common.save': '保存',
   'common.cancel': '取消',

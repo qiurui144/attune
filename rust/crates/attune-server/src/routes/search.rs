@@ -1,4 +1,5 @@
-use attune_core::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
+use attune_core::crypto::Key32;
+use attune_core::search::{allocate_budget, SearchParams, SearchResult, INJECTION_BUDGET};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -88,6 +89,52 @@ fn err_500(msg: &str) -> ApiError {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(serde_json::json!({"error": msg})),
     )
+}
+
+pub(crate) async fn search_with_state_blocking(
+    state: SharedState,
+    dek: Key32,
+    query: String,
+    search_params: SearchParams,
+    best_effort_fulltext_when_vector_skipped: bool,
+) -> Result<Vec<SearchResult>, String> {
+    tokio::task::spawn_blocking(move || {
+        let reranker = state
+            .reranker
+            .lock()
+            .map_err(|_| "reranker lock".to_string())?
+            .clone();
+        let emb = state
+            .embedding
+            .lock()
+            .map_err(|_| "emb lock".to_string())?
+            .clone();
+
+        let ft_guard = if search_params.skip_vector && best_effort_fulltext_when_vector_skipped {
+            state.fulltext.try_lock().ok()
+        } else {
+            Some(state.fulltext.lock().map_err(|_| "ft lock".to_string())?)
+        };
+        let vec_guard = if search_params.skip_vector {
+            None
+        } else {
+            Some(state.vectors.lock().map_err(|_| "vec lock".to_string())?)
+        };
+        let vault_guard = state.vault.lock().map_err(|_| "vault lock".to_string())?;
+
+        let ctx = attune_core::search::SearchContext {
+            fulltext: ft_guard.as_ref().and_then(|guard| guard.as_ref()),
+            vectors: vec_guard.as_ref().and_then(|guard| guard.as_ref()),
+            embedding: emb,
+            reranker,
+            store: vault_guard.store(),
+            dek: &dek,
+        };
+        attune_core::search::search_with_context(&ctx, &query, &search_params)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("search task join: {e}"))?
 }
 
 pub async fn search(
@@ -186,41 +233,10 @@ pub async fn search(
         })?
     };
 
-    let reranker = state
-        .reranker
-        .lock()
-        .map_err(|_| err_500("reranker lock"))?
-        .clone();
-    let emb = state
-        .embedding
-        .lock()
-        .map_err(|_| err_500("emb lock"))?
-        .clone();
-
-    let results = {
-        let ft_guard = if search_params.skip_vector {
-            state.fulltext.try_lock().ok()
-        } else {
-            Some(state.fulltext.lock().map_err(|_| err_500("ft lock"))?)
-        };
-        let vec_guard = if search_params.skip_vector {
-            None
-        } else {
-            Some(state.vectors.lock().map_err(|_| err_500("vec lock"))?)
-        };
-        let vault_guard = state.vault.lock().map_err(|_| err_500("vault lock"))?;
-
-        let ctx = attune_core::search::SearchContext {
-            fulltext: ft_guard.as_ref().and_then(|guard| guard.as_ref()),
-            vectors: vec_guard.as_ref().and_then(|guard| guard.as_ref()),
-            embedding: emb,
-            reranker,
-            store: vault_guard.store(),
-            dek: &dek,
-        };
-        attune_core::search::search_with_context(&ctx, &effective_query, &search_params)
-            .map_err(|e| err_500(&e.to_string()))?
-    };
+    let results =
+        search_with_state_blocking(state.clone(), dek, effective_query, search_params, true)
+            .await
+            .map_err(|e| err_500(&e))?;
 
     // OSS-S17 fix: score 阈值 cutoff。当 corpus 被低质量内容污染时，BM25+vector+RRF 退化为
     // fallback default score（实测 0.000638-0.000828）让真实相关内容无法浮出。R19-R3 复现：
@@ -323,33 +339,10 @@ pub async fn search_relevant(
         })?
     };
 
-    let reranker = state
-        .reranker
-        .lock()
-        .map_err(|_| err_500("reranker lock"))?
-        .clone();
-    let emb = state
-        .embedding
-        .lock()
-        .map_err(|_| err_500("emb lock"))?
-        .clone();
-
-    let mut results: Vec<SearchResult> = {
-        let ft_guard = state.fulltext.lock().map_err(|_| err_500("ft lock"))?;
-        let vec_guard = state.vectors.lock().map_err(|_| err_500("vec lock"))?;
-        let vault_guard = state.vault.lock().map_err(|_| err_500("vault lock"))?;
-
-        let ctx = attune_core::search::SearchContext {
-            fulltext: ft_guard.as_ref(),
-            vectors: vec_guard.as_ref(),
-            embedding: emb,
-            reranker,
-            store: vault_guard.store(),
-            dek: &dek,
-        };
-        attune_core::search::search_with_context(&ctx, &effective_query, &search_params)
-            .map_err(|e| err_500(&e.to_string()))?
-    };
+    let mut results: Vec<SearchResult> =
+        search_with_state_blocking(state.clone(), dek, effective_query, search_params, false)
+            .await
+            .map_err(|e| err_500(&e))?;
 
     // Apply injection budget
     allocate_budget(&mut results, budget);

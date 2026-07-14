@@ -42,6 +42,11 @@ export const en = {
   'settings.power.tasks.resumed_ok': 'Background tasks resumed',
   'settings.power.tasks.toggle_fail': 'Operation failed: {message}',
   'settings.power.tasks.count': '{count} governor(s)',
+  'sidebar.background.aria': 'Background tasks',
+  'sidebar.background.title': 'Background tasks',
+  'sidebar.background.running': 'Running',
+  'sidebar.background.done': 'Done',
+  'sidebar.background.failed': 'Failed',
   // ─── Common ──────────────────────────────────────────
   'common.save': 'Save',
   'common.cancel': 'Cancel',

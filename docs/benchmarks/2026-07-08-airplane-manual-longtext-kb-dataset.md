@@ -335,20 +335,23 @@ bounded by Attune-side stop conditions below.
 
 Attune-side defaults for this gate are intentionally platform-neutral:
 
-- local scheduler long-text runs claim embedding queue batches of 64 by default;
-  the scheduler-native embedding provider then uses
-  `ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE` sub-batches and splits again if the
-  scheduler reports a physical batch-size limit.
-- scheduler OCR is enabled by default for long-text local scheduler runs so
-  image-only PDFs exercise the page OCR path. Non-longtext e2e keeps OCR off
-  unless `ATTUNE_SCHEDULER_OCR_ENABLED=1` is set.
-- scheduler PDF page OCR has platform-neutral runaway protection:
-  `ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` defaults to 45000ms, and consecutive
+- local scheduler long-text runs claim embedding queue batches of 512 by default;
+  the scheduler-native embedding provider also defaults
+  `ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE` to 512. Both can be raised up to
+  2048 for larger hosts, and the provider splits again if the scheduler reports
+  a physical batch-size limit.
+- `ATTUNE_SCHEDULER_OCR_ENABLED=1` enables scheduler OCR capability discovery for
+  long-text runs, but PDF page OCR remains explicit opt-in via
+  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1`. Non-longtext e2e keeps OCR off unless
+  the caller opts in.
+- scheduler PDF page OCR has platform-neutral runaway protection when enabled:
+  `ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES` defaults to 4,
+  `ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` defaults to 12000ms, and consecutive
   empty OCR pages count toward `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`.
   If OCR produces no usable text, or returns fatal payload/schema errors such as
   `unsupported_payload`, ingest falls back to metadata-only indexing instead of
   blocking the full bind on one scanned PDF.
-- Web UI scheduler answer jobs poll every 500ms, matching the Python/Node
+- Web UI scheduler answer jobs poll every 250ms, matching the Python/browser
   long-text UI gates, so the browser surface does not lose the 10s answer SLA
   to coarse job-poll latency after the scheduler has already completed.
 - explicit low answer-token caps still apply to simple lookups, while
@@ -374,13 +377,13 @@ Results:
 | Gate | Result |
 | --- | --- |
 | Full runner | 9/9 e2e scripts pass |
-| Bind/index | 48/48 documents accepted; scanned/empty OCR PDFs degrade to metadata-only instead of blocking |
-| Search | hit@5=1.0, hit@10=1.0, recall@10=0.9643, MRR@10=0.9187, p95=245ms |
-| Chat API | 42/42 pass, citation=1.0, answer accuracy=1.0, unsafe advice=0.0, p95=9689ms |
-| Scheduler generation | 41/41 required rows covered, p95=8841ms, queue p95=501ms, prompt-eval p95=5806ms, decode p95=3139ms |
+| Bind/index | background bind returned in 1ms; 48/48 documents accepted; 20,516 pending embeddings drained in 1,354,116ms |
+| Search | hit@5=1.0, hit@10=1.0, recall@10=0.9643, MRR@10=0.9187, p95=232ms |
+| Chat API | 42/42 pass, citation=1.0, answer accuracy=1.0, unsafe advice=0.0, p95=9956ms |
+| Scheduler generation | 41/41 required rows covered, p95=9281ms, queue p95=501ms, prompt-eval p95=6792ms, decode p95=3145ms |
 | Answer budget | explicit rows=42, source-diverse rows=15, output tokens p50=24/p95=40 |
-| Multiturn | 3/3 pass, p95=9065ms, no forbidden-source or unsafe-advice turns |
-| Web UI | default query `a320_qrh_abnormal` pass, visible latency=8185ms, scheduler job latency=7410ms, output_tokens=24 |
+| Multiturn | 3/3 pass, p95=8876ms, no forbidden-source or unsafe-advice turns |
+| Web UI | default query `a320_qrh_abnormal` pass, visible latency=8241ms, scheduler job latency=7542ms, output_tokens=24 |
 
 Attune-side status after this retest:
 
@@ -391,8 +394,64 @@ Attune-side status after this retest:
 - The browser and API gates now expose scheduler job timing metadata, so future
   failures can be attributed to initial Attune request latency, UI polling,
   scheduler queue wait, prompt eval, or decode.
+- Browser and Python long-text gates use 250ms scheduler job polling. The
+  retest keeps user-visible chat p95 under the 10s target even when individual
+  answer jobs approach the scheduler budget.
 - OCR large/scanned PDFs no longer block comprehensive ingestion. Attune stops
   fatal scheduler OCR payload/schema loops and records metadata-only fallback.
+
+2026-07-14 UX/performance hardening added after the K3 retest:
+
+```mermaid
+flowchart TD
+  UI["Web UI / API bind"]
+  Bind["/api/v1/index/bind"]
+  Fast["background=true<br/>accepted immediately"]
+  Worker["spawn_blocking scan worker<br/>independent Store connection"]
+  Parse["pdftotext first<br/>PDF page OCR opt-in"]
+  Meta["metadata-only fallback<br/>honest parse status"]
+  Queue["embed_queue<br/>batched scheduler embeddings"]
+  Index["SQLite WAL + vector + BM25"]
+  Chat["chat/search"]
+  Retrieval["spawn_blocking retrieval<br/>hybrid + SRAS + admission"]
+  Scheduler["local scheduler<br/>kb.query.embed / kb.query.ask"]
+  Answer["answer with citations or refusal"]
+
+  UI --> Bind
+  Bind -->|sync regression path| Worker
+  Bind -->|UX path| Fast --> Worker
+  Worker --> Parse
+  Parse -->|usable text| Queue
+  Parse -->|OCR disabled/unavailable| Meta --> Queue
+  Queue --> Scheduler --> Index
+  Chat --> Retrieval --> Index
+  Retrieval --> Scheduler --> Answer
+```
+
+- Directory binding supports `background: true` / `async_scan` and broadcasts
+  progress through the existing scan-progress channel. Settings, onboarding, and
+  the browser long-text gate use this path so vector DB construction does not
+  block the UI.
+- Scanner ingestion is streaming: documents are parsed and enqueued one file at
+  a time instead of building an in-memory corpus vector first.
+- SQLite uses platform-neutral performance PRAGMAs for WAL, busy timeout, cache,
+  temp store, mmap, synchronous mode, and WAL checkpointing. These apply equally
+  to K3/X100, Windows high-performance hosts, and Linux x86 hosts.
+- Search/chat retrieval moves SQLite/vector/fulltext work into `spawn_blocking`
+  so expensive local retrieval cannot occupy async reactor workers.
+- Short lexical lookups (plain keywords, aircraft/model identifiers, ATA numbers,
+  path-like names, and code-like markers) use a local fast path: when BM25 or
+  exact substring already has candidates, Attune skips scheduler query
+  embedding. This keeps simple KB search responsive while long background
+  embedding batches are running.
+- Scheduler PDF OCR no longer uploads raw PDFs to `kb.document.ocr_recognize`.
+  The scheduler contract requires page images. Page OCR is now explicit opt-in:
+  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1`, bounded by page count, per-page timeout,
+  total timeout, and failure limits.
+- Default bulk indexing leaves PDF page OCR disabled. Scanned PDFs without a
+  usable text layer become metadata-only entries quickly. This is intentional:
+  source lookup remains possible, while detailed content answers must refuse or
+  report unavailable content unless a dedicated OCR pass succeeds.
 
 Scheduler-side residual gap:
 

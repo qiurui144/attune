@@ -2,9 +2,13 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 use crate::state::SharedState;
+use attune_core::crypto::Key32;
+use attune_core::ingest::IngestOptions;
 use attune_core::scanner;
+use attune_core::store::Store;
 
 #[derive(Deserialize)]
 pub struct BindRequest {
@@ -17,6 +21,11 @@ pub struct BindRequest {
     /// 'legal' / 'tech' / 'medical' / 'patent' / 'academic' / 'general'(默认)。
     #[serde(default = "default_corpus_domain")]
     pub corpus_domain: String,
+    /// If true, return after binding the directory row and run the expensive
+    /// scan/parse/enqueue path in a background worker. Existing API callers keep
+    /// the synchronous behavior by omitting this field.
+    #[serde(default, alias = "async_scan")]
+    pub background: bool,
 }
 
 fn default_corpus_domain() -> String {
@@ -145,7 +154,29 @@ pub async fn bind_directory(
             )
         })?;
 
-    // Scan directory synchronously
+    if body.background {
+        drop(vault);
+        spawn_background_bind_scan(
+            state.clone(),
+            dek,
+            dir_id.clone(),
+            canonical.clone(),
+            body.recursive,
+            body.file_types.clone(),
+            ingest_options,
+        );
+        return Ok(Json(serde_json::json!({
+            "status": "accepted",
+            "background": true,
+            "dir_id": dir_id,
+            "scan": {
+                "status": "queued",
+            }
+        })));
+    }
+
+    // Scan directory synchronously for compatibility with API/e2e callers that
+    // need immediate scan counts in the response.
     let scan_result = scanner::scan_directory_with_options(
         vault.store(),
         &dek,
@@ -155,19 +186,7 @@ pub async fn bind_directory(
         &body.file_types,
         &ingest_options,
     )
-    .map_err(|e| {
-        let msg = e.to_string();
-        tracing::error!(target: "access", "scan_directory failed for {canonical_str}: {msg}");
-        let user_msg = if msg.contains("Permission denied") {
-            "无法读取该目录：请检查访问权限".to_string()
-        } else {
-            "扫描目录失败，请稍后重试".to_string()
-        };
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": user_msg})),
-        )
-    })?;
+    .map_err(|e| scan_error_response(&canonical_str, e))?;
 
     // 释放 bind/scan 阶段持有的 vault，再以规范锁序 fulltext → vault 重取做 FTS
     // rebuild。绝不在持 vault 时取 fulltext（那会反转 fulltext → vectors → vault
@@ -177,38 +196,7 @@ pub async fn bind_directory(
     // #83 P0: 分页 FTS 增量刷新，每页单独加释放 vault lock。
     // 锁序维持 fulltext → vault（正确；ft_guard 外层，vault 内层），
     // 且持锁期限从"全量"缩为每页 500 条。
-    {
-        let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ft) = ft_guard.as_ref() {
-            const FTS_PAGE: usize = 500;
-            let mut fts_offset = 0usize;
-            loop {
-                let page_items: Vec<(String, String, String, String)> = {
-                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    match vault.store().list_item_ids_paged(fts_offset, FTS_PAGE) {
-                        Ok(ids) => {
-                            let mut buf = Vec::with_capacity(ids.len());
-                            for id in &ids {
-                                if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
-                                    buf.push((item.id, item.title, item.content, item.source_type));
-                                }
-                            }
-                            buf
-                        }
-                        Err(_) => break,
-                    }
-                }; // vault lock released here
-                let n = page_items.len();
-                for (id, title, content, source_type) in &page_items {
-                    let _ = ft.add_document(id, title, content, source_type);
-                }
-                fts_offset += FTS_PAGE;
-                if n < FTS_PAGE {
-                    break;
-                }
-            }
-        }
-    }
+    rebuild_fulltext_from_vault(&state, &dek);
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -220,6 +208,194 @@ pub async fn bind_directory(
             "skipped": scan_result.skipped_files,
         }
     })))
+}
+
+fn scan_error_response(
+    canonical_str: &str,
+    e: attune_core::error::VaultError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let msg = e.to_string();
+    tracing::error!(target: "access", "scan_directory failed for {canonical_str}: {msg}");
+    let user_msg = if msg.contains("Permission denied") {
+        "无法读取该目录：请检查访问权限".to_string()
+    } else {
+        "扫描目录失败，请稍后重试".to_string()
+    };
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": user_msg})),
+    )
+}
+
+fn spawn_background_bind_scan(
+    state: SharedState,
+    dek: Key32,
+    dir_id: String,
+    canonical: PathBuf,
+    recursive: bool,
+    file_types: Vec<String>,
+    ingest_options: IngestOptions,
+) {
+    let task_id = format!("bind-scan-{dir_id}");
+    send_background_scan_progress(
+        &state,
+        &task_id,
+        "running",
+        0.05,
+        &format!("正在后台扫描 {}", canonical.display()),
+    );
+    tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        match run_background_bind_scan(
+            &state,
+            &dek,
+            &dir_id,
+            &canonical,
+            recursive,
+            &file_types,
+            &ingest_options,
+        ) {
+            Ok(scan) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                tracing::info!(
+                    target: "access",
+                    "background bind scan completed dir_id={dir_id} path={} total={} new={} updated={} skipped={} errors={} elapsed_ms={elapsed_ms}",
+                    canonical.display(),
+                    scan.total_files,
+                    scan.new_files,
+                    scan.updated_files,
+                    scan.skipped_files,
+                    scan.errors,
+                );
+                send_background_scan_progress(
+                    &state,
+                    &task_id,
+                    "done",
+                    1.0,
+                    &format!(
+                        "后台索引完成：{} 个文件，{} 新增，{} 更新，{} 跳过",
+                        scan.total_files, scan.new_files, scan.updated_files, scan.skipped_files
+                    ),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "access",
+                    "background bind scan failed dir_id={dir_id} path={}: {e}",
+                    canonical.display(),
+                );
+                send_background_scan_progress(
+                    &state,
+                    &task_id,
+                    "failed",
+                    1.0,
+                    &format!("后台扫描失败：{e}"),
+                );
+            }
+        }
+    });
+}
+
+fn run_background_bind_scan(
+    state: &SharedState,
+    dek: &Key32,
+    dir_id: &str,
+    canonical: &Path,
+    recursive: bool,
+    file_types: &[String],
+    ingest_options: &IngestOptions,
+) -> Result<scanner::ScanResult, String> {
+    let db_path = attune_core::platform::db_path();
+    let store = Store::open(&db_path).map_err(|e| format!("open store: {e}"))?;
+    let scan = scanner::scan_directory_with_options(
+        &store,
+        dek,
+        dir_id,
+        canonical,
+        recursive,
+        file_types,
+        ingest_options,
+    )
+    .map_err(|e| e.to_string())?;
+    rebuild_fulltext_from_store(state, &store, dek);
+    Ok(scan)
+}
+
+fn rebuild_fulltext_from_vault(state: &SharedState, dek: &Key32) {
+    let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ft) = ft_guard.as_ref() {
+        const FTS_PAGE: usize = 500;
+        let mut fts_offset = 0usize;
+        loop {
+            let page_items: Vec<(String, String, String, String)> = {
+                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                match vault.store().list_item_ids_paged(fts_offset, FTS_PAGE) {
+                    Ok(ids) => {
+                        let mut buf = Vec::with_capacity(ids.len());
+                        for id in &ids {
+                            if let Ok(Some(item)) = vault.store().get_item(dek, id) {
+                                buf.push((item.id, item.title, item.content, item.source_type));
+                            }
+                        }
+                        buf
+                    }
+                    Err(_) => break,
+                }
+            }; // vault lock released here
+            let n = page_items.len();
+            for (id, title, content, source_type) in &page_items {
+                let _ = ft.add_document(id, title, content, source_type);
+            }
+            fts_offset += FTS_PAGE;
+            if n < FTS_PAGE {
+                break;
+            }
+        }
+    }
+}
+
+fn rebuild_fulltext_from_store(state: &SharedState, store: &Store, dek: &Key32) {
+    let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ft) = ft_guard.as_ref() {
+        const FTS_PAGE: usize = 500;
+        let mut fts_offset = 0usize;
+        loop {
+            let ids = match store.list_item_ids_paged(fts_offset, FTS_PAGE) {
+                Ok(ids) if !ids.is_empty() => ids,
+                _ => break,
+            };
+            let mut page_items = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Ok(Some(item)) = store.get_item(dek, id) {
+                    page_items.push((item.id, item.title, item.content, item.source_type));
+                }
+            }
+            let n = page_items.len();
+            for (id, title, content, source_type) in &page_items {
+                let _ = ft.add_document(id, title, content, source_type);
+            }
+            fts_offset += FTS_PAGE;
+            if n < FTS_PAGE {
+                break;
+            }
+        }
+    }
+}
+
+fn send_background_scan_progress(
+    state: &SharedState,
+    task_id: &str,
+    status: &str,
+    progress: f32,
+    message: &str,
+) {
+    let _ = state.recommendation_tx.send(serde_json::json!({
+        "type": "progress",
+        "task_id": task_id,
+        "status": status,
+        "progress": progress,
+        "message": message,
+    }));
 }
 
 pub async fn unbind_directory(

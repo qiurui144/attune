@@ -659,6 +659,29 @@ fn exact_substring_fallback_query(query: &str) -> bool {
             .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#') || c.is_ascii_digit())
 }
 
+fn lexical_fast_path_query(query: &str) -> bool {
+    let q = query.trim();
+    let len = q.chars().count();
+    if !(2..=96).contains(&len) {
+        return false;
+    }
+
+    let token_count = q.split_whitespace().count().max(1);
+    let has_digit = q.chars().any(|c| c.is_ascii_digit());
+    let has_identifier_punct = q
+        .chars()
+        .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#'));
+
+    if has_identifier_punct || has_digit {
+        return true;
+    }
+
+    // One- or two-token keyword searches are usually intentional lexical
+    // lookups. Do not make them wait for a scheduler embedding call when
+    // Tantivy already has candidates.
+    token_count <= 2 && len <= 48
+}
+
 fn exact_substring_candidates(
     ctx: &SearchContext<'_>,
     query: &str,
@@ -833,11 +856,35 @@ pub fn search_with_context(
         ft_results
     };
 
+    let ft_results = if ft_results.is_empty() {
+        let exact_results = exact_substring_candidates(ctx, query, params.initial_k);
+        if !exact_results.is_empty() {
+            log::info!(
+                "search stages: exact substring fallback={} query='{}'",
+                exact_results.len(),
+                query.chars().take(50).collect::<String>()
+            );
+        }
+        exact_results
+    } else {
+        ft_results
+    };
+
+    let lexical_fast_path =
+        !params.skip_vector && !ft_results.is_empty() && lexical_fast_path_query(query);
+
     // 2. 向量搜索（initial_k）
     // J3 (per spec §J3)：拿到 vector 结果后立即按 min_score 过滤；
     // 低于阈值的进 RRF 前丢弃，避免噪音污染融合排序。
     let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) = if params.skip_vector {
         log::info!("search stages: vector skipped by SearchParams");
+        (vec![], None)
+    } else if lexical_fast_path {
+        log::info!(
+            "search stages: vector skipped by lexical fast path query='{}' fts={}",
+            query.chars().take(50).collect::<String>(),
+            ft_results.len()
+        );
         (vec![], None)
     } else {
         match (&ctx.embedding, &ctx.vectors) {
@@ -869,19 +916,6 @@ pub fn search_with_context(
             },
             _ => (vec![], None),
         }
-    };
-    let ft_results = if ft_results.is_empty() {
-        let exact_results = exact_substring_candidates(ctx, query, params.initial_k);
-        if !exact_results.is_empty() {
-            log::info!(
-                "search stages: exact substring fallback={} query='{}'",
-                exact_results.len(),
-                query.chars().take(50).collect::<String>()
-            );
-        }
-        exact_results
-    } else {
-        ft_results
     };
 
     log::info!(
@@ -1837,6 +1871,127 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item_id, item_id);
         assert!(results[0].content.contains("BOUNDARY_MULTI_MARK"));
+    }
+
+    struct CountingEmbeddingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::embed::EmbeddingProvider for CountingEmbeddingProvider {
+        fn embed(
+            &self,
+            texts: &[&str],
+        ) -> crate::error::Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((
+                texts.iter().map(|_| vec![1.0f32, 0.0]).collect(),
+                crate::usage::TokenUsage::empty("counting", "test"),
+            ))
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn search_with_context_lexical_fast_path_skips_embedding_when_fts_hits() {
+        use crate::index::FulltextIndex;
+        use crate::store::Store;
+        use crate::vectors::VectorIndex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let item_id = store
+            .insert_item(
+                &dek,
+                "loop fixture",
+                "# Loop fixture\n\nLOOPMARK42 tokio keyword body.\n",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let ft = FulltextIndex::open_memory().unwrap();
+        ft.add_document(
+            &item_id,
+            "loop fixture",
+            "# Loop fixture\n\nLOOPMARK42 tokio keyword body.\n",
+            "file",
+        )
+        .unwrap();
+        let vectors = VectorIndex::new(2).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedding = Arc::new(CountingEmbeddingProvider {
+            calls: calls.clone(),
+        });
+        let ctx = SearchContext {
+            fulltext: Some(&ft),
+            vectors: Some(&vectors),
+            embedding: Some(embedding),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(10);
+        let results = search_with_context(&ctx, "LOOPMARK42", &params).unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+
+        let results = search_with_context(&ctx, "tokio", &params).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+    }
+
+    #[test]
+    fn search_with_context_natural_query_still_uses_embedding() {
+        use crate::index::FulltextIndex;
+        use crate::store::Store;
+        use crate::vectors::VectorIndex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "rust ownership",
+                "Rust ownership and borrowing guide.",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let ft = FulltextIndex::open_memory().unwrap();
+        let vectors = VectorIndex::new(2).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedding = Arc::new(CountingEmbeddingProvider {
+            calls: calls.clone(),
+        });
+        let ctx = SearchContext {
+            fulltext: Some(&ft),
+            vectors: Some(&vectors),
+            embedding: Some(embedding),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(10);
+        let _ = search_with_context(&ctx, "what is rust ownership", &params).unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 

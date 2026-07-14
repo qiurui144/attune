@@ -15,6 +15,7 @@ import {
   activeSessionId,
   vaultState,
   theme,
+  backgroundTasks,
 } from '../store/signals';
 import type { View } from '../store/signals';
 import { loadSessions, clearActiveSession } from '../hooks/useChat';
@@ -65,6 +66,7 @@ export function Sidebar(): JSX.Element {
       <BrandAndSearch collapsed={collapsed} />
       <NewChatButton collapsed={collapsed} />
       <SessionList collapsed={collapsed} />
+      <BackgroundTasksPanel collapsed={collapsed} />
       <SecondaryNav collapsed={collapsed} />
       <StatusBar collapsed={collapsed} />
     </aside>
@@ -320,6 +322,125 @@ function SessionItem({ session: s }: { session: { id: string; title: string } })
     >
       {s.title || t('sidebar.untitled_session')}
     </button>
+  );
+}
+
+function BackgroundTasksPanel({ collapsed }: { collapsed: boolean }): JSX.Element | null {
+  const tasks = backgroundTasks.value;
+  if (collapsed || tasks.length === 0) return null;
+
+  return (
+    <section
+      aria-label={t('sidebar.background.aria')}
+      style={{
+        borderTop: '1px solid var(--color-border)',
+        padding: 'var(--space-3) var(--space-4)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-2)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 'var(--space-2)',
+        }}
+      >
+        <span
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-secondary)',
+            fontWeight: 600,
+          }}
+        >
+          {t('sidebar.background.title')}
+        </span>
+        <span
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-disabled)',
+          }}
+        >
+          {tasks.length}
+        </span>
+      </div>
+      {tasks.slice(-3).map((task) => {
+        const pct = Math.max(0, Math.min(100, Math.round(task.progress * 100)));
+        const statusLabel =
+          task.status === 'done'
+            ? t('sidebar.background.done')
+            : task.status === 'failed'
+              ? t('sidebar.background.failed')
+              : t('sidebar.background.running');
+        const statusColor =
+          task.status === 'failed'
+            ? 'var(--color-error)'
+            : task.status === 'done'
+              ? 'var(--color-success)'
+              : 'var(--color-accent)';
+        return (
+          <div key={task.task_id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                minWidth: 0,
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: statusColor,
+                  flexShrink: 0,
+                }}
+              />
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  color: 'var(--color-text)',
+                  fontSize: 'var(--text-xs)',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+                title={task.message || task.task_id}
+              >
+                {task.message || task.task_id}
+              </span>
+              <span style={{ color: statusColor, fontSize: 'var(--text-xs)', flexShrink: 0 }}>
+                {statusLabel}
+              </span>
+            </div>
+            <div
+              aria-hidden="true"
+              style={{
+                height: 4,
+                width: '100%',
+                borderRadius: 2,
+                background: 'var(--color-border)',
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  height: '100%',
+                  width: `${pct}%`,
+                  background: statusColor,
+                  transition: 'width var(--duration-base) var(--ease-out)',
+                }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </section>
   );
 }
 

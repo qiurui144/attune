@@ -1397,54 +1397,15 @@ pub async fn chat(
             "local scheduler retrieval planner applied to chat search"
         );
     }
-    let reranker = state
-        .reranker
-        .lock()
-        .map_err(|_| AppError::Internal("reranker lock".into()))?
-        .clone();
-    let emb = state
-        .embedding
-        .lock()
-        .map_err(|_| AppError::Internal("emb lock".into()))?
-        .clone();
-
-    let search_results = {
-        let ft_guard = if search_params.skip_vector {
-            state.fulltext.try_lock().ok()
-        } else {
-            Some(
-                state
-                    .fulltext
-                    .lock()
-                    .map_err(|_| AppError::Internal("ft lock".into()))?,
-            )
-        };
-        let vec_guard = if search_params.skip_vector {
-            None
-        } else {
-            Some(
-                state
-                    .vectors
-                    .lock()
-                    .map_err(|_| AppError::Internal("vec lock".into()))?,
-            )
-        };
-        let vault_guard = state
-            .vault
-            .lock()
-            .map_err(|_| AppError::Internal("vault lock".into()))?;
-
-        let ctx = attune_core::search::SearchContext {
-            fulltext: ft_guard.as_ref().and_then(|guard| guard.as_ref()),
-            vectors: vec_guard.as_ref().and_then(|guard| guard.as_ref()),
-            embedding: emb,
-            reranker,
-            store: vault_guard.store(),
-            dek: &dek,
-        };
-        attune_core::search::search_with_context(&ctx, &expanded_query, &search_params)
-            .map_err(|e| AppError::Internal(e.to_string()))?
-    };
+    let search_results = crate::routes::search::search_with_state_blocking(
+        state.clone(),
+        dek.clone(),
+        expanded_query,
+        search_params,
+        true,
+    )
+    .await
+    .map_err(AppError::Internal)?;
 
     // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
     let mut search_results = search_results;
@@ -3570,7 +3531,8 @@ mod tests {
             serde_json::json!({"item_id": "airbus-a320-fcom", "title": "A320 FCOM"}),
             serde_json::json!({"item_id": "boeing-b737-qrh", "title": "B737 QRH"}),
         ];
-        let budget = local_scheduler_answer_budget("A320 QRH abnormal procedure source", &knowledge);
+        let budget =
+            local_scheduler_answer_budget("A320 QRH abnormal procedure source", &knowledge);
         assert_eq!(budget.profile, "explicit");
         assert_eq!(budget.max_output_tokens, 24);
         assert!(budget.explicit_output_override);
@@ -3607,13 +3569,10 @@ mod tests {
             None => std::env::remove_var("ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS"),
         }
         match previous_local_floor {
-            Some(v) => std::env::set_var(
-                "ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS",
-                v,
-            ),
-            None => {
-                std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS")
+            Some(v) => {
+                std::env::set_var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS", v)
             }
+            None => std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS"),
         }
     }
 

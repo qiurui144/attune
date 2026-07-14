@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +241,87 @@ def bind_corpus(corpus_dir: Path, token: str) -> None:
         raise SystemExit(f"bind scan found no files: {data}")
 
 
+def run_background_bind_ux_gate(token: str) -> None:
+    if not env_bool("ATTUNE_LONGTEXT_BACKGROUND_BIND_UX", True):
+        print("[longtext] background bind UX gate skipped (ATTUNE_LONGTEXT_BACKGROUND_BIND_UX=0)")
+        return
+
+    gate_dir = ensure_under_home(
+        Path(
+            os.environ.get(
+                "ATTUNE_LONGTEXT_BACKGROUND_BIND_DIR",
+                "~/attune-e2e-corpora/background-bind-ux-gate",
+            )
+        )
+    )
+    if gate_dir.exists():
+        shutil.rmtree(gate_dir)
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(12):
+        (gate_dir / f"ux-background-{idx:02d}.md").write_text(
+            "\n".join(
+                [
+                    f"# Background indexing UX gate {idx}",
+                    "",
+                    "This small file verifies that folder binding returns quickly while parsing,",
+                    "chunking, and embedding continue in the background.",
+                    "attune-background-indexing-ux-gate",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    body = {
+        "path": str(gate_dir),
+        "recursive": True,
+        "file_types": ["md", "txt"],
+        "corpus_domain": "ux",
+        "background": True,
+    }
+    target_ms = env_int("ATTUNE_LONGTEXT_BACKGROUND_BIND_RETURN_MS_MAX", 2000)
+    wait_timeout = env_int("ATTUNE_LONGTEXT_BACKGROUND_BIND_WAIT_SEC", 120)
+    started = time.perf_counter()
+    _, data = request_json("POST", "/api/v1/index/bind", body, token=token, timeout=10)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if data.get("status") != "accepted" or data.get("background") is not True:
+        raise SystemExit(f"background bind did not return accepted/background response: {data}")
+    if elapsed_ms > target_ms:
+        raise SystemExit(f"background bind returned too slowly: {elapsed_ms}ms > {target_ms}ms")
+    dir_id = str(data.get("dir_id") or "")
+    print(
+        "[longtext] background bind UX accepted "
+        f"dir_id={dir_id} return_ms={elapsed_ms} target_ms={target_ms}"
+    )
+
+    deadline = time.monotonic() + wait_timeout
+    stable_zero = 0
+    bound_seen = False
+    last_pending: Any = None
+    while time.monotonic() < deadline:
+        _, status = request_json("GET", "/api/v1/index/status", token=token, timeout=30)
+        dirs = status.get("directories", [])
+        bound_seen = bound_seen or any(isinstance(d, dict) and d.get("id") == dir_id for d in dirs)
+        pending = status.get("pending_embeddings", -1)
+        last_pending = pending
+        if bound_seen and pending == 0:
+            stable_zero += 1
+            if stable_zero >= 2:
+                break
+        else:
+            stable_zero = 0
+        time.sleep(0.5)
+    else:
+        raise SystemExit(
+            f"background bind UX gate did not settle within {wait_timeout}s; "
+            f"bound_seen={bound_seen} last_pending={last_pending}"
+        )
+
+    if dir_id:
+        encoded = urllib.parse.quote(dir_id, safe="")
+        request_json("DELETE", f"/api/v1/index/unbind?dir_id={encoded}", token=token, timeout=30, allow_statuses={404})
+    print("[longtext] background bind UX gate PASS")
+
+
 def wait_for_embeddings(token: str) -> dict[str, Any]:
     timeout = env_int("ATTUNE_LONGTEXT_INDEX_TIMEOUT_SEC", 7200)
     deadline = time.monotonic() + timeout
@@ -323,7 +405,7 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
         "--poll-timeout",
         os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_TIMEOUT_SEC", "180"),
         "--poll-interval",
-        os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_INTERVAL_SEC", "0.5"),
+        os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_INTERVAL_SEC", "0.25"),
         "--out",
         str(result_dir / f"attune-airplane-longtext-{profile}-chat.json"),
     ]
@@ -357,7 +439,7 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
             "--poll-timeout",
             os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_TIMEOUT_SEC", "180"),
             "--poll-interval",
-            os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_INTERVAL_SEC", "0.5"),
+            os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_INTERVAL_SEC", "0.25"),
             "--out",
             str(result_dir / f"attune-airplane-longtext-{profile}-multiturn.json"),
         ]
@@ -485,6 +567,7 @@ def main() -> int:
     print(f"[longtext] selected docs materialized: {docs_count}, bytes={bytes_count}")
     bind_dir = prepare_profile_corpus_view(manifest, profile, corpus_dir)
     token = setup_and_unlock()
+    run_background_bind_ux_gate(token)
     bind_corpus(bind_dir, token)
     wait_for_embeddings(token)
     run_gates(profile, manifest, token, dry_run)

@@ -205,3 +205,36 @@ agent 可靠性通过三 Phase gate 强制保证，每个 law-pro agent 并入 d
 | 企业/服务器 | 统一 scheduler 或云 provider | 统一 scheduler | 网关/BYOK/scheduler |
 
 具体 RVV/AVX/CUDA/DirectML/ROCm worker 和模型生命周期由 scheduler contract 管理。
+
+## 长文本与本机 Scheduler 边界（2026-07-14）
+
+Attune 侧保持平台无关：K3/X100、Windows 高性能工作站和 Linux x86 服务器都走同一套
+scheduler contract。Attune 不直接调用 llama.cpp、ORT、OCR/ASR worker 或硬件指令集后端；
+它负责 vault、策略、索引、检索、上下文准入、引用和 UI 体验。
+
+```
+用户/API/UI
+   ↓
+Attune bind/search/chat
+   ├─ 后台目录扫描（background=true，不阻塞 UI）
+   ├─ SQLite WAL + BM25 + vector store
+   ├─ streaming ingest + metadata-only fallback
+   ├─ lexical fast path + hybrid retrieval + SRAS + ContextAdmission
+   └─ scheduler-native KB tasks
+          ↓
+   本机/边缘 scheduler
+   ├─ embedding / rerank / OCR / ASR / LLM workers
+   ├─ RVV / AVX / GPU / NPU 等平台优化
+   └─ 队列、模型驻留、prompt cache、硬件容量
+```
+
+长文本原则：
+
+- 不把整本手册塞进 LLM，即使提供方声称 1M 窗口也一样；用分区、混合检索、SRAS 和小证据包。
+- 大体量向量库构建默认后台运行；API 回归仍可走同步 bind，以便测量完整耗时。
+- PDF 文本层优先。PDF 页级 OCR 默认关闭，只有设置
+  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1` 才进入有界页面 OCR。
+- OCR/ASR 不可用时，Attune 记录 metadata-only fallback，不伪造正文；详细内容查询必须拒答或说明内容不可用。
+- 短关键词、型号、ATA 编号、路径/代码式标识符在 BM25/exact 已命中时跳过 scheduler query embedding，避免简单查询被后台批量向量构建拖慢。
+- 本机 scheduler embedding 默认 512 条任务批量，可配置到 2048；若 scheduler 报物理 batch 限制，Attune 自动拆分重试。
+- SQLite、扫描和检索优化必须是通用实现，不能写 K3 专用分支；平台指令集优化由 scheduler 和原生依赖构建产物承担。

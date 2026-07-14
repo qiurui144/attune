@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +57,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--poll-interval-ms",
         type=int,
-        default=int(os.environ.get("ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS", "500")),
+        default=int(os.environ.get("ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS", "250")),
     )
     parser.add_argument("--screenshot-dir", type=Path, default=Path(os.environ.get("ATTUNE_LONGTEXT_UI_SHOTS", "docs/screenshots/airplane-longtext-ui")))
     return parser.parse_args()
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
 
 
 def request_json(
@@ -226,6 +242,70 @@ def screenshot(page: Page, args: argparse.Namespace, name: str) -> None:
         print(f"[ui] screenshot {name} failed: {exc}")
 
 
+def verify_background_bind_visible(page: Page, args: argparse.Namespace, token: str) -> None:
+    if not env_bool("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND", True):
+        print("[ui] background bind visibility gate skipped (ATTUNE_LONGTEXT_UI_BACKGROUND_BIND=0)")
+        return
+
+    root = Path(
+        os.environ.get(
+            "ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_DIR",
+            f"~/attune-e2e-corpora/ui-background-bind-ux-{int(time.time())}",
+        )
+    ).expanduser()
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    file_count = env_int("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_FILES", 64)
+    for idx in range(file_count):
+        (root / f"ui-background-{idx:03d}.md").write_text(
+            "\n".join(
+                [
+                    f"# UI background indexing gate {idx}",
+                    "",
+                    "Playwright verifies that a background folder bind does not block the page",
+                    "and that progress is visible in the sidebar.",
+                    "attune-ui-background-indexing-gate",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    target_ms = env_int("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_RETURN_MS_MAX", 2000)
+    started = time.perf_counter()
+    _, data = request_json(
+        args,
+        "POST",
+        "/api/v1/index/bind",
+        {
+            "path": str(root),
+            "recursive": True,
+            "file_types": ["md", "txt"],
+            "corpus_domain": "ux",
+            "background": True,
+        },
+        token=token,
+        timeout=10,
+    )
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    if data.get("status") != "accepted" or data.get("background") is not True:
+        raise RuntimeError(f"background bind did not return accepted/background response: {data}")
+    if elapsed_ms > target_ms:
+        raise RuntimeError(f"background bind returned too slowly: {elapsed_ms}ms > {target_ms}ms")
+
+    wait_visible_any(
+        page,
+        ["后台任务", "Background tasks", "正在后台扫描", "后台索引完成"],
+        min(args.timeout_ms, 15_000),
+    )
+    screenshot(page, args, "00-background-indexing")
+    dir_id = str(data.get("dir_id") or "")
+    if dir_id:
+        encoded = urllib.parse.quote(dir_id, safe="")
+        request_json(args, "DELETE", f"/api/v1/index/unbind?dir_id={encoded}", token=token, allow_statuses={404})
+    print(f"[ui] background bind visible return_ms={elapsed_ms} files={file_count}")
+
+
 def launch_browser(playwright: Any, args: argparse.Namespace) -> Any:
     headless = str(args.headless).strip().lower() not in {"0", "false", "no"}
     executable_path = args.executable_path.strip()
@@ -380,6 +460,7 @@ def main() -> int:
             print("=== airplane manual longtext Web UI E2E ===")
             print(f"[ui] profile={args.profile} query={query['id']}")
             wait_main(page, args)
+            verify_background_bind_visible(page, args, token)
             screenshot(page, args, "00-main")
             item_needle = verify_item_visible(page, query, args)
             print(f"[ui] indexed item visible: {item_needle}")

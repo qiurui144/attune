@@ -78,6 +78,63 @@ fn open_lock_for(path: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
+fn env_u64_clamped(key: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(min, max))
+        .unwrap_or(default.clamp(min, max))
+}
+
+fn sqlite_synchronous_mode() -> &'static str {
+    match std::env::var("ATTUNE_SQLITE_SYNCHRONOUS")
+        .unwrap_or_else(|_| "NORMAL".to_string())
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "OFF" => "OFF",
+        "FULL" => "FULL",
+        "EXTRA" => "EXTRA",
+        _ => "NORMAL",
+    }
+}
+
+fn apply_connection_pragmas(conn: &Connection, on_disk: bool) -> Result<()> {
+    let busy_timeout_ms = env_u64_clamped("ATTUNE_SQLITE_BUSY_TIMEOUT_MS", 5_000, 1_000, 60_000);
+    let cache_kib = env_u64_clamped("ATTUNE_SQLITE_CACHE_KIB", 32 * 1024, 2 * 1024, 256 * 1024);
+    let wal_autocheckpoint_pages = env_u64_clamped(
+        "ATTUNE_SQLITE_WAL_AUTOCHECKPOINT_PAGES",
+        1_000,
+        100,
+        100_000,
+    );
+    let mmap_size_bytes = env_u64_clamped(
+        "ATTUNE_SQLITE_MMAP_SIZE_BYTES",
+        64 * 1024 * 1024,
+        0,
+        1024 * 1024 * 1024,
+    );
+    let synchronous = sqlite_synchronous_mode();
+
+    let mut sql = format!(
+        "PRAGMA foreign_keys=ON;\
+         PRAGMA busy_timeout={busy_timeout_ms};\
+         PRAGMA synchronous={synchronous};\
+         PRAGMA temp_store=MEMORY;\
+         PRAGMA cache_size=-{cache_kib};"
+    );
+    if on_disk {
+        sql.push_str(&format!(
+            "PRAGMA journal_mode=WAL;\
+             PRAGMA wal_autocheckpoint={wal_autocheckpoint_pages};\
+             PRAGMA mmap_size={mmap_size_bytes};"
+        ));
+    }
+    conn.execute_batch(&sql)?;
+    Ok(())
+}
+
 // crypto + Key32 仅 tests 内引用 (#[cfg(test)] 子模块经常重新 use 它们)；
 // 顶部 import 保留是为防未来 mod.rs 主体加 dek 字段时不必再补 import。
 // per W3 batch B 遗留代码扫描：标记 allow 不算回归。
@@ -864,9 +921,7 @@ impl Store {
             );
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-        )?;
+        apply_connection_pragmas(&conn, true)?;
         // Concurrent-open safety: `Store::open` runs on every vault unlock, the
         // job-store/usage-aggregator install, and each background worker — and
         // these can race on the *same* DB file at boot (e.g. install_job_store
@@ -933,7 +988,7 @@ impl Store {
     /// 打开内存数据库（测试用）
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        apply_connection_pragmas(&conn, false)?;
         conn.execute_batch(SCHEMA_SQL)?;
         Self::migrate_task_type(&conn)?;
         Self::migrate_breadcrumbs_encrypt(&conn)?;
@@ -1593,6 +1648,30 @@ mod tests {
     fn open_memory_creates_tables() {
         let store = Store::open_memory().unwrap();
         assert!(!store.has_meta("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn open_applies_sqlite_performance_pragmas() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(&dir.path().join("vault.db")).unwrap();
+        let conn = store.raw_connection_for_test();
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let temp_store: i64 = conn
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .unwrap();
+        let cache_size: i64 = conn
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(busy_timeout, 5_000);
+        assert_eq!(synchronous, 1, "NORMAL synchronous mode");
+        assert_eq!(temp_store, 2, "MEMORY temp_store");
+        assert!(cache_size < 0, "negative cache_size is KiB units");
     }
 
     // ── ACP-6 Task 1: PRAGMA user_version + schema version gate ──────────

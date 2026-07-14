@@ -2718,7 +2718,7 @@ export function FolderLinksSection(): JSX.Element {
     let added = 0;
     for (const path of paths) {
       try {
-        await api.post('/index/bind', { path, recursive: true });
+        await api.post('/index/bind', { path, recursive: true, background: true });
         added += 1;
       } catch {
         // 单个失败不阻塞其它

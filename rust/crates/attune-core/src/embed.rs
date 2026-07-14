@@ -372,8 +372,8 @@ pub struct LocalSchedulerEmbeddingProvider {
     poll_timeout: Duration,
 }
 
-const DEFAULT_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE: usize = 64;
-const MAX_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE: usize = 256;
+const DEFAULT_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE: usize = 512;
+const MAX_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE: usize = 2048;
 
 impl LocalSchedulerEmbeddingProvider {
     pub fn new(base_url: &str, task: &str, model: &str, dims: usize, poll_timeout_ms: u64) -> Self {
@@ -1257,6 +1257,42 @@ mod tests {
         assert_eq!(vecs.len(), 4);
         assert_eq!(vecs[0], vec![2.0, 0.0]);
         assert_eq!(vecs[3], vec![2.0, 1.0]);
+    }
+
+    #[test]
+    fn local_scheduler_embedding_batch_size_defaults_and_clamps_for_large_hosts() {
+        let _env = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&["ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE"]);
+
+        std::env::remove_var("ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE");
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            "http://127.0.0.1:1",
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        assert_eq!(provider.max_batch_size, 512);
+
+        std::env::set_var("ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE", "1024");
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            "http://127.0.0.1:1",
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        assert_eq!(provider.max_batch_size, 1024);
+
+        std::env::set_var("ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE", "999999");
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            "http://127.0.0.1:1",
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        assert_eq!(provider.max_batch_size, 2048);
     }
 
     #[test]

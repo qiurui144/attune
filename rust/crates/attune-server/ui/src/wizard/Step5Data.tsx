@@ -71,7 +71,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
 
     try {
       if (mode === 'folder' && folderPaths.length > 0) {
-        await Promise.all(folderPaths.map((path) => api.post('/index/bind', { path, recursive: true })));
+        await Promise.all(folderPaths.map((path) => api.post('/index/bind', { path, recursive: true, background: true })));
         onUpdate({ boundFolders: folderPaths });
         toast('success', t('wizard.data.toast.bound_n', { count: folderPaths.length }));
       } else if (mode === 'import') {

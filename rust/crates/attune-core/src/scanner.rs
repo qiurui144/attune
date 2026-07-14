@@ -8,6 +8,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
+use crate::ingest::{IngestOptions, RawDocument};
 use crate::store::Store;
 
 /// 扫描结果
@@ -48,13 +49,10 @@ pub fn scan_directory_with_options(
     dir_path: &Path,
     recursive: bool,
     file_types: &[String],
-    ingest_options: &crate::ingest::IngestOptions,
+    ingest_options: &IngestOptions,
 ) -> Result<ScanResult> {
     use crate::ingest::local::LocalFolderConnector;
-    use crate::ingest::{
-        ingest_document_replacing_with_options, ingest_document_with_options, IngestOutcome,
-        SourceConnector,
-    };
+    use crate::ingest::SourceConnector;
 
     let mut result = ScanResult {
         total_files: 0,
@@ -76,74 +74,85 @@ pub fn scan_directory_with_options(
         file_types.to_vec(),
         corpus_domain,
     );
-    let mut docs = Vec::new();
     {
-        let mut sink: crate::ingest::DocumentSink<'_> = Box::new(|doc| docs.push(doc));
+        let mut sink: crate::ingest::DocumentSink<'_> =
+            Box::new(|doc| scan_one_document(store, dek, dir_id, ingest_options, doc, &mut result));
         connector.fetch_documents(&mut sink)?;
-    }
-
-    for doc in docs {
-        result.total_files += 1;
-        let marker = doc.modified_marker.clone().unwrap_or_default();
-
-        // SHA-256 增量判断：indexed_files.file_hash 即上次的内容 hash。
-        // 与旧 process_single_file 逻辑等价（两者均读文件内容算 SHA-256，无 mtime 预过滤）。
-        let prior = store.get_indexed_file(&doc.source_ref).ok().flatten();
-        let old_item_id: Option<String> = match &prior {
-            Some(row) if row.file_hash == marker && !marker.is_empty() => {
-                result.skipped_files += 1;
-                continue;
-            }
-            Some(row) => {
-                // 文件已变 → 旧 item 软删 + enqueue purge + doc_update 信号。
-                // scanner 拿不到 VectorIndex / FulltextIndex 锁，必须 defer 到 server worker。
-                if let Some(old) = &row.item_id {
-                    if let Err(e) = store.delete_item(old) {
-                        log::warn!("scanner: delete_item({old}) failed: {e}");
-                    }
-                    if let Err(e) = store.enqueue_reindex(old, "purge") {
-                        log::warn!("scanner: enqueue_reindex(purge) failed for {old}: {e} — orphan 向量风险");
-                    }
-                    if let Err(e) = store.record_signal_event("doc_update", old, None) {
-                        log::debug!("scanner: record_signal_event failed for {old}: {e}");
-                    }
-                }
-                row.item_id.clone()
-            }
-            None => None,
-        };
-
-        let outcome = match &old_item_id {
-            Some(old) => {
-                ingest_document_replacing_with_options(store, dek, &doc, old, ingest_options)
-            }
-            None => ingest_document_with_options(store, dek, &doc, ingest_options),
-        };
-        match outcome {
-            Ok(IngestOutcome::Inserted { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
-                result.new_files += 1;
-            }
-            Ok(IngestOutcome::Updated { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
-                result.updated_files += 1;
-            }
-            Ok(IngestOutcome::Duplicate { item_id }) => {
-                let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
-                result.skipped_files += 1;
-            }
-            Ok(IngestOutcome::Skipped { .. }) => {
-                result.skipped_files += 1;
-            }
-            Err(e) => {
-                log::warn!("scanner: ingest {} failed: {e}", doc.source_ref);
-                result.errors += 1;
-            }
-        }
     }
 
     store.update_dir_last_scan(dir_id)?;
     Ok(result)
+}
+
+fn scan_one_document(
+    store: &Store,
+    dek: &Key32,
+    dir_id: &str,
+    ingest_options: &IngestOptions,
+    doc: RawDocument,
+    result: &mut ScanResult,
+) {
+    use crate::ingest::{
+        ingest_document_replacing_with_options, ingest_document_with_options, IngestOutcome,
+    };
+
+    result.total_files += 1;
+    let marker = doc.modified_marker.clone().unwrap_or_default();
+
+    // SHA-256 增量判断：indexed_files.file_hash 即上次的内容 hash。
+    // 与旧 process_single_file 逻辑等价（两者均读文件内容算 SHA-256，无 mtime 预过滤）。
+    let prior = store.get_indexed_file(&doc.source_ref).ok().flatten();
+    let old_item_id: Option<String> = match &prior {
+        Some(row) if row.file_hash == marker && !marker.is_empty() => {
+            result.skipped_files += 1;
+            return;
+        }
+        Some(row) => {
+            // 文件已变 → 旧 item 软删 + enqueue purge + doc_update 信号。
+            // scanner 拿不到 VectorIndex / FulltextIndex 锁，必须 defer 到 server worker。
+            if let Some(old) = &row.item_id {
+                if let Err(e) = store.delete_item(old) {
+                    log::warn!("scanner: delete_item({old}) failed: {e}");
+                }
+                if let Err(e) = store.enqueue_reindex(old, "purge") {
+                    log::warn!(
+                        "scanner: enqueue_reindex(purge) failed for {old}: {e} — orphan 向量风险"
+                    );
+                }
+                if let Err(e) = store.record_signal_event("doc_update", old, None) {
+                    log::debug!("scanner: record_signal_event failed for {old}: {e}");
+                }
+            }
+            row.item_id.clone()
+        }
+        None => None,
+    };
+
+    let outcome = match &old_item_id {
+        Some(old) => ingest_document_replacing_with_options(store, dek, &doc, old, ingest_options),
+        None => ingest_document_with_options(store, dek, &doc, ingest_options),
+    };
+    match outcome {
+        Ok(IngestOutcome::Inserted { item_id, .. }) => {
+            let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
+            result.new_files += 1;
+        }
+        Ok(IngestOutcome::Updated { item_id, .. }) => {
+            let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
+            result.updated_files += 1;
+        }
+        Ok(IngestOutcome::Duplicate { item_id }) => {
+            let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
+            result.skipped_files += 1;
+        }
+        Ok(IngestOutcome::Skipped { .. }) => {
+            result.skipped_files += 1;
+        }
+        Err(e) => {
+            log::warn!("scanner: ingest {} failed: {e}", doc.source_ref);
+            result.errors += 1;
+        }
+    }
 }
 
 /// 创建文件监听器（返回 watcher 和事件接收器）
