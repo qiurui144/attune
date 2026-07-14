@@ -145,6 +145,53 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 
 **强制**：L4/L5 报告头必须声明"本次环境保真自检 6 项全过"+ 列实际 artifact SHA / 机器 / 模型源；缺则验收不成立（§5.2.0b 一票否决）。横向 = 全局 §6.4.1。
 
+### 1.6 Web UI E2E 三种运行形态（无头 / 有头 / 真包验收）
+
+Attune 的 Web 测试不能只看 API。所有涉及用户体验的改动必须明确落到以下三条线之一：
+
+| 形态 | 目的 | 浏览器 | 服务端 | 何时跑 | 通过标准 |
+|------|------|--------|--------|--------|----------|
+| **Headless 自动化** | CI/本机快速回归，稳定复现 DOM 行为 | Playwright Chrome `headless=true` | `attune-server-headless` 隔离数据目录 | PR / pre-merge | 脚本 exit 0，截图非空，关键可见文本/状态 chip/citation 命中 |
+| **Headed 有头测试** | 人工观察真实 UX：焦点、滚动、后台任务、长回答等待、错误提示 | Playwright Chrome `ATTUNE_HEADLESS=0` 或人工打开 URL | 真实本地/远端 server | UI/长文本/scheduler 改动后必须至少跑一次 | 人眼确认页面不卡顿、状态可解释、长任务不中断输入；脚本断言也必须通过 |
+| **Release artifact 验收** | 用户安装路径保真，不允许 dev 近路 | 系统 Chrome + 真安装包启动的服务 | deb/MSI/AppImage 真安装 | release candidate | 环境保真自检 6 项全过；报告包含 artifact SHA、机器、模型/云端来源 |
+
+有头测试最小命令：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_BASE_URL=http://localhost:18905 \
+ATTUNE_PLAYWRIGHT_CHANNEL=chrome \
+python3 tests/e2e/playwright/v10_ga_ui_e2e.py
+```
+
+长文本有头测试入口：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_E2E_LONGTEXT=1 \
+ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
+ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
+bash tests/e2e/run_all.sh
+```
+
+K3 平台例外：K3 测试不在前端主机启动 server。正确拓扑是 K3 上运行
+Attune server + scheduler + vault/vector/Tantivy/corpus，前端主机只打开浏览器或
+Playwright 连接 K3 URL。任何 `/api/v1/index/bind` 路径都必须是 K3 文件系统路径。
+可执行入口见 [`tests/e2e/README.md`](../tests/e2e/README.md) 的“K3 平台有头测试拓扑”。
+K3 的 strict headed gate 必须覆盖后台 bind visibility；如当前 K3 服务仍是旧二进制，
+只允许临时跳过该子门禁做人工 chat 验证，不能作为最终验收。
+
+有头测试观察清单：
+
+- 首屏：wizard/主界面无白屏，侧栏、模型选择、输入框、会员提示不遮挡。
+- 后台任务：目录 bind/vector DB 生成必须进入后台任务区，页面仍可搜索、切 tab、输入问题。
+- 长文本问答：scheduler 状态 chip 可见；等待中不出现无限 spinner；完成后 citation 可见且可读。
+- 降级/失败：scheduler 延迟、拒答、OCR metadata-only、无知识命中都必须给诚实反馈，不能静默切小模型胡答。
+- 视觉：桌面 1440x900 与窄屏至少各看一次；按钮文字不溢出，弹层不遮挡主操作。
+
+当前长文本 K3/scheduler 基准见
+[`docs/benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md`](benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md)。
+
 ---
 
 ## 2. 跨层质量门 — attune 特化

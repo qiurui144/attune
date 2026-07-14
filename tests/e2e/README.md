@@ -48,15 +48,16 @@ scheduler 可设 `ATTUNE_E2E_SCHEDULER_STRICT=0`。
 当前 scheduler 生产接口不是
 尚未落地的 `/v1/embeddings` thin route；需要改 task 时可设
 `ATTUNE_E2E_EMBEDDING_TASK=kb.ingest.embed_batch`。本地 scheduler 长文本门禁默认把
-Attune embedding queue batch 设为 64；scheduler-native embedding provider 会按
-`ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE` 自适应子批，并在 scheduler 报 physical
-batch limit 时二分重试。长文本门禁也默认开启 scheduler OCR；普通 e2e 仍默认关闭
-OCR，可用 `ATTUNE_SCHEDULER_OCR_ENABLED=0/1` 显式覆盖。大体量 OCR/解析会让同步
-bind 长时间占用，可用 `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC` 提高超时。扫描 PDF 的
-page OCR 另有通用保护：`ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` 默认 45000ms，
-连续空 OCR 页也计入 `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`，到阈值后
-诚实降级为 metadata-only；如果 scheduler OCR 返回 `unsupported_payload` 等不会随页
-变化的 fatal payload/schema 错误，Attune 会在第一页后直接停止该 PDF 的 page OCR，而不是
+Attune embedding queue batch 和 scheduler-native embedding task batch 设为 512；
+两者都可升到 2048，且 scheduler-native provider 会在 scheduler 报 physical
+batch limit 时二分重试。长文本门禁默认开启 scheduler OCR 能力发现；普通 e2e 仍默认关闭
+OCR，可用 `ATTUNE_SCHEDULER_OCR_ENABLED=0/1` 显式覆盖。PDF page OCR 独立受控，
+默认不跑大 PDF/扫描页 OCR，必须显式设置 `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1`。
+开启后仍有通用保护：`ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES` 默认 4，
+`ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` 默认 12000ms，连续空 OCR 页也计入
+`ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`，到阈值后诚实降级为
+metadata-only；如果 scheduler OCR 返回 `unsupported_payload` 等不会随页变化的
+fatal payload/schema 错误，Attune 会在第一页后直接停止该 PDF 的 page OCR，而不是
 继续扫完整本 PDF。
 
 云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
@@ -151,9 +152,88 @@ node tests/e2e/playwright/airplane_manual_longtext_ui_e2e.js \
 
 `airplane_manual_longtext_e2e.py` 默认会在 API gate 后调用这个脚本。调试纯
 API 层时可设 `ATTUNE_LONGTEXT_UI=0`。
-Web UI 和 UI e2e 驱动对 scheduler answer job 使用 500ms 轮询，避免 1s+
+Web UI 和 UI e2e 驱动对 scheduler answer job 使用 250ms 轮询，避免 1s+
 轮询颗粒度吞掉 10s SLA 的尾部预算；需要压测较慢平台时可通过
 `ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS` 覆盖。
+
+## 有头 Web UI 测试
+
+有头测试用于人工观察真实页面、焦点、后台任务条、scheduler 状态 chip、引用渲染和
+长文本回答延迟。它不是 CI 近路；必须满足：
+
+- 使用真实 Chrome/Chromium，设置 `ATTUNE_HEADLESS=0`。
+- 有可用图形会话：Linux 需要 `DISPLAY`，Windows/macOS 直接打开系统浏览器。
+- 打真实 server URL，不用 mock UI。若验证 release，必须使用真安装包启动的服务。
+- 长文本有头测试仍要先完成 API 建库，或直接让 `airplane_manual_longtext_e2e.py`
+  全流程触发 Web UI 子门禁。
+
+当前仓库推荐的本地有头 smoke：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_BASE_URL=http://localhost:18905 \
+ATTUNE_PLAYWRIGHT_CHANNEL=chrome \
+python3 tests/e2e/playwright/v10_ga_ui_e2e.py
+```
+
+长文本有头 UI gate（要求对应 manifest 的 corpus 已经完成 bind/index）：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS=250 \
+python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
+  --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
+  --base-url http://localhost:18905 \
+  --profile edge_scheduler_comprehensive
+```
+
+若要完整跑长文本并打开可见浏览器：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_E2E_LONGTEXT=1 \
+ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
+ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
+bash tests/e2e/run_all.sh
+```
+
+### K3 平台有头测试拓扑
+
+K3 平台测试必须使用 K3 自己的文件系统和存储：
+
+- Attune server 运行在 K3。
+- vault.db、vectors、Tantivy、airplane manual corpus、后台 bind 目录都在 K3。
+- scheduler 运行在 K3。
+- 其它主机只能作为浏览器/Playwright driver 访问 K3 Web URL，不能把前端主机路径传给
+  `/api/v1/index/bind`。
+
+当前 K3 已部署服务时，可从其它主机这样跑有头 UI gate：
+
+```bash
+# 先在 K3 准备一个小的后台 bind 目录；路径必须是 K3 上的真实路径。
+ssh root@192.168.100.233 'rm -rf /root/attune-e2e-home-100233/attune-e2e-corpora/ui-background-bind-k3-headed && \
+  mkdir -p /root/attune-e2e-home-100233/attune-e2e-corpora/ui-background-bind-k3-headed && \
+  for i in $(seq -w 0 63); do \
+    printf "# K3 headed background bind %s\n\nattune-ui-background-indexing-gate\n" "$i" \
+      > /root/attune-e2e-home-100233/attune-e2e-corpora/ui-background-bind-k3-headed/k3-ui-$i.md; \
+  done'
+
+ATTUNE_HEADLESS=0 \
+ATTUNE_BASE_URL=http://192.168.100.233:18945 \
+ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_CREATE=0 \
+ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_DIR=/root/attune-e2e-home-100233/attune-e2e-corpora/ui-background-bind-k3-headed \
+python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
+  --manifest /tmp/attune-airplane-longtext-100233.json \
+  --base-url http://192.168.100.233:18945 \
+  --profile local_scheduler_comprehensive
+```
+
+如果 K3 当前运行的 Attune 二进制早于 background bind 快速返回改造，可临时加
+`ATTUNE_LONGTEXT_UI_BACKGROUND_BIND=0` 做人工/有头 chat 验证；部署最新 Attune
+二进制后必须重跑 strict 命令。K3 strict gate 必须包含后台 bind 可见性检查。
+
+如果只人工自测，不跑脚本，浏览器打开 K3 URL 后输入 K3 测试 vault 密码即可；不要在前端主机重新起
+`attune-server-headless`。
 
 ## 前置依赖
 

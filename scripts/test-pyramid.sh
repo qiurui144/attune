@@ -14,12 +14,14 @@
 #
 # 默认: 跑 1+2+3+5（必跑层），合计 ~3-4 min。
 # 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层；
-#       --with-longtext-e2e 加长文本向量库/对话门禁。
+#       --with-longtext-e2e 加长文本向量库/对话门禁；
+#       --headed-e2e 用可见 Chrome 跑 E2E/UI 子门禁。
 #
 # 用法:
 #   bash scripts/test-pyramid.sh                # 必跑 4 层
 #   bash scripts/test-pyramid.sh --with-corpus  # + 真语料检索
 #   bash scripts/test-pyramid.sh --with-e2e     # + 浏览器 e2e
+#   bash scripts/test-pyramid.sh --headed-e2e   # + 有头浏览器 e2e
 #   bash scripts/test-pyramid.sh --with-longtext-e2e  # + 飞机手册长文本 KB E2E
 #   bash scripts/test-pyramid.sh --all          # 标准全跑，不含长文本大语料
 #
@@ -42,10 +44,12 @@ phase() { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 WITH_CORPUS=false
 WITH_E2E=false
 WITH_LONGTEXT_E2E=false
+HEADED_E2E=false
 for arg in "$@"; do
     case "$arg" in
         --with-corpus)       WITH_CORPUS=true ;;
         --with-e2e)          WITH_E2E=true ;;
+        --headed-e2e)        WITH_E2E=true; HEADED_E2E=true ;;
         --with-longtext-e2e) WITH_E2E=true; WITH_LONGTEXT_E2E=true ;;
         --all)               WITH_CORPUS=true; WITH_E2E=true ;;
         -h|--help)
@@ -69,6 +73,7 @@ cat > "$REPORT" <<EOF
 - With corpus: $WITH_CORPUS
 - With e2e:    $WITH_E2E
 - With longtext e2e: $WITH_LONGTEXT_E2E
+- Headed e2e:  $HEADED_E2E
 
 ## Layer Results
 
@@ -144,6 +149,9 @@ if [ "$WITH_E2E" = "true" ]; then
     E2E_CMD="bash $PROJECT_DIR/tests/e2e/run_all.sh"
     if [ "$WITH_LONGTEXT_E2E" = "true" ]; then
         E2E_CMD="ATTUNE_E2E_LONGTEXT=1 bash $PROJECT_DIR/tests/e2e/run_all.sh"
+    fi
+    if [ "$HEADED_E2E" = "true" ]; then
+        E2E_CMD="ATTUNE_HEADLESS=0 $E2E_CMD"
     fi
     run_layer "e2e" "Layer 6: E2E (server binary + httpx + browser)" \
     "$E2E_CMD"

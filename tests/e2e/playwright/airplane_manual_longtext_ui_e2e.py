@@ -59,6 +59,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.environ.get("ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS", "250")),
     )
+    parser.add_argument(
+        "--background-bind-dir",
+        default=os.environ.get("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_DIR", ""),
+        help="Directory path as seen by the Attune server. Use this for remote/K3 UI tests.",
+    )
+    parser.add_argument(
+        "--background-bind-create",
+        default=os.environ.get("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_CREATE", "1"),
+        help="Create/delete local fixture files before binding. Set 0 when the path is remote/server-side.",
+    )
     parser.add_argument("--screenshot-dir", type=Path, default=Path(os.environ.get("ATTUNE_LONGTEXT_UI_SHOTS", "docs/screenshots/airplane-longtext-ui")))
     return parser.parse_args()
 
@@ -247,40 +257,45 @@ def verify_background_bind_visible(page: Page, args: argparse.Namespace, token: 
         print("[ui] background bind visibility gate skipped (ATTUNE_LONGTEXT_UI_BACKGROUND_BIND=0)")
         return
 
-    root = Path(
-        os.environ.get(
-            "ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_DIR",
-            f"~/attune-e2e-corpora/ui-background-bind-ux-{int(time.time())}",
-        )
-    ).expanduser()
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True, exist_ok=True)
+    root_raw = args.background_bind_dir or f"~/attune-e2e-corpora/ui-background-bind-ux-{int(time.time())}"
+    create_local_fixture = str(args.background_bind_create).strip().lower() not in {"0", "false", "no"}
+    root = Path(root_raw).expanduser() if create_local_fixture else Path(root_raw)
     file_count = env_int("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_FILES", 64)
-    for idx in range(file_count):
-        (root / f"ui-background-{idx:03d}.md").write_text(
-            "\n".join(
-                [
-                    f"# UI background indexing gate {idx}",
-                    "",
-                    "Playwright verifies that a background folder bind does not block the page",
-                    "and that progress is visible in the sidebar.",
-                    "attune-ui-background-indexing-gate",
-                ]
-            ),
-            encoding="utf-8",
-        )
+    if create_local_fixture:
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True, exist_ok=True)
+        for idx in range(file_count):
+            (root / f"ui-background-{idx:03d}.md").write_text(
+                "\n".join(
+                    [
+                        f"# UI background indexing gate {idx}",
+                        "",
+                        "Playwright verifies that a background folder bind does not block the page",
+                        "and that progress is visible in the sidebar.",
+                        "attune-ui-background-indexing-gate",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+    else:
+        if not root_raw:
+            raise RuntimeError(
+                "ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_CREATE=0 requires "
+                "ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_DIR or --background-bind-dir"
+            )
+        print(f"[ui] using pre-existing server-side background bind dir: {root_raw}")
 
     target_ms = env_int("ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_RETURN_MS_MAX", 2000)
     started = time.perf_counter()
     _, data = request_json(
         args,
-        "POST",
-        "/api/v1/index/bind",
-        {
-            "path": str(root),
-            "recursive": True,
-            "file_types": ["md", "txt"],
+            "POST",
+            "/api/v1/index/bind",
+            {
+                "path": str(root_raw if not create_local_fixture else root),
+                "recursive": True,
+                "file_types": ["md", "txt"],
             "corpus_domain": "ux",
             "background": True,
         },
