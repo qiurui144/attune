@@ -141,6 +141,15 @@ run() {
   fi
 }
 
+run_to_file() {
+  local output="$1"
+  shift
+  log "+ $* > $output"
+  if [ "$DRY_RUN" != "1" ]; then
+    "$@" > "$output"
+  fi
+}
+
 write_report_header() {
   {
     echo "# riscv64 Attune Server Deb Build Report"
@@ -314,9 +323,9 @@ append_report '```'
 
 append_report "## Debian Build"
 run dpkg-deb --build --root-owner-group "$STAGE" "$DEB"
-run sha256sum "$DEB" > "$SHA"
-run dpkg-deb --info "$DEB" > "$INFO"
-run dpkg-deb --contents "$DEB" > "$CONTENTS"
+run_to_file "$SHA" sha256sum "$DEB"
+run_to_file "$INFO" dpkg-deb --info "$DEB"
+run_to_file "$CONTENTS" dpkg-deb --contents "$DEB"
 
 append_report "Package: $DEB"
 append_report "SHA256: $SHA"
