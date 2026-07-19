@@ -107,6 +107,45 @@ attune 当前是 single-vault. NAS 多用户场景:
 
 Scheduler 镜像 build pipeline 由 scheduler 项目维护, 此处仅描述 attune 端集成。FormFactor 自动检测为 `LocalSchedulerAppliance`，LLM/embedding/rerank/OCR/ASR 默认经 scheduler `:8090` 统一收口。
 
+### K3 / NAS riscv64 headless server deb
+
+K3/NAS Web 交付使用 headless server `.deb`，不是 Tauri 桌面包。Attune 包只交付
+Web/API/control plane：vault、知识库导入、上传、搜索、chat 路由、设置、导出、
+plugin/WASM runtime、隐私门禁和 systemd 服务。ORT、Sherpa、模型权重、RVV/IME
+worker、其它推理 runtime 和模型生命周期全部由 scheduler `.deb` 管理。
+
+构建 Attune 包：
+
+```bash
+bash scripts/release/build-riscv64-server-deb.sh
+```
+
+安装到 K3/NAS：
+
+```bash
+sudo dpkg -i dist/release/riscv64-server-deb/attune-server_*_riscv64.deb
+sudo systemctl status attune-server --no-pager
+```
+
+默认监听 `0.0.0.0:18900`。安装后从局域网浏览器打开：
+
+```text
+http://<nas-ip>:18900
+```
+
+验收已安装包：
+
+```bash
+ATTUNE_K3_HOST=<nas-ip> \
+ATTUNE_K3_BASE_URL=http://<nas-ip>:18900 \
+ATTUNE_K3_SCHEDULER_URL=http://<nas-ip>:8090 \
+  bash scripts/release/test-k3-nas-web-demo.sh \
+    --deb dist/release/riscv64-server-deb/attune-server_*_riscv64.deb
+```
+
+K3/NAS gate 必须使用 K3/NAS 自己的文件系统路径做 `/api/v1/index/bind`，
+前端主机只能作为浏览器或 Playwright driver，不能把前端主机路径传给服务端。
+
 ### 系统服务
 
 Edge scheduler 镜像出厂 systemd unit 启动, 含:

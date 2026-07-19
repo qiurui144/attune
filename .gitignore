@@ -78,6 +78,11 @@ apps/attune-desktop/keys/dev_signing.key.pub
 # 测试报告 (运行时生成)
 tests/reports/
 
+# Canonical generated release/maintenance outputs
+dist/release/
+reports/release/
+reports/maintenance/
+
 # 临时调试目录 (CLAUDE.md 约定)
 tmp/
 

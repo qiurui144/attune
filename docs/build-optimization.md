@@ -19,7 +19,7 @@ bash scripts/build-optimized.sh --profile portable --package attune-server
 bash scripts/build-optimized.sh --profile x86_64-v3 --package attune-server
 bash scripts/build-optimized.sh --profile x86_64-v4 --package attune-server
 bash scripts/build-optimized.sh --profile native --package attune-server --check
-bash scripts/build-optimized.sh --profile rva23 --package attune-server --features ort-dynamic --no-default-features
+bash scripts/build-optimized.sh --profile rva23 --package attune-server --features scheduler-runtime,artifact-export-rich,wasm-runtime -- --no-default-features
 ```
 
 Profile intent:
@@ -37,6 +37,36 @@ The `rva23` profile can be overridden without editing the repo:
 ```bash
 ATTUNE_RVA23_RUSTFLAGS='-C target-cpu=generic-rv64 -C target-feature=+v,+zba,+zbb,+zbs' \
   bash scripts/build-optimized.sh --profile rva23 --package attune-server
+```
+
+## riscv64 NAS Web Server Deb
+
+Use the release wrapper for K3/NAS Web delivery:
+
+```bash
+bash scripts/release/build-riscv64-server-deb.sh
+```
+
+The wrapper uses the SpacemiT private toolchain by default:
+
+```text
+/data/RV/rv-spacemit-toolchain/spacemit-toolchain-linux-glibc-x86_64-v1.2.2
+```
+
+The Attune package profile is scheduler-owned inference plus complete Web/API:
+
+```bash
+--no-default-features --features scheduler-runtime,artifact-export-rich,wasm-runtime
+```
+
+This keeps NAS Web workflows complete while excluding Attune-owned local
+inference runtimes. ORT, Sherpa, model weights, RVV/IME workers, and model
+lifecycle are scheduler `.deb` responsibilities, not Attune `.deb`
+responsibilities. The output roots are:
+
+```text
+dist/release/riscv64-server-deb/
+reports/release/
 ```
 
 ## Artifact Audit
