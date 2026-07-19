@@ -35,6 +35,7 @@ fn builtin_capabilities_registered_oss_only() {
         "reranker",
         "ocr",
         "asr",
+        "tts",
         "llm",
         "vlm",
         "web-search",
@@ -48,8 +49,8 @@ fn builtin_capabilities_registered_oss_only() {
     }
     assert_eq!(
         caps.len(),
-        9,
-        "exactly 9 builtin heavy capabilities expected"
+        10,
+        "exactly 10 builtin heavy capabilities expected"
     );
     // OSS boundary core assertion (spec §9): zero Pro/Enterprise tier.
     assert!(
@@ -109,6 +110,10 @@ fn capability_metadata_flags_are_correct() {
     assert!(ocr.requires_local_model);
     let asr = state.capabilities.get("asr").unwrap();
     assert!(asr.requires_local_model);
+    let tts = state.capabilities.get("tts").unwrap();
+    assert!(tts.requires_local_model);
+    assert!(!tts.enabled, "tts starts disabled until scheduler readiness is observed");
+    assert_eq!(tts.health, CapabilityHealth::Unavailable);
 
     let llm = state.capabilities.get("llm").unwrap();
     assert!(llm.allows_outbound, "llm defaults to cloud (outbound)");
@@ -267,5 +272,5 @@ fn projection_does_not_deadlock_on_repeated_calls() {
         let _v = state.vault.lock().unwrap();
     }
     state.refresh_capability_health();
-    assert_eq!(state.capabilities.list().len(), 9);
+    assert_eq!(state.capabilities.list().len(), 10);
 }

@@ -20,6 +20,25 @@ for script in "${required[@]}"; do
   bash -n "$script"
 done
 
+desktop_hooks=(
+  "$ROOT/apps/attune-desktop/scripts/preinst.sh"
+  "$ROOT/apps/attune-desktop/scripts/prerm.sh"
+  "$ROOT/apps/attune-desktop/scripts/postinst.sh"
+  "$ROOT/apps/attune-desktop/scripts/postrm.sh"
+)
+
+for script in "${desktop_hooks[@]}"; do
+  test -f "$script"
+  bash -n "$script"
+done
+
+for script in "$ROOT/apps/attune-desktop/scripts/preinst.sh" "$ROOT/apps/attune-desktop/scripts/prerm.sh"; do
+  if grep -Eq '\bp(kill|grep)\b[^\n]*-[A-Za-z]*f' "$script"; then
+    echo "desktop maintainer hooks must not stop Attune with pgrep/pkill -f: $script" >&2
+    exit 1
+  fi
+done
+
 bash "$ROOT/scripts/release/build-riscv64-server-deb.sh" \
   --dry-run \
   --version 9.9.9-test \

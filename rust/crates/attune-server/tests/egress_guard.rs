@@ -25,12 +25,14 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
     ),
     (
         "attune-server/src/routes/llm.rs",
-        1,
+        2,
         "probe_local_scheduler: loopback + RFC1918 subnet scan local; \
          user-supplied non-local candidates gated via OutboundGate kind=Llm \
-         (R1.1b). LLM endpoint tests and status probes route through shared \
-         providers / LocalSchedulerClient instead of constructing raw HTTP \
-         clients in route handlers.",
+         (R1.1b). The route builds a remote client for gated non-local probes \
+         and a no_proxy local client so loopback/RFC1918 probes cannot be \
+         redirected through ambient proxy settings. LLM endpoint tests and \
+         status probes route through shared providers / LocalSchedulerClient \
+         instead of constructing raw HTTP clients in route handlers.",
     ),
     (
         "attune-server/src/test_support.rs",

@@ -9,12 +9,34 @@ set -e
 LOG_TAG="attune-prerm"
 log() { logger -t "$LOG_TAG" -- "$1"; printf '[attune-prerm] %s\n' "$1"; }
 
+attune_process_pids() {
+  for proc in /proc/[0-9]*; do
+    [ -d "$proc" ] || continue
+    pid="${proc#/proc/}"
+    [ "$pid" != "$$" ] || continue
+    exe="$(readlink "$proc/exe" 2>/dev/null || true)"
+    base="${exe##*/}"
+    case "$base" in
+      attune-server-headless|attune-desktop|attune)
+        printf '%s\n' "$pid"
+        ;;
+    esac
+  done
+}
+
+signal_attune_processes() {
+  signal="$1"
+  pids="$(attune_process_pids)"
+  [ -n "$pids" ] || return 0
+  kill "-$signal" $pids 2>/dev/null || true
+}
+
 # 1. 杀任何在跑的 attune-server / attune-desktop 进程
-if pgrep -f 'attune-server-headless|attune-desktop|attune ' >/dev/null 2>&1; then
+if [ -n "$(attune_process_pids)" ]; then
   log "stopping attune processes..."
-  pkill -TERM -f 'attune-server-headless|attune-desktop|attune ' || true
+  signal_attune_processes TERM
   sleep 2
-  pkill -KILL -f 'attune-server-headless|attune-desktop|attune ' 2>/dev/null || true
+  signal_attune_processes KILL
 fi
 
 # 2. 移除旧版 Attune 写入的 Ollama HSA override（仅当有明确 marker）。
