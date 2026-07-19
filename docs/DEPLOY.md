@@ -114,11 +114,16 @@ Web/API/control plane：vault、知识库导入、上传、搜索、chat 路由�
 plugin/WASM runtime、隐私门禁和 systemd 服务。ORT、Sherpa、模型权重、RVV/IME
 worker、其它推理 runtime 和模型生命周期全部由 scheduler `.deb` 管理。
 
-构建 Attune 包：
+普通用户一键构建 Attune 包：
 
 ```bash
-bash scripts/release/build-riscv64-server-deb.sh
+bash scripts/package-riscv64-deb.sh
 ```
+
+该入口默认使用 SpacemiT 私有编译链
+`/data/RV/rv-spacemit-toolchain/spacemit-toolchain-linux-glibc-x86_64-v1.2.2`，
+并调用底层 `scripts/release/build-riscv64-server-deb.sh`。高级调试时才直接使用
+底层脚本。
 
 安装到 K3/NAS：
 
@@ -145,6 +150,19 @@ ATTUNE_K3_SCHEDULER_URL=http://<nas-ip>:8090 \
 
 K3/NAS gate 必须使用 K3/NAS 自己的文件系统路径做 `/api/v1/index/bind`，
 前端主机只能作为浏览器或 Playwright driver，不能把前端主机路径传给服务端。
+
+K3 上 RVV/IME 是否真的带来性能优化，不由 Attune `.deb` 的指令审计证明。
+`test-k3-nas-web-demo.sh` 在提供 scheduler URL 时会默认运行：
+
+```bash
+bash scripts/release/test-k3-rvv-runtime-gate.sh \
+  --scheduler-url http://<nas-ip>:8090
+```
+
+该 gate 会调用 scheduler contract、`/models`、`/capacity` 和
+`/data/RV/k3-scheduler/tools/worker_benchmark_gate.py`，并要求 scheduler 暴露
+RVV/IME/SpacemiT 加速元数据与 live latency 证据。若失败，应修 scheduler
+runtime/provider/model `.deb`，不要把 ORT、Sherpa 或模型 runtime 放回 Attune 包。
 
 ### 系统服务
 

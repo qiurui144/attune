@@ -16,6 +16,7 @@ LONGTEXT_MANIFEST="${ATTUNE_K3_LONGTEXT_MANIFEST:-}"
 SKIP_DEB_CHECK=0
 SKIP_INSTALL=0
 SKIP_UI=0
+SKIP_RVV_PERFORMANCE=0
 DRY_RUN=0
 
 while [ "$#" -gt 0 ]; do
@@ -56,6 +57,10 @@ while [ "$#" -gt 0 ]; do
       SKIP_UI=1
       shift
       ;;
+    --skip-rvv-performance)
+      SKIP_RVV_PERFORMANCE=1
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -80,6 +85,7 @@ Options:
   --skip-deb-check       Skip local dpkg-deb architecture checks.
   --skip-install         Do not scp/dpkg install over SSH.
   --skip-ui              Skip optional Playwright headed/browser gate.
+  --skip-rvv-performance Skip scheduler RVV/IME runtime performance gate.
   --dry-run              Write planned report without touching the target.
 HELP
       exit 0
@@ -122,6 +128,7 @@ report_header() {
     echo "- Scheduler URL: ${SCHEDULER_URL:-<none>}"
     echo "- Remote tmp: $REMOTE_TMP"
     echo "- Server-side bind dir: $BIND_DIR"
+    echo "- Skip RVV performance gate: $SKIP_RVV_PERFORMANCE"
     echo "- Dry run: $DRY_RUN"
     echo
     echo "## Package Boundary"
@@ -164,6 +171,7 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- Install package on K3/NAS over SSH unless --skip-install is set."
   append_report "- Restart attune-server.service and check Web health."
   append_report "- Probe scheduler contract when scheduler URL is provided."
+  append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME performance metadata when scheduler URL is provided."
   append_report "- Use K3/NAS-local bind path for knowledge-base import."
   append_report "- Run optional Playwright UI gate when manifest and driver are available."
   log "dry-run report: $REPORT"
@@ -216,9 +224,19 @@ run curl -fsS "$BASE_URL/api/v1/status/diagnostics"
 if [ -n "$SCHEDULER_URL" ]; then
   append_report "## Scheduler Contract"
   run python3 "$ROOT/scripts/probe-edge-scheduler-contract.py" --base-url "$SCHEDULER_URL" --strict
+  append_report "## K3 RVV Runtime Performance Gate"
+  if [ "$SKIP_RVV_PERFORMANCE" = "1" ]; then
+    append_report "Skipped by --skip-rvv-performance."
+  else
+    run bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
+      --scheduler-url "$SCHEDULER_URL" \
+      --reports-dir "$REPORTS_DIR"
+  fi
 else
   append_report "## Scheduler Contract"
   append_report "Skipped because no scheduler URL was provided."
+  append_report "## K3 RVV Runtime Performance Gate"
+  append_report "Skipped because no scheduler URL was provided. worker_benchmark_gate.py will run when ATTUNE_K3_SCHEDULER_URL or --scheduler-url is set."
 fi
 
 append_report "## Vault and Knowledge Base Gate"

@@ -44,10 +44,11 @@ ATTUNE_RVA23_RUSTFLAGS='-C target-cpu=generic-rv64 -C target-feature=+v,+zba,+zb
 Use the release wrapper for K3/NAS Web delivery:
 
 ```bash
-bash scripts/release/build-riscv64-server-deb.sh
+bash scripts/package-riscv64-deb.sh
 ```
 
-The wrapper uses the SpacemiT private toolchain by default:
+This is the ordinary-user one-key entrypoint. It uses the SpacemiT private
+toolchain by default:
 
 ```text
 /data/RV/rv-spacemit-toolchain/spacemit-toolchain-linux-glibc-x86_64-v1.2.2
@@ -69,6 +70,12 @@ dist/release/riscv64-server-deb/
 reports/release/
 ```
 
+Use the lower-level script only when debugging package internals:
+
+```bash
+bash scripts/release/build-riscv64-server-deb.sh
+```
+
 ## Artifact Audit
 
 After an RVA23 build, verify the shipped binary instead of trusting build flags:
@@ -85,9 +92,49 @@ The audit checks:
 - RVV instruction mnemonics in core vector-search libraries
   `libnumkong*.rlib` and `libusearch*.rlib`.
 
+Release builds run this audit in strict mode by default:
+
+```text
+ATTUNE_RVV_AUDIT_STRICT=1
+ATTUNE_RVV_AUDIT_MIN_MAIN_LINES=1
+ATTUNE_RVV_AUDIT_MIN_CORE_LINES=1
+```
+
+This prevents a package from passing only because the ELF attribute mentions
+RVV. It still does not prove K3 inference performance, because ORT, Sherpa,
+model workers, and execution-provider dispatch live in the scheduler package.
+
 Set `ATTUNE_RVV_AUDIT_SCAN_NATIVE=1` to inspect all native `.a` archives. Keep
 that off for routine checks because large native dependency trees produce noisy
 output.
+
+## K3 Runtime Performance Gate
+
+For K3/NAS acceptance, run the scheduler runtime gate against the installed
+scheduler service:
+
+```bash
+ATTUNE_K3_SCHEDULER_URL=http://<nas-ip>:8090 \
+  bash scripts/release/test-k3-rvv-runtime-gate.sh
+```
+
+The full NAS Web demo invokes this gate automatically when
+`ATTUNE_K3_SCHEDULER_URL` or `--scheduler-url` is provided. The gate requires
+scheduler RVV/IME/SpacemiT metadata and live latency evidence from
+`/benchmark/contract`, `/models`, `/capacity`, and
+`/data/RV/k3-scheduler/tools/worker_benchmark_gate.py`. Thresholds can be tuned
+without editing the repository:
+
+```bash
+ATTUNE_K3_RVV_MAX_EMBED_P50_MS=200 \
+ATTUNE_K3_RVV_MAX_RERANK_P50_MS=300 \
+  bash scripts/release/test-k3-rvv-runtime-gate.sh \
+    --scheduler-url http://<nas-ip>:8090
+```
+
+If this gate fails, fix the scheduler runtime/provider/model `.deb` pipeline.
+Do not move ORT, Sherpa, model weights, or inference runtime ownership into the
+Attune `.deb`.
 
 ## Worker Acceleration Classes
 

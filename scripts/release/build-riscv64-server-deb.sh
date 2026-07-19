@@ -334,7 +334,10 @@ append_report "Contents: $CONTENTS"
 
 if [ "$SKIP_RVV_AUDIT" != "1" ]; then
   append_report "## RVV Audit"
-  if bash "$ROOT/scripts/audit-rvv-vectorization.sh" "$BIN" > "$RVV_AUDIT" 2>&1; then
+  if ATTUNE_RVV_AUDIT_STRICT="${ATTUNE_RVV_AUDIT_STRICT:-1}" \
+      ATTUNE_RVV_AUDIT_MIN_MAIN_LINES="${ATTUNE_RVV_AUDIT_MIN_MAIN_LINES:-1}" \
+      ATTUNE_RVV_AUDIT_MIN_CORE_LINES="${ATTUNE_RVV_AUDIT_MIN_CORE_LINES:-1}" \
+        bash "$ROOT/scripts/audit-rvv-vectorization.sh" "$BIN" > "$RVV_AUDIT" 2>&1; then
     append_report "RVV audit: $RVV_AUDIT"
   else
     append_report "RVV audit failed: $RVV_AUDIT"
