@@ -63,4 +63,16 @@ bash "$ROOT/scripts/maintenance/clean-workspace.sh" \
 test -f "$TMP/maintenance/clean-workspace-dry-run.md"
 grep -q "Dry Run" "$TMP/maintenance/clean-workspace-dry-run.md"
 
+bash "$ROOT/scripts/maintenance/clean-workspace.sh" \
+  --dry-run \
+  --report-dir "$TMP/maintenance" \
+  --root tmp \
+  --root tests/reports
+grep -q '`tmp`' "$TMP/maintenance/clean-workspace-dry-run.md"
+grep -q '`tests/reports`' "$TMP/maintenance/clean-workspace-dry-run.md"
+if grep -q '`dist/release`' "$TMP/maintenance/clean-workspace-dry-run.md"; then
+  echo "custom-root cleanup unexpectedly includes dist/release" >&2
+  exit 1
+fi
+
 echo "release script contracts PASS"
