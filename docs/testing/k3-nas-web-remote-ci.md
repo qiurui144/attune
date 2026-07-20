@@ -6,9 +6,29 @@ scheduler、NAS 服务器三者路径/地址混用导致误测。
 
 ## ATTUNE_K3_LONGTEXT_MANIFEST
 
-`ATTUNE_K3_LONGTEXT_MANIFEST` 指向 CI runner 本地可读的 long-text benchmark JSON。
-现有标准样例是 `tests/e2e/airplane_manual_longtext_cases.json`，由
-`scripts/build-airplane-manual-longtext-dataset.py` 生成。
+标准 long-text 数据源是 GitHub 仓库
+`https://github.com/shiroinekotfs/airplane-manual-collection.git`，固定 commit
+`afe8288495338880e165f77bb9afe9946f366a52`。`scripts/build-airplane-manual-longtext-dataset.py`
+从该仓库生成 manifest；默认完整演示 profile 是 `edge_scheduler_comprehensive`。
+
+`ATTUNE_K3_LONGTEXT_E2E=1` 会在 NAS host 本机运行
+`tests/e2e/airplane_manual_longtext_e2e.py`，完整覆盖 GitHub airplane corpus
+materialize、server-side bind、embedding/vector drain、search、chat、multiturn。
+默认只把 scheduler generation coverage 作为报告项暴露，不作为 Attune long-text
+阻断门；如果需要把每个非安全类 chat query 都强制要求走 scheduler 生成，显式设置
+`ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1`。
+
+airplane long-text gate 默认设置 `ATTUNE_K3_LONGTEXT_PDF_OCR=0`，脚本会在运行
+airplane bind 前重启 NAS 侧 `attune-server` 并禁用 server-side PDF OCR。这样该门只验证
+Attune 的 bind、向量生成、检索、grounded chat、多轮和 UI，不让扫描版 PDF OCR 的 scheduler
+波动把整条长文本演示阻塞。OCR 正确性/性能应由 scheduler 的 `kb.document.ocr_recognize`
+self-test 和 Attune OCR 专项门覆盖；需要把 airplane 也作为 OCR 压测时，显式设置
+`ATTUNE_K3_LONGTEXT_PDF_OCR=1`。
+
+`ATTUNE_K3_LONGTEXT_MANIFEST` 指向 CI runner 本地可读的 long-text benchmark JSON，
+用于可选 UI gate。现有标准样例是 `tests/e2e/airplane_manual_longtext_cases.json`。
+如果先跑了 `ATTUNE_K3_LONGTEXT_E2E=1`，K3 脚本会把 NAS 生成的 manifest 拷回
+runner 并复用它做 UI gate。
 
 必需内容：
 
@@ -24,8 +44,13 @@ scheduler、NAS 服务器三者路径/地址混用导致误测。
 
 远端 K3 演示中的注意点：
 
+- `ATTUNE_K3_LONGTEXT_E2E=1` 的 API 建库和评测必须在 NAS/K3 本机执行。
 - `ATTUNE_K3_LONGTEXT_MANIFEST` 只给 runner 上的 Playwright/UI gate 读取 query 和目标阈值。
 - UI gate 假设 long-text API gate 已经把语料 materialize、bind、drain embedding queue。
+- scheduler 生成覆盖率不归 Attune 默认阻断；Attune 默认阻断 search、chat grounding/safety、
+  answer budget、multiturn 和 UI。
+- `ATTUNE_K3_LONGTEXT_PDF_OCR=0` 是默认 CI 隔离策略；开启 OCR 时要把 PDF OCR 卡顿、
+  scheduler OCR timeout、metadata-only degradation 单独归档，不和向量/search/chat 性能混算。
 - 如果 Attune server 跑在 NAS/K3 上，long-text API gate 必须在 NAS/K3 本机执行，或使用明确的
   NAS/K3 server-side corpus path；不能把 runner 本地路径传给 `/api/v1/index/bind`。
 

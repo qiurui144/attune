@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEB="${ATTUNE_K3_DEB:-}"
 HOST="${ATTUNE_K3_HOST:-}"
 SSH_USER="${ATTUNE_K3_SSH_USER:-root}"
+SSH_OPTS_RAW="${ATTUNE_K3_SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
+SSH_PASSWORD="${ATTUNE_K3_SSH_PASSWORD:-}"
 BASE_URL="${ATTUNE_K3_BASE_URL:-}"
 SCHEDULER_URL="${ATTUNE_K3_SCHEDULER_URL:-}"
 REPORTS_DIR="$ROOT/reports/release"
@@ -13,6 +15,16 @@ REMOTE_TMP="${ATTUNE_K3_REMOTE_TMP:-}"
 PASSWORD="${ATTUNE_K3_E2E_PASSWORD:-e2e-pass-2026}"
 BIND_DIR="${ATTUNE_K3_BACKGROUND_BIND_DIR:-}"
 LONGTEXT_MANIFEST="${ATTUNE_K3_LONGTEXT_MANIFEST:-}"
+LONGTEXT_E2E="${ATTUNE_K3_LONGTEXT_E2E:-0}"
+LONGTEXT_PROFILE="${ATTUNE_K3_LONGTEXT_PROFILE:-edge_scheduler_comprehensive}"
+LONGTEXT_LIMIT_DOCS="${ATTUNE_K3_LONGTEXT_LIMIT_DOCS:-}"
+LONGTEXT_CORPUS_DIR="${ATTUNE_K3_LONGTEXT_CORPUS_DIR:-}"
+LONGTEXT_REMOTE_RUNNER="${ATTUNE_K3_LONGTEXT_REMOTE_RUNNER:-}"
+LONGTEXT_REMOTE_MANIFEST="${ATTUNE_K3_LONGTEXT_REMOTE_MANIFEST:-}"
+LONGTEXT_REMOTE_RESULTS="${ATTUNE_K3_LONGTEXT_REMOTE_RESULTS:-}"
+LONGTEXT_REQUIRE_SCHEDULER_GENERATION="${ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION:-0}"
+LONGTEXT_PDF_OCR="${ATTUNE_K3_LONGTEXT_PDF_OCR:-0}"
+AIRPLANE_LONGTEXT_REPO_URL="https://github.com/shiroinekotfs/airplane-manual-collection.git"
 SERVER_SCHEDULER_BASE="${ATTUNE_K3_SERVER_SCHEDULER_BASE:-http://127.0.0.1:8090}"
 SCHEDULER_CHAT_MODEL="${ATTUNE_K3_SCHEDULER_CHAT_MODEL:-llm-summary}"
 CONFIGURE_SCHEDULER_AI="${ATTUNE_K3_CONFIGURE_SCHEDULER_AI:-}"
@@ -104,7 +116,21 @@ Environment:
                                 Usually http://127.0.0.1:8090 when scheduler is co-located.
   ATTUNE_K3_SCHEDULER_URL       Scheduler URL as seen by this CI runner.
                                 Use a runner-side SSH tunnel when scheduler is loopback-only.
+  ATTUNE_K3_SSH_OPTS            Extra ssh/scp options. Defaults to disabling runner
+                                known_hosts writes/checks for disposable K3 CI targets.
+  ATTUNE_K3_SSH_PASSWORD        Password for non-interactive SSH/scp via sshpass -e.
+                                Omit when key-based SSH is configured.
   ATTUNE_K3_API_CONTRACT=0      Skip the strict NAS Web API contract probe.
+  ATTUNE_K3_LONGTEXT_E2E=1      Run the full airplane GitHub long-text API gate
+                                on the NAS host before the optional UI gate.
+  ATTUNE_K3_LONGTEXT_PROFILE    Long-text profile. Defaults to edge_scheduler_comprehensive.
+  ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1
+                                Require every non-safety long-text chat row to use
+                                scheduler answer generation. Defaults to 0; scheduler
+                                generation coverage is reported but does not block Attune.
+  ATTUNE_K3_LONGTEXT_PDF_OCR=1  Keep server-side PDF OCR enabled for the airplane long-text
+                                bind. Defaults to 0 so scanned manuals degrade to metadata
+                                instead of blocking vector/search/chat validation.
   ATTUNE_K3_LONGTEXT_MANIFEST   Local JSON manifest for the optional long-text UI gate.
                                 The corpus must already be materialized and indexed
                                 on the NAS host before the UI-only gate runs.
@@ -134,6 +160,18 @@ fi
 if [ -z "$API_CONTRACT_BIND_DIR" ]; then
   API_CONTRACT_BIND_DIR="$REMOTE_TMP/api-contract-bind"
 fi
+if [ -z "$LONGTEXT_CORPUS_DIR" ]; then
+  LONGTEXT_CORPUS_DIR="$REMOTE_TMP/airplane-manual-collection"
+fi
+if [ -z "$LONGTEXT_REMOTE_RUNNER" ]; then
+  LONGTEXT_REMOTE_RUNNER="$REMOTE_TMP/airplane-longtext-runner"
+fi
+if [ -z "$LONGTEXT_REMOTE_MANIFEST" ]; then
+  LONGTEXT_REMOTE_MANIFEST="$REMOTE_TMP/attune-airplane-longtext-$LONGTEXT_PROFILE.json"
+fi
+if [ -z "$LONGTEXT_REMOTE_RESULTS" ]; then
+  LONGTEXT_REMOTE_RESULTS="$REMOTE_TMP/airplane-longtext-results"
+fi
 if [ -z "$CONFIGURE_SCHEDULER_AI" ]; then
   if [ -n "$SCHEDULER_URL" ]; then
     CONFIGURE_SCHEDULER_AI=1
@@ -160,6 +198,18 @@ case "$API_CONTRACT" in
   0|1) ;;
   *) echo "ATTUNE_K3_API_CONTRACT must be 0 or 1, got: $API_CONTRACT" >&2; exit 2 ;;
 esac
+case "$LONGTEXT_E2E" in
+  0|1) ;;
+  *) echo "ATTUNE_K3_LONGTEXT_E2E must be 0 or 1, got: $LONGTEXT_E2E" >&2; exit 2 ;;
+esac
+case "$LONGTEXT_REQUIRE_SCHEDULER_GENERATION" in
+  0|1) ;;
+  *) echo "ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION must be 0 or 1, got: $LONGTEXT_REQUIRE_SCHEDULER_GENERATION" >&2; exit 2 ;;
+esac
+case "$LONGTEXT_PDF_OCR" in
+  0|1) ;;
+  *) echo "ATTUNE_K3_LONGTEXT_PDF_OCR must be 0 or 1, got: $LONGTEXT_PDF_OCR" >&2; exit 2 ;;
+esac
 
 mkdir -p "$REPORTS_DIR"
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -170,6 +220,15 @@ else
 fi
 
 SSH_TARGET="$SSH_USER@$HOST"
+SSH_OPTS=()
+if [ -n "$SSH_OPTS_RAW" ]; then
+  read -r -a SSH_OPTS <<< "$SSH_OPTS_RAW"
+fi
+
+if [ -n "$SSH_PASSWORD" ] && [ "$DRY_RUN" != "1" ] && ! command -v sshpass >/dev/null 2>&1; then
+  echo "ATTUNE_K3_SSH_PASSWORD requires sshpass on the CI runner" >&2
+  exit 2
+fi
 
 log() {
   printf '[k3-demo] %s\n' "$*"
@@ -184,6 +243,12 @@ report_header() {
     echo "- Deb: ${DEB:-<none>}"
     echo "- Host: ${HOST:-<none>}"
     echo "- SSH user: $SSH_USER"
+    echo "- SSH opts: ${SSH_OPTS_RAW:-<none>}"
+    if [ -n "$SSH_PASSWORD" ]; then
+      echo "- SSH auth: password via sshpass -e"
+    else
+      echo "- SSH auth: default ssh client credentials"
+    fi
     echo "- Base URL: ${BASE_URL:-<none>}"
     echo "- Scheduler URL: ${SCHEDULER_URL:-<none>}"
     echo "- Server scheduler base: $SERVER_SCHEDULER_BASE"
@@ -196,6 +261,15 @@ report_header() {
     echo "- Require scheduler performance thresholds: $RVV_REQUIRE_PERF"
     echo "- Run NAS Web API contract: $API_CONTRACT"
     echo "- Long-text manifest: ${LONGTEXT_MANIFEST:-<none>}"
+    echo "- Long-text E2E: $LONGTEXT_E2E"
+    echo "- Airplane long-text repo: $AIRPLANE_LONGTEXT_REPO_URL"
+    echo "- Long-text profile: $LONGTEXT_PROFILE"
+    echo "- Long-text corpus dir: $LONGTEXT_CORPUS_DIR"
+    echo "- Long-text remote runner: $LONGTEXT_REMOTE_RUNNER"
+    echo "- Long-text remote manifest: $LONGTEXT_REMOTE_MANIFEST"
+    echo "- Long-text remote results: $LONGTEXT_REMOTE_RESULTS"
+    echo "- Require long-text scheduler generation: $LONGTEXT_REQUIRE_SCHEDULER_GENERATION"
+    echo "- Long-text PDF OCR guard: ATTUNE_K3_LONGTEXT_PDF_OCR=$LONGTEXT_PDF_OCR"
     echo "- Skip RVV performance gate: $SKIP_RVV_PERFORMANCE"
     echo "- Dry run: $DRY_RUN"
     echo
@@ -233,9 +307,69 @@ run() {
   fi
 }
 
+run_display() {
+  local display="$1"
+  shift
+  log "+ $display"
+  {
+    echo
+    echo '```bash'
+    echo "$display"
+    echo '```'
+  } >> "$REPORT"
+  if [ "$DRY_RUN" != "1" ]; then
+    "$@"
+  fi
+}
+
+run_ssh() {
+  local cmd="$1"
+  if [ -n "$SSH_PASSWORD" ]; then
+    run_display \
+      "sshpass -e ssh ${SSH_OPTS_RAW:-} $SSH_TARGET $(printf '%q' "$cmd")" \
+      env SSHPASS="$SSH_PASSWORD" sshpass -e ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$cmd"
+  else
+    run ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$cmd"
+  fi
+}
+
+run_scp() {
+  if [ -n "$SSH_PASSWORD" ]; then
+    local rendered=()
+    local arg
+    for arg in "$@"; do
+      rendered+=("$(printf '%q' "$arg")")
+    done
+    run_display \
+      "sshpass -e scp ${SSH_OPTS_RAW:-} ${rendered[*]}" \
+      env SSHPASS="$SSH_PASSWORD" sshpass -e scp "${SSH_OPTS[@]}" "$@"
+  else
+    run scp "${SSH_OPTS[@]}" "$@"
+  fi
+}
+
 remote() {
   local cmd="$1"
-  run ssh "$SSH_TARGET" "$cmd"
+  run_ssh "$cmd"
+}
+
+configure_longtext_pdf_ocr_guard() {
+  if [ "$LONGTEXT_E2E" != "1" ]; then
+    return
+  fi
+  if [ -z "$HOST" ]; then
+    return
+  fi
+
+  append_report "## Long-text PDF OCR Guard"
+  if [ "$LONGTEXT_PDF_OCR" = "1" ]; then
+    append_report "Server-side PDF OCR remains enabled for airplane long-text bind."
+    remote "rm -f /etc/systemd/system/attune-server.service.d/90-attune-k3-longtext-pdf-ocr.conf && systemctl daemon-reload && systemctl restart attune-server.service && systemctl is-active attune-server.service"
+    return
+  fi
+
+  append_report "Server-side PDF OCR disabled for airplane long-text bind (ATTUNE_K3_LONGTEXT_PDF_OCR=0). This keeps the Attune vector/search/chat gate focused on indexing and retrieval; OCR-specific coverage belongs to scheduler/attune OCR gates."
+  remote "mkdir -p /etc/systemd/system/attune-server.service.d && printf '%s\n' '[Service]' 'Environment=ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_LOCAL_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_PDF_OCR_ENABLED=0' > /etc/systemd/system/attune-server.service.d/90-attune-k3-longtext-pdf-ocr.conf && systemctl daemon-reload && systemctl restart attune-server.service && systemctl is-active attune-server.service"
 }
 
 report_header
@@ -249,6 +383,8 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
   append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, and chat scheduler metadata."
+  append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=0 restarts attune-server with PDF OCR disabled before airplane bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=1 only for OCR-specific validation."
+  append_report "- Airplane GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1, run tests/e2e/airplane_manual_longtext_e2e.py on the NAS host with source repo $AIRPLANE_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized corpus under $LONGTEXT_CORPUS_DIR, then copy the generated manifest back for the optional UI gate; scheduler generation coverage is reported and only blocks when ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1."
   append_report "- Use K3/NAS-local bind path for knowledge-base import."
   append_report "- Require local scheduler chat metadata and poll async answer jobs when scheduler chat is required."
   append_report "- Run optional Playwright UI gate when ATTUNE_K3_LONGTEXT_MANIFEST points to a local long-text manifest and the NAS-side corpus is already indexed."
@@ -280,8 +416,8 @@ if [ "$SKIP_INSTALL" != "1" ]; then
   fi
   append_report "## Remote Install"
   remote "mkdir -p '$REMOTE_TMP'"
-  run ssh "$SSH_TARGET" "uname -m && sed -n '1,8p' /etc/os-release"
-  run scp "$DEB" "$SSH_TARGET:$REMOTE_TMP/"
+  run_ssh "uname -m && sed -n '1,8p' /etc/os-release"
+  run_scp "$DEB" "$SSH_TARGET:$REMOTE_TMP/"
   remote "dpkg -i '$REMOTE_TMP/$(basename "$DEB")' || apt-get -f install -y"
   remote "systemctl restart attune-server.service && systemctl is-active attune-server.service"
   remote "systemctl status attune-server.service --no-pager | sed -n '1,20p'"
@@ -614,23 +750,63 @@ if require_scheduler:
 print(text[:500])
 PY
 
+LONGTEXT_UI_MANIFEST="$LONGTEXT_MANIFEST"
+append_report "## Airplane GitHub Longtext Gate"
+if [ "$LONGTEXT_E2E" = "1" ]; then
+  if [ -z "$HOST" ]; then
+    echo "--host or ATTUNE_K3_HOST is required for ATTUNE_K3_LONGTEXT_E2E=1" >&2
+    exit 2
+  fi
+  configure_longtext_pdf_ocr_guard
+  LONGTEXT_LOCAL_MANIFEST="$REPORTS_DIR/k3-airplane-longtext-$LONGTEXT_PROFILE-$TS.json"
+  LONGTEXT_RESULTS_TGZ="$REPORTS_DIR/k3-airplane-longtext-results-$LONGTEXT_PROFILE-$TS.tgz"
+  remote "command -v git >/dev/null || { echo 'git is required on the NAS host for airplane GitHub long-text materialization' >&2; exit 2; }"
+  remote "mkdir -p '$LONGTEXT_REMOTE_RUNNER/scripts' '$LONGTEXT_REMOTE_RUNNER/tests/e2e' '$LONGTEXT_REMOTE_RESULTS'"
+  run_scp \
+    "$ROOT/scripts/build-airplane-manual-longtext-dataset.py" \
+    "$ROOT/scripts/eval-airplane-manual-longtext-search.py" \
+    "$ROOT/scripts/eval-airplane-manual-longtext-chat.py" \
+    "$ROOT/scripts/eval-airplane-manual-longtext-multiturn.py" \
+    "$SSH_TARGET:$LONGTEXT_REMOTE_RUNNER/scripts/"
+  run_scp \
+    "$ROOT/tests/e2e/airplane_longtext_support.py" \
+    "$ROOT/tests/e2e/airplane_manual_longtext_e2e.py" \
+    "$SSH_TARGET:$LONGTEXT_REMOTE_RUNNER/tests/e2e/"
+  LONGTEXT_REMOTE_CMD="ATTUNE_BASE_URL='http://127.0.0.1:18900' ATTUNE_E2E_PASSWORD='$PASSWORD' ATTUNE_LONGTEXT_PROFILE='$LONGTEXT_PROFILE' ATTUNE_LONGTEXT_CORPUS_DIR='$LONGTEXT_CORPUS_DIR' ATTUNE_LONGTEXT_MANIFEST='$LONGTEXT_REMOTE_MANIFEST' ATTUNE_LONGTEXT_GOLDEN='$LONGTEXT_REMOTE_RESULTS/attune-airplane-longtext-$LONGTEXT_PROFILE-golden.json' ATTUNE_LONGTEXT_RESULTS_DIR='$LONGTEXT_REMOTE_RESULTS' ATTUNE_LONGTEXT_UI=0 ATTUNE_LONGTEXT_FAIL_ON_TARGETS=1 ATTUNE_LONGTEXT_BACKGROUND_BIND_UX=1 ATTUNE_LONGTEXT_MULTITURN=1 ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION='$LONGTEXT_REQUIRE_SCHEDULER_GENERATION'"
+  if [ -n "$LONGTEXT_LIMIT_DOCS" ]; then
+    LONGTEXT_REMOTE_CMD="$LONGTEXT_REMOTE_CMD ATTUNE_LONGTEXT_LIMIT_DOCS='$LONGTEXT_LIMIT_DOCS'"
+  fi
+  remote "$LONGTEXT_REMOTE_CMD python3 '$LONGTEXT_REMOTE_RUNNER/tests/e2e/airplane_manual_longtext_e2e.py'"
+  run_scp "$SSH_TARGET:$LONGTEXT_REMOTE_MANIFEST" "$LONGTEXT_LOCAL_MANIFEST"
+  remote "tar -C '$LONGTEXT_REMOTE_RESULTS' -czf '$REMOTE_TMP/airplane-longtext-results-$LONGTEXT_PROFILE-$TS.tgz' ."
+  run_scp "$SSH_TARGET:$REMOTE_TMP/airplane-longtext-results-$LONGTEXT_PROFILE-$TS.tgz" "$LONGTEXT_RESULTS_TGZ"
+  LONGTEXT_UI_MANIFEST="$LONGTEXT_LOCAL_MANIFEST"
+  append_report "- Airplane GitHub repo: $AIRPLANE_LONGTEXT_REPO_URL"
+  append_report "- Long-text profile: $LONGTEXT_PROFILE"
+  append_report "- Local manifest copy: $LONGTEXT_LOCAL_MANIFEST"
+  append_report "- Results archive: $LONGTEXT_RESULTS_TGZ"
+  append_report "- Require scheduler generation: $LONGTEXT_REQUIRE_SCHEDULER_GENERATION"
+else
+  append_report "Skipped because ATTUNE_K3_LONGTEXT_E2E=0."
+fi
+
 append_report "## Optional UI Gate"
 if [ "$SKIP_UI" = "1" ]; then
   append_report "Skipped by --skip-ui."
-elif [ -n "$LONGTEXT_MANIFEST" ] && [ -f "$LONGTEXT_MANIFEST" ]; then
+elif [ -n "$LONGTEXT_UI_MANIFEST" ] && [ -f "$LONGTEXT_UI_MANIFEST" ]; then
   run env \
       "ATTUNE_HEADLESS=${ATTUNE_HEADLESS:-0}" \
       "ATTUNE_BASE_URL=$BASE_URL" \
       "ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_CREATE=0" \
       "ATTUNE_LONGTEXT_UI_BACKGROUND_BIND_DIR=$BIND_DIR" \
       python3 "$ROOT/tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py" \
-      --manifest "$LONGTEXT_MANIFEST" \
+      --manifest "$LONGTEXT_UI_MANIFEST" \
       --base-url "$BASE_URL" \
-      --profile local_scheduler_comprehensive \
+      --profile "$LONGTEXT_PROFILE" \
       --background-bind-create 0 \
       --background-bind-dir "$BIND_DIR"
 else
-  append_report "Skipped because ATTUNE_K3_LONGTEXT_MANIFEST is not set to a local manifest file."
+  append_report "Skipped because ATTUNE_K3_LONGTEXT_MANIFEST is not set to a local manifest file and ATTUNE_K3_LONGTEXT_E2E did not generate one."
 fi
 
 append_report "## Result"

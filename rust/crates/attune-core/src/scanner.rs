@@ -18,6 +18,7 @@ pub struct ScanResult {
     pub new_files: usize,
     pub updated_files: usize,
     pub skipped_files: usize,
+    pub degraded_files: usize,
     pub errors: usize,
 }
 
@@ -59,6 +60,7 @@ pub fn scan_directory_with_options(
         new_files: 0,
         updated_files: 0,
         skipped_files: 0,
+        degraded_files: 0,
         errors: 0,
     };
 
@@ -102,15 +104,38 @@ fn scan_one_document(
     // SHA-256 增量判断：indexed_files.file_hash 即上次的内容 hash。
     // 与旧 process_single_file 逻辑等价（两者均读文件内容算 SHA-256，无 mtime 预过滤）。
     let prior = store.get_indexed_file(&doc.source_ref).ok().flatten();
+    let prior_active_item_id = prior
+        .as_ref()
+        .and_then(|row| row.item_id.as_ref())
+        .and_then(|item_id| match store.item_exists(item_id) {
+            Ok(true) => Some(item_id.clone()),
+            Ok(false) => None,
+            Err(e) => {
+                log::warn!("scanner: item_exists({item_id}) failed: {e}");
+                None
+            }
+        });
+    let had_prior = prior_active_item_id.is_some();
     let old_item_id: Option<String> = match &prior {
-        Some(row) if row.file_hash == marker && !marker.is_empty() => {
+        Some(row)
+            if row.file_hash == marker
+                && !marker.is_empty()
+                && prior_active_item_id.is_some() =>
+        {
             result.skipped_files += 1;
             return;
         }
-        Some(row) => {
+        Some(row) if row.file_hash == marker && !marker.is_empty() => {
+            log::warn!(
+                "scanner: indexed file {} points to deleted/missing item; re-ingesting unchanged source",
+                doc.source_ref
+            );
+            None
+        }
+        Some(_) => {
             // 文件已变 → 旧 item 软删 + enqueue purge + doc_update 信号。
             // scanner 拿不到 VectorIndex / FulltextIndex 锁，必须 defer 到 server worker。
-            if let Some(old) = &row.item_id {
+            if let Some(old) = prior_active_item_id.as_ref() {
                 if let Err(e) = store.delete_item(old) {
                     log::warn!("scanner: delete_item({old}) failed: {e}");
                 }
@@ -123,7 +148,7 @@ fn scan_one_document(
                     log::debug!("scanner: record_signal_event failed for {old}: {e}");
                 }
             }
-            row.item_id.clone()
+            prior_active_item_id.clone()
         }
         None => None,
     };
@@ -144,6 +169,34 @@ fn scan_one_document(
         Ok(IngestOutcome::Duplicate { item_id }) => {
             let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
             result.skipped_files += 1;
+        }
+        Ok(IngestOutcome::Degraded {
+            item_id, reason, ..
+        }) => {
+            // Store a marker that can never equal the source SHA-256. On the
+            // next scan the unchanged source therefore follows the replacing
+            // path, removes this partial/metadata-only item and retries OCR.
+            let retry_marker = crate::ingest::retryable_degraded_marker(&marker);
+            if let Err(error) =
+                store.upsert_indexed_file(dir_id, &doc.source_ref, &retry_marker, &item_id)
+            {
+                log::warn!(
+                    "scanner: failed to persist retryable marker for {}: {error}",
+                    doc.source_ref
+                );
+                result.errors += 1;
+                return;
+            }
+            log::warn!(
+                "scanner: indexed {} with retryable degraded extraction: {reason}",
+                doc.source_ref
+            );
+            result.degraded_files += 1;
+            if had_prior {
+                result.updated_files += 1;
+            } else {
+                result.new_files += 1;
+            }
         }
         Ok(IngestOutcome::Skipped { .. }) => {
             result.skipped_files += 1;
@@ -274,6 +327,49 @@ mod tests {
     }
 
     #[test]
+    fn scan_reingests_unchanged_file_when_indexed_item_was_deleted() {
+        let (store, dek, tmp) = setup_test();
+
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, b"# Test\n\nContent.").unwrap();
+        let source_ref = path.to_string_lossy().to_string();
+
+        let dir_id = store
+            .bind_directory(tmp.path().to_str().unwrap(), true, &["md"])
+            .unwrap();
+
+        let first =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
+        assert_eq!(first.new_files, 1);
+        let first_item = store
+            .get_indexed_file(&source_ref)
+            .unwrap()
+            .unwrap()
+            .item_id
+            .unwrap();
+
+        assert!(store.delete_item(&first_item).unwrap());
+        assert_eq!(store.item_count().unwrap(), 0);
+
+        let second =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
+        assert_eq!(second.total_files, 1);
+        assert_eq!(
+            second.skipped_files, 0,
+            "deleted indexed item must not make an unchanged source skip"
+        );
+        assert_eq!(second.new_files, 1);
+        let second_item = store
+            .get_indexed_file(&source_ref)
+            .unwrap()
+            .unwrap()
+            .item_id
+            .unwrap();
+        assert_ne!(second_item, first_item);
+        assert_eq!(store.item_count().unwrap(), 1);
+    }
+
+    #[test]
     fn scan_detects_modified_files() {
         let (store, dek, tmp) = setup_test();
 
@@ -291,6 +387,40 @@ mod tests {
         let r2 = scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
         // Should process the modified file (either new or updated)
         assert_eq!(r2.skipped_files, 0, "Modified file should not be skipped");
+    }
+
+    #[test]
+    fn unchanged_degraded_source_is_retried_and_replaces_partial_item() {
+        let (store, dek, tmp) = setup_test();
+        let path = tmp.path().join("broken-scan.png");
+        std::fs::write(&path, b"not a decodable image").unwrap();
+        let source_ref = path.to_string_lossy().to_string();
+        let dir_id = store
+            .bind_directory(tmp.path().to_str().unwrap(), true, &["png"])
+            .unwrap();
+
+        let first =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["png".into()]).unwrap();
+        assert_eq!(first.degraded_files, 1);
+        let first_row = store.get_indexed_file(&source_ref).unwrap().unwrap();
+        assert!(first_row.file_hash.starts_with("retryable-degraded:"));
+        let first_item = first_row.item_id.unwrap();
+
+        let second =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["png".into()]).unwrap();
+        assert_eq!(
+            second.skipped_files, 0,
+            "degraded hash must not short-circuit"
+        );
+        assert_eq!(second.degraded_files, 1);
+        let second_row = store.get_indexed_file(&source_ref).unwrap().unwrap();
+        assert!(second_row.file_hash.starts_with("retryable-degraded:"));
+        assert_ne!(second_row.item_id.as_deref(), Some(first_item.as_str()));
+        assert_eq!(
+            store.item_count().unwrap(),
+            1,
+            "partial item must be replaced"
+        );
     }
 
     #[test]
