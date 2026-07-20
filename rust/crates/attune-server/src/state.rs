@@ -163,6 +163,7 @@ pub struct BackgroundScanTaskStatus {
     pub new: Option<usize>,
     pub updated: Option<usize>,
     pub skipped: Option<usize>,
+    pub deleted: Option<usize>,
     pub degraded: Option<usize>,
     pub errors: Option<usize>,
     pub elapsed_ms: Option<u128>,
@@ -2591,12 +2592,7 @@ impl AppState {
                         continue;
                     }
 
-                    let file_types: Vec<String> = dir
-                        .file_types
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
+                    let file_types = dir.file_type_list();
 
                     // NOTE: 持锁执行 scan_directory —— 每个目录典型 <5s（文件 hash 增量 diff）。
                     // 对比 skill_evolver 的 LLM 调用（15s+，已拆三阶段），此处仍在可接受
@@ -2615,12 +2611,13 @@ impl AppState {
                         &ingest_options,
                     ) {
                         Ok(r) => {
-                            if r.new_files > 0 || r.updated_files > 0 {
+                            if r.new_files > 0 || r.updated_files > 0 || r.deleted_files > 0 {
                                 tracing::info!(
-                                    "Rescan {}: {} new, {} updated",
+                                    "Rescan {}: {} new, {} updated, {} deleted",
                                     dir.path,
                                     r.new_files,
-                                    r.updated_files
+                                    r.updated_files,
+                                    r.deleted_files
                                 );
                             }
                         }

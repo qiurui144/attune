@@ -377,6 +377,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
     token_holder: dict[str, str] = {}
     cleanup_items: list[str] = []
     cleanup_dirs: list[str] = []
+    local_bind: dict[str, str] = {}
     token_value = ""
 
     def token() -> str:
@@ -493,7 +494,10 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         dir_id = payload.get("dir_id")
         if isinstance(dir_id, str) and dir_id:
             cleanup_dirs.append(dir_id)
+            local_bind["dir_id"] = dir_id
         require(payload.get("status") in {"ok", "accepted"}, f"unexpected bind status: {payload}")
+        scan = require_json_object(payload.get("scan", {}), "index bind scan")
+        require("deleted" in scan, f"index bind scan missing deleted count: {scan}")
         _, search = request_json(
             base_url,
             "GET",
@@ -506,7 +510,30 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         require(isinstance(results, list), "search results must be a list")
         result_text = json.dumps(results, ensure_ascii=False)
         require(marker in result_text, "server-side bind content was not searchable")
-        return {"dir_id": dir_id, "search_results": len(results)}
+        return {"dir_id": dir_id, "search_results": len(results), "scan_deleted": scan.get("deleted")}
+
+    def index_rescan_gate() -> dict[str, Any]:
+        dir_id = local_bind.get("dir_id")
+        require(dir_id, "index_rescan requires a successful index_bind dir_id")
+        _, data = request_json(
+            base_url,
+            "POST",
+            "/api/v1/index/rescan",
+            body={"dir_id": dir_id},
+            token=token(),
+            timeout=args.timeout,
+        )
+        payload = require_json_object(data, "index rescan")
+        require(payload.get("status") == "ok", f"unexpected rescan status: {payload}")
+        scan = require_json_object(payload.get("scan", {}), "index rescan scan")
+        require("deleted" in scan, f"index rescan scan missing deleted count: {scan}")
+        return {
+            "dir_id": dir_id,
+            "total": scan.get("total"),
+            "skipped": scan.get("skipped"),
+            "deleted": scan.get("deleted"),
+            "degraded": scan.get("degraded"),
+        }
 
     def vector_indexing_snapshot() -> dict[str, Any]:
         _, status = request_json(base_url, "GET", "/api/v1/status", token=token(), timeout=args.timeout)
@@ -622,6 +649,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         ("core_reads", core_reads_gate),
         ("upload", upload_gate),
         ("index_bind", index_bind_gate),
+        ("index_rescan", index_rescan_gate),
         ("vector_indexing", vector_indexing_gate),
         ("export", export_gate),
         ("chat_scheduler", chat_scheduler_gate),

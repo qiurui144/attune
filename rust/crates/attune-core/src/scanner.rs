@@ -1,5 +1,6 @@
 // npu-vault/crates/vault-core/src/scanner.rs
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -8,8 +9,9 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
-use crate::ingest::{IngestOptions, RawDocument};
-use crate::store::Store;
+use crate::ingest::IngestOptions;
+use crate::ingest::local::{LocalDocumentRead, LocalFileCandidate};
+use crate::store::{IndexedFileRow, IndexedFileStatMarker, Store};
 
 /// 扫描结果
 #[derive(Debug, Clone)]
@@ -18,6 +20,7 @@ pub struct ScanResult {
     pub new_files: usize,
     pub updated_files: usize,
     pub skipped_files: usize,
+    pub deleted_files: usize,
     pub degraded_files: usize,
     pub errors: usize,
 }
@@ -53,13 +56,12 @@ pub fn scan_directory_with_options(
     ingest_options: &IngestOptions,
 ) -> Result<ScanResult> {
     use crate::ingest::local::LocalFolderConnector;
-    use crate::ingest::SourceConnector;
-
     let mut result = ScanResult {
         total_files: 0,
         new_files: 0,
         updated_files: 0,
         skipped_files: 0,
+        deleted_files: 0,
         degraded_files: 0,
         errors: 0,
     };
@@ -76,14 +78,80 @@ pub fn scan_directory_with_options(
         file_types.to_vec(),
         corpus_domain,
     );
+    let mut seen_refs = HashSet::new();
     {
-        let mut sink: crate::ingest::DocumentSink<'_> =
-            Box::new(|doc| scan_one_document(store, dek, dir_id, ingest_options, doc, &mut result));
-        connector.fetch_documents(&mut sink)?;
+        let mut sink = |candidate: LocalFileCandidate| {
+            seen_refs.insert(candidate.source_ref.clone());
+            scan_one_candidate(
+                store,
+                dek,
+                dir_id,
+                ingest_options,
+                &connector,
+                candidate,
+                &mut result,
+            );
+        };
+        connector.fetch_candidates(&mut sink)?;
     }
+    purge_removed_local_files(store, dir_id, &seen_refs, &mut result);
 
     store.update_dir_last_scan(dir_id)?;
     Ok(result)
+}
+
+pub(crate) fn indexed_file_can_fast_skip(
+    row: &IndexedFileRow,
+    current: &IndexedFileStatMarker,
+    item_active: bool,
+) -> bool {
+    item_active
+        && !row.file_hash.is_empty()
+        && !row.file_hash.starts_with("retryable-degraded:")
+        && row.stat.as_ref() == Some(current)
+}
+
+fn scan_one_candidate(
+    store: &Store,
+    dek: &Key32,
+    dir_id: &str,
+    ingest_options: &IngestOptions,
+    connector: &crate::ingest::local::LocalFolderConnector,
+    candidate: LocalFileCandidate,
+    result: &mut ScanResult,
+) {
+    let prior = store.get_indexed_file(&candidate.source_ref).ok().flatten();
+    let prior_active_item_id = prior
+        .as_ref()
+        .and_then(|row| row.item_id.as_ref())
+        .and_then(|item_id| match store.item_exists(item_id) {
+            Ok(true) => Some(item_id.clone()),
+            Ok(false) => None,
+            Err(e) => {
+                log::warn!("scanner: item_exists({item_id}) failed: {e}");
+                None
+            }
+        });
+
+    if let (Some(row), Some(stat)) = (prior.as_ref(), candidate.stat.as_ref()) {
+        if indexed_file_can_fast_skip(row, stat, prior_active_item_id.is_some()) {
+            result.total_files += 1;
+            result.skipped_files += 1;
+            return;
+        }
+    }
+
+    match connector.read_candidate(&candidate) {
+        Ok(read) => scan_one_document(store, dek, dir_id, ingest_options, read, result),
+        Err(e) => {
+            result.total_files += 1;
+            result.errors += 1;
+            log::warn!(
+                "scanner: read local source {} failed: {e}",
+                candidate.path.display()
+            );
+        }
+    }
 }
 
 fn scan_one_document(
@@ -91,13 +159,14 @@ fn scan_one_document(
     dek: &Key32,
     dir_id: &str,
     ingest_options: &IngestOptions,
-    doc: RawDocument,
+    read: LocalDocumentRead,
     result: &mut ScanResult,
 ) {
     use crate::ingest::{
         ingest_document_replacing_with_options, ingest_document_with_options, IngestOutcome,
     };
 
+    let LocalDocumentRead { document: doc, stat } = read;
     result.total_files += 1;
     let marker = doc.modified_marker.clone().unwrap_or_default();
 
@@ -122,6 +191,18 @@ fn scan_one_document(
                 && !marker.is_empty()
                 && prior_active_item_id.is_some() =>
         {
+            if let Some(item_id) = row.item_id.as_deref() {
+                if row.stat != stat {
+                    if let Err(e) =
+                        store.upsert_indexed_file_with_stat(dir_id, &doc.source_ref, &marker, item_id, stat)
+                    {
+                        log::warn!(
+                            "scanner: failed to refresh stat marker for {}: {e}",
+                            doc.source_ref
+                        );
+                    }
+                }
+            }
             result.skipped_files += 1;
             return;
         }
@@ -159,15 +240,18 @@ fn scan_one_document(
     };
     match outcome {
         Ok(IngestOutcome::Inserted { item_id, .. }) => {
-            let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
+            let _ =
+                store.upsert_indexed_file_with_stat(dir_id, &doc.source_ref, &marker, &item_id, stat);
             result.new_files += 1;
         }
         Ok(IngestOutcome::Updated { item_id, .. }) => {
-            let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
+            let _ =
+                store.upsert_indexed_file_with_stat(dir_id, &doc.source_ref, &marker, &item_id, stat);
             result.updated_files += 1;
         }
         Ok(IngestOutcome::Duplicate { item_id }) => {
-            let _ = store.upsert_indexed_file(dir_id, &doc.source_ref, &marker, &item_id);
+            let _ =
+                store.upsert_indexed_file_with_stat(dir_id, &doc.source_ref, &marker, &item_id, stat);
             result.skipped_files += 1;
         }
         Ok(IngestOutcome::Degraded {
@@ -177,8 +261,13 @@ fn scan_one_document(
             // next scan the unchanged source therefore follows the replacing
             // path, removes this partial/metadata-only item and retries OCR.
             let retry_marker = crate::ingest::retryable_degraded_marker(&marker);
-            if let Err(error) =
-                store.upsert_indexed_file(dir_id, &doc.source_ref, &retry_marker, &item_id)
+            if let Err(error) = store.upsert_indexed_file_with_stat(
+                dir_id,
+                &doc.source_ref,
+                &retry_marker,
+                &item_id,
+                stat,
+            )
             {
                 log::warn!(
                     "scanner: failed to persist retryable marker for {}: {error}",
@@ -205,6 +294,46 @@ fn scan_one_document(
             log::warn!("scanner: ingest {} failed: {e}", doc.source_ref);
             result.errors += 1;
         }
+    }
+}
+
+fn purge_removed_local_files(
+    store: &Store,
+    dir_id: &str,
+    seen_refs: &HashSet<String>,
+    result: &mut ScanResult,
+) {
+    let rows = match store.list_indexed_files_for_dir(dir_id) {
+        Ok(rows) => rows,
+        Err(e) => {
+            result.errors += 1;
+            log::warn!("scanner: list_indexed_files_for_dir({dir_id}) failed: {e}");
+            return;
+        }
+    };
+    for row in rows {
+        if seen_refs.contains(&row.path) {
+            continue;
+        }
+        if let Some(item_id) = row.item_id.as_deref() {
+            if let Err(e) = store.delete_item(item_id) {
+                result.errors += 1;
+                log::warn!("scanner: delete removed local item {item_id} failed: {e}");
+            }
+            if let Err(e) = store.enqueue_reindex(item_id, "purge") {
+                result.errors += 1;
+                log::warn!("scanner: enqueue purge for removed local item {item_id} failed: {e}");
+            }
+            if let Err(e) = store.record_signal_event("doc_delete", item_id, None) {
+                log::debug!("scanner: record doc_delete failed for {item_id}: {e}");
+            }
+        }
+        if let Err(e) = store.delete_indexed_file(&row.path) {
+            result.errors += 1;
+            log::warn!("scanner: delete indexed_files row {} failed: {e}", row.path);
+            continue;
+        }
+        result.deleted_files += 1;
     }
 }
 
@@ -327,6 +456,40 @@ mod tests {
     }
 
     #[test]
+    fn scan_fast_skips_unchanged_large_file_before_content_read() {
+        let (store, dek, tmp) = setup_test();
+        let path = tmp.path().join("huge.md");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(101 * 1024 * 1024).unwrap();
+        drop(file);
+        let source_ref = path.to_string_lossy().to_string();
+        let stat = crate::ingest::local::stat_marker_from_metadata(
+            &std::fs::metadata(&path).unwrap(),
+        )
+        .unwrap();
+
+        let dir_id = store
+            .bind_directory(tmp.path().to_str().unwrap(), true, &["md"])
+            .unwrap();
+        let item_id = store
+            .insert_item(&dek, "huge", "already indexed", None, "file", None, None)
+            .unwrap();
+        store
+            .upsert_indexed_file_with_stat(&dir_id, &source_ref, "known-hash", &item_id, Some(stat))
+            .unwrap();
+
+        let result =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
+
+        assert_eq!(result.total_files, 1);
+        assert_eq!(result.skipped_files, 1);
+        assert_eq!(
+            result.errors, 0,
+            "matching stat marker must skip before the bounded reader rejects the large file"
+        );
+    }
+
+    #[test]
     fn scan_reingests_unchanged_file_when_indexed_item_was_deleted() {
         let (store, dek, tmp) = setup_test();
 
@@ -387,6 +550,86 @@ mod tests {
         let r2 = scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
         // Should process the modified file (either new or updated)
         assert_eq!(r2.skipped_files, 0, "Modified file should not be skipped");
+    }
+
+    #[test]
+    fn scan_purges_indexed_file_when_local_source_is_removed() {
+        let (store, dek, tmp) = setup_test();
+
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, b"# Original\n\nOld content.").unwrap();
+        let source_ref = path.to_string_lossy().to_string();
+
+        let dir_id = store
+            .bind_directory(tmp.path().to_str().unwrap(), true, &["md"])
+            .unwrap();
+        let first =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
+        assert_eq!(first.new_files, 1);
+        let first_item = store
+            .get_indexed_file(&source_ref)
+            .unwrap()
+            .unwrap()
+            .item_id
+            .unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+
+        let second =
+            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
+        assert_eq!(second.total_files, 0);
+        assert_eq!(second.deleted_files, 1);
+        assert!(
+            store.get_indexed_file(&source_ref).unwrap().is_none(),
+            "removed local source must not leave an indexed_files row"
+        );
+        assert_eq!(store.item_count().unwrap(), 0);
+
+        let tasks = store.dequeue_reindex_tasks(10).unwrap();
+        assert!(
+            tasks
+                .iter()
+                .any(|(_, item_id, action, _)| item_id == &first_item && action == "purge"),
+            "removed local source must enqueue a purge for old vectors"
+        );
+    }
+
+    #[test]
+    fn stat_marker_match_allows_fast_skip_without_rehashing() {
+        use crate::store::IndexedFileStatMarker;
+
+        let row = crate::store::IndexedFileRow {
+            id: "row".into(),
+            dir_id: "dir".into(),
+            path: "/tmp/doc.md".into(),
+            file_hash: "abc123".into(),
+            item_id: Some("item".into()),
+            stat: Some(IndexedFileStatMarker {
+                size: 12,
+                mtime_ns: 34,
+                ctime_ns: Some(35),
+                inode: Some(56),
+                dev: Some(78),
+            }),
+        };
+        let marker = IndexedFileStatMarker {
+            size: 12,
+            mtime_ns: 34,
+            ctime_ns: Some(35),
+            inode: Some(56),
+            dev: Some(78),
+        };
+
+        assert!(indexed_file_can_fast_skip(&row, &marker, true));
+        assert!(!indexed_file_can_fast_skip(&row, &marker, false));
+        assert!(!indexed_file_can_fast_skip(
+            &crate::store::IndexedFileRow {
+                file_hash: crate::ingest::retryable_degraded_marker("abc123"),
+                ..row.clone()
+            },
+            &marker,
+            true
+        ));
     }
 
     #[test]

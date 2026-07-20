@@ -28,6 +28,13 @@ pub struct BindRequest {
     pub background: bool,
 }
 
+#[derive(Deserialize)]
+pub struct RescanRequest {
+    pub dir_id: String,
+    #[serde(default, alias = "async_scan")]
+    pub background: bool,
+}
+
 fn default_corpus_domain() -> String {
     "general".to_string()
 }
@@ -203,7 +210,104 @@ pub async fn bind_directory(
     // 且持锁期限从"全量"缩为每页 500 条。
     rebuild_fulltext_from_vault(&state, &dek);
 
-    Ok(Json(serde_json::json!({
+    Ok(Json(scan_result_payload(&dir_id, &scan_result)))
+}
+
+pub async fn rescan_directory(
+    State(state): State<SharedState>,
+    Json(body): Json<RescanRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(&state, None);
+    let ingest_options = if body.background {
+        ingest_options.with_background_ingest_ocr()
+    } else {
+        ingest_options
+    };
+
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let dek = vault.dek_db().map_err(|e| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    let dir = vault
+        .store()
+        .list_bound_directories()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?
+        .into_iter()
+        .find(|dir| dir.id == body.dir_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "bound directory not found"})),
+            )
+        })?;
+    if dir.path.starts_with("webdav:")
+        || dir.path.starts_with("git:")
+        || dir.path.starts_with("email:")
+        || dir.path.starts_with("rss:")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "rescan is only supported for local directories"})),
+        ));
+    }
+    let canonical = PathBuf::from(&dir.path);
+    if !canonical.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "bound directory not found or inaccessible"})),
+        ));
+    }
+    let file_types = dir.file_type_list();
+
+    if body.background {
+        let dir_id = dir.id.clone();
+        drop(vault);
+        spawn_background_bind_scan(
+            state.clone(),
+            dek,
+            dir_id.clone(),
+            canonical,
+            dir.recursive,
+            file_types,
+            ingest_options,
+        );
+        return Ok(Json(serde_json::json!({
+            "status": "accepted",
+            "background": true,
+            "dir_id": dir_id,
+            "scan": {
+                "status": "queued",
+            }
+        })));
+    }
+
+    let scan_result = scanner::scan_directory_with_options(
+        vault.store(),
+        &dek,
+        &dir.id,
+        &canonical,
+        dir.recursive,
+        &file_types,
+        &ingest_options,
+    )
+    .map_err(|e| scan_error_response(&dir.path, e))?;
+    let dir_id = dir.id.clone();
+    drop(vault);
+    rebuild_fulltext_from_vault(&state, &dek);
+
+    Ok(Json(scan_result_payload(&dir_id, &scan_result)))
+}
+
+fn scan_result_payload(dir_id: &str, scan_result: &scanner::ScanResult) -> serde_json::Value {
+    serde_json::json!({
         "status": "ok",
         "dir_id": dir_id,
         "scan": {
@@ -211,9 +315,10 @@ pub async fn bind_directory(
             "new": scan_result.new_files,
             "updated": scan_result.updated_files,
             "skipped": scan_result.skipped_files,
+            "deleted": scan_result.deleted_files,
             "degraded": scan_result.degraded_files,
         }
-    })))
+    })
 }
 
 fn scan_error_response(
@@ -257,6 +362,7 @@ fn spawn_background_bind_scan(
             new: None,
             updated: None,
             skipped: None,
+            deleted: None,
             degraded: None,
             errors: None,
             elapsed_ms: None,
@@ -291,13 +397,18 @@ fn spawn_background_bind_scan(
                         status: "done".to_string(),
                         progress: 1.0,
                         message: format!(
-                            "后台索引完成：{} 个文件，{} 新增，{} 更新，{} 跳过",
-                            scan.total_files, scan.new_files, scan.updated_files, scan.skipped_files
+                            "后台索引完成：{} 个文件，{} 新增，{} 更新，{} 跳过，{} 删除",
+                            scan.total_files,
+                            scan.new_files,
+                            scan.updated_files,
+                            scan.skipped_files,
+                            scan.deleted_files
                         ),
                         total: Some(scan.total_files),
                         new: Some(scan.new_files),
                         updated: Some(scan.updated_files),
                         skipped: Some(scan.skipped_files),
+                        deleted: Some(scan.deleted_files),
                         degraded: Some(scan.degraded_files),
                         errors: Some(scan.errors),
                         elapsed_ms: Some(elapsed_ms),
@@ -305,12 +416,13 @@ fn spawn_background_bind_scan(
                 );
                 tracing::info!(
                     target: "access",
-                    "background bind scan completed dir_id={dir_id} path={} total={} new={} updated={} skipped={} degraded={} errors={} elapsed_ms={elapsed_ms}",
+                    "background bind scan completed dir_id={dir_id} path={} total={} new={} updated={} skipped={} deleted={} degraded={} errors={} elapsed_ms={elapsed_ms}",
                     canonical.display(),
                     scan.total_files,
                     scan.new_files,
                     scan.updated_files,
                     scan.skipped_files,
+                    scan.deleted_files,
                     scan.degraded_files,
                     scan.errors,
                 );
@@ -320,8 +432,12 @@ fn spawn_background_bind_scan(
                     "done",
                     1.0,
                     &format!(
-                        "后台索引完成：{} 个文件，{} 新增，{} 更新，{} 跳过",
-                        scan.total_files, scan.new_files, scan.updated_files, scan.skipped_files
+                        "后台索引完成：{} 个文件，{} 新增，{} 更新，{} 跳过，{} 删除",
+                        scan.total_files,
+                        scan.new_files,
+                        scan.updated_files,
+                        scan.skipped_files,
+                        scan.deleted_files
                     ),
                 );
             }
@@ -338,9 +454,10 @@ fn spawn_background_bind_scan(
                         total: None,
                         new: None,
                         updated: None,
-                        skipped: None,
-                        degraded: None,
-                        errors: None,
+                    skipped: None,
+                    deleted: None,
+                    degraded: None,
+                    errors: None,
                         elapsed_ms: Some(started.elapsed().as_millis()),
                     },
                 );
@@ -535,4 +652,28 @@ pub async fn index_status(
         "pending_embeddings": pending,
         "background_scans": background_scans,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_result_payload_includes_deleted_count_for_nas_web() {
+        let payload = scan_result_payload(
+            "dir-1",
+            &scanner::ScanResult {
+                total_files: 3,
+                new_files: 1,
+                updated_files: 0,
+                skipped_files: 1,
+                deleted_files: 1,
+                degraded_files: 0,
+                errors: 0,
+            },
+        );
+
+        assert_eq!(payload["dir_id"], "dir-1");
+        assert_eq!(payload["scan"]["deleted"], 1);
+    }
 }

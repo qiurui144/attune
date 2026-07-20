@@ -605,6 +605,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Index management
         .route("/api/v1/index/bind", post(routes::index::bind_directory))
         .route(
+            "/api/v1/index/rescan",
+            post(routes::index::rescan_directory),
+        )
+        .route(
             "/api/v1/index/bind-remote",
             post(routes::remote::bind_remote),
         )

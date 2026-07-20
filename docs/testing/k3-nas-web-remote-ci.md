@@ -99,6 +99,8 @@ Attune 侧只运行：
 路径规则：
 
 - `/api/v1/index/bind` 的 `path` 永远是 Attune server 可见的 NAS/K3 server-side path。
+  首次绑定或更新 file type/corpus 配置用 `bind`；已绑定目录的快速刷新用
+  `POST /api/v1/index/rescan {"dir_id": "..."}`，返回 `scan.deleted` 以显式暴露本地删除收敛。
 - `--skip-install` 只跳过 deb 安装，不跳过远端 fixture 创建。
 - manifest/corpus/API longtext gate 必须和其路径归属一致：runner-local manifest 可以驱动 UI，
   server-side corpus 才能驱动 bind/index。
@@ -124,8 +126,8 @@ CI 分层：
 - UI backing reads: status、diagnostics、ai-stack、index status、items、background、member、
   privacy、plugins、marketplace、skills、skill-runtime、projects、tags、clusters、jobs、
   folder-links、audit、suggestions、accounts、scenarios、diagnostics capabilities。
-- write/download paths: multipart upload、server-side folder bind、search、embedding/vector queue drain、
-  export CSV。
+- write/download paths: multipart upload、server-side folder bind/rescan、search、
+  embedding/vector queue drain、export CSV。
 - chat: `/api/v1/chat`，需要 scheduler 时校验 `local_scheduler` metadata 并 polling job 到 terminal success。
 
 报告根对象包含 `scheduler_observations`。这里集中暴露 Attune 在 scheduler 接入链路上观测到的

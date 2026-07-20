@@ -239,6 +239,11 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     path       TEXT UNIQUE NOT NULL,
     file_hash  TEXT NOT NULL,
     item_id    TEXT REFERENCES items(id),
+    file_size     INTEGER,
+    file_mtime_ns INTEGER,
+    file_ctime_ns INTEGER,
+    file_inode    INTEGER,
+    file_dev      INTEGER,
     indexed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id);
@@ -973,6 +978,7 @@ impl Store {
         Self::migrate_items_privacy_tier(conn)?;
         Self::migrate_corpus_domain(conn)?;
         Self::migrate_items_content_hash(conn)?;
+        Self::migrate_indexed_file_stat_marker(conn)?;
         Self::migrate_job_queue_backoff(conn)?;
         Self::migrate_skill_signals_v07(conn)?;
         Self::migrate_memories_multilayer(conn)?;
@@ -996,6 +1002,7 @@ impl Store {
         Self::migrate_items_privacy_tier(&conn)?;
         Self::migrate_corpus_domain(&conn)?;
         Self::migrate_items_content_hash(&conn)?;
+        Self::migrate_indexed_file_stat_marker(&conn)?;
         Self::migrate_job_queue_backoff(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
@@ -1403,6 +1410,45 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)",
             [],
         )?;
+        Ok(())
+    }
+
+    /// 本地目录快速增量：indexed_files 记录文件 stat marker。
+    ///
+    /// 老 vault 没有这些列时仍能用 file_hash 正确增量；迁移补列后，本地 scanner
+    /// 可在 size/mtime/inode/dev 完全一致时直接跳过读文件和 SHA-256。
+    fn migrate_indexed_file_stat_marker(conn: &Connection) -> Result<()> {
+        for (name, ddl) in [
+            (
+                "file_size",
+                "ALTER TABLE indexed_files ADD COLUMN file_size INTEGER",
+            ),
+            (
+                "file_mtime_ns",
+                "ALTER TABLE indexed_files ADD COLUMN file_mtime_ns INTEGER",
+            ),
+            (
+                "file_ctime_ns",
+                "ALTER TABLE indexed_files ADD COLUMN file_ctime_ns INTEGER",
+            ),
+            (
+                "file_inode",
+                "ALTER TABLE indexed_files ADD COLUMN file_inode INTEGER",
+            ),
+            (
+                "file_dev",
+                "ALTER TABLE indexed_files ADD COLUMN file_dev INTEGER",
+            ),
+        ] {
+            let has_col: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('indexed_files') WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )?;
+            if has_col == 0 {
+                conn.execute(ddl, [])?;
+            }
+        }
         Ok(())
     }
 
@@ -2460,6 +2506,72 @@ mod tests_indexed_files {
             .unwrap()
             .unwrap();
         assert_eq!(row.file_hash, "v2");
+    }
+
+    #[test]
+    fn test_upsert_indexed_file_with_stat_roundtrips_fast_marker() {
+        let store = open_store();
+        let dir_id = store.bind_directory("/tmp/docs", false, &["md"]).unwrap();
+        let item_id = insert_test_item(&store);
+        let stat = IndexedFileStatMarker {
+            size: 123,
+            mtime_ns: 456,
+            ctime_ns: Some(457),
+            inode: Some(789),
+            dev: Some(1011),
+        };
+
+        store
+            .upsert_indexed_file_with_stat(
+                &dir_id,
+                "/tmp/docs/note.md",
+                "abc123",
+                &item_id,
+                Some(stat),
+            )
+            .unwrap();
+
+        let row = store
+            .get_indexed_file("/tmp/docs/note.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.file_hash, "abc123");
+        assert_eq!(row.stat, Some(stat));
+    }
+
+    #[test]
+    fn test_migrate_indexed_file_stat_marker_adds_columns_to_old_vault() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE indexed_files (
+                id TEXT PRIMARY KEY,
+                dir_id TEXT NOT NULL,
+                path TEXT UNIQUE NOT NULL,
+                file_hash TEXT NOT NULL,
+                item_id TEXT,
+                indexed_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        Store::migrate_indexed_file_stat_marker(&conn).unwrap();
+
+        for column in [
+            "file_size",
+            "file_mtime_ns",
+            "file_ctime_ns",
+            "file_inode",
+            "file_dev",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('indexed_files') WHERE name = ?1",
+                    [column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{column} column should exist after migration");
+        }
     }
 }
 

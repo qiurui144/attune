@@ -1,6 +1,6 @@
 //! bound_dirs / indexed_files 表 — 目录绑定 + 索引文件追踪。
 
-use rusqlite::params;
+use rusqlite::{params, Row};
 
 use crate::error::{Result, VaultError};
 use crate::store::Store;
@@ -118,17 +118,11 @@ impl Store {
     /// 查询已索引文件
     pub fn get_indexed_file(&self, path: &str) -> Result<Option<IndexedFileRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, dir_id, path, file_hash, item_id FROM indexed_files WHERE path = ?1",
+            "SELECT id, dir_id, path, file_hash, item_id,
+                    file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev
+             FROM indexed_files WHERE path = ?1",
         )?;
-        let result = stmt.query_row(params![path], |row| {
-            Ok(IndexedFileRow {
-                id: row.get(0)?,
-                dir_id: row.get(1)?,
-                path: row.get(2)?,
-                file_hash: row.get(3)?,
-                item_id: row.get(4)?,
-            })
-        });
+        let result = stmt.query_row(params![path], indexed_file_row_from_sql);
         match result {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -140,17 +134,11 @@ impl Store {
     /// git 增量同步用：比对本次 fetch 的文件集，找出上游已删除的文件。
     pub fn list_indexed_files_for_dir(&self, dir_id: &str) -> Result<Vec<IndexedFileRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, dir_id, path, file_hash, item_id FROM indexed_files WHERE dir_id = ?1",
+            "SELECT id, dir_id, path, file_hash, item_id,
+                    file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev
+             FROM indexed_files WHERE dir_id = ?1",
         )?;
-        let rows = stmt.query_map(params![dir_id], |row| {
-            Ok(IndexedFileRow {
-                id: row.get(0)?,
-                dir_id: row.get(1)?,
-                path: row.get(2)?,
-                file_hash: row.get(3)?,
-                item_id: row.get(4)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![dir_id], indexed_file_row_from_sql)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -196,20 +184,73 @@ impl Store {
         file_hash: &str,
         item_id: &str,
     ) -> Result<()> {
+        self.upsert_indexed_file_with_stat(dir_id, path, file_hash, item_id, None)
+    }
+
+    pub fn upsert_indexed_file_with_stat(
+        &self,
+        dir_id: &str,
+        path: &str,
+        file_hash: &str,
+        item_id: &str,
+        stat: Option<IndexedFileStatMarker>,
+    ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().simple().to_string();
         self.conn.execute(
-            "INSERT INTO indexed_files (id, dir_id, path, file_hash, item_id, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO indexed_files
+                (id, dir_id, path, file_hash, item_id,
+                 file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE SET
                dir_id = excluded.dir_id,
                file_hash = excluded.file_hash,
                item_id = excluded.item_id,
+               file_size = excluded.file_size,
+               file_mtime_ns = excluded.file_mtime_ns,
+               file_ctime_ns = excluded.file_ctime_ns,
+               file_inode = excluded.file_inode,
+               file_dev = excluded.file_dev,
                indexed_at = excluded.indexed_at",
-            params![id, dir_id, path, file_hash, item_id, now],
+            params![
+                id,
+                dir_id,
+                path,
+                file_hash,
+                item_id,
+                stat.map(|s| s.size),
+                stat.map(|s| s.mtime_ns),
+                stat.and_then(|s| s.ctime_ns),
+                stat.and_then(|s| s.inode),
+                stat.and_then(|s| s.dev),
+                now
+            ],
         )?;
         Ok(())
     }
+}
+
+fn indexed_file_row_from_sql(row: &Row<'_>) -> rusqlite::Result<IndexedFileRow> {
+    let file_size: Option<i64> = row.get(5)?;
+    let file_mtime_ns: Option<i64> = row.get(6)?;
+    let stat = match (file_size, file_mtime_ns) {
+        (Some(size), Some(mtime_ns)) => Some(IndexedFileStatMarker {
+            size,
+            mtime_ns,
+            ctime_ns: row.get(7)?,
+            inode: row.get(8)?,
+            dev: row.get(9)?,
+        }),
+        _ => None,
+    };
+    Ok(IndexedFileRow {
+        id: row.get(0)?,
+        dir_id: row.get(1)?,
+        path: row.get(2)?,
+        file_hash: row.get(3)?,
+        item_id: row.get(4)?,
+        stat,
+    })
 }
 
 #[cfg(test)]
@@ -268,5 +309,15 @@ mod tests {
             vec![id_underscore],
             "underscore is escaped, /axb not matched"
         );
+    }
+
+    #[test]
+    fn bound_dir_row_parses_json_file_types_for_rescan_workers() {
+        let s = Store::open_memory().unwrap();
+        s.bind_directory("/docs", true, &["md", "txt"]).unwrap();
+
+        let dirs = s.list_bound_directories().unwrap();
+
+        assert_eq!(dirs[0].file_type_list(), vec!["md", "txt"]);
     }
 }

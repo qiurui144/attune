@@ -133,6 +133,29 @@ pub struct BoundDirRow {
     pub last_scan: Option<String>,
 }
 
+impl BoundDirRow {
+    pub fn file_type_list(&self) -> Vec<String> {
+        if let Ok(values) = serde_json::from_str::<Vec<String>>(&self.file_types) {
+            return normalize_file_types(values);
+        }
+        normalize_file_types(
+            self.file_types
+                .split(',')
+                .map(|s| s.trim_matches(|c| matches!(c, '[' | ']' | '"' | '\'' | ' ')))
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+}
+
+fn normalize_file_types(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHistoryRow {
     pub id: i64,
@@ -148,6 +171,16 @@ pub struct IndexedFileRow {
     pub path: String,
     pub file_hash: String,
     pub item_id: Option<String>,
+    pub stat: Option<IndexedFileStatMarker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexedFileStatMarker {
+    pub size: i64,
+    pub mtime_ns: i64,
+    pub ctime_ns: Option<i64>,
+    pub inode: Option<i64>,
+    pub dev: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
