@@ -107,6 +107,13 @@ test -f "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb.sha256"
 test "$(wc -l < "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb.sha256")" -eq 1
 sha256sum -c "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb.sha256"
 test "$(dpkg-deb --field "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb" Architecture)" = "riscv64"
+EXTRACTED_PKG="$TMP/extracted-contract"
+dpkg-deb -x "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb" "$EXTRACTED_PKG"
+grep -q '\$ATTUNE_EXTRA_ARGS' "$EXTRACTED_PKG/lib/systemd/system/attune-server.service"
+if grep -q '\${ATTUNE_EXTRA_ARGS}' "$EXTRACTED_PKG/lib/systemd/system/attune-server.service"; then
+  echo "systemd unit must not pass an empty ATTUNE_EXTRA_ARGS argument" >&2
+  exit 1
+fi
 
 bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
   --dry-run \
@@ -117,6 +124,9 @@ bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
 test -f "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "K3 RVV Runtime Performance Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "worker_benchmark_gate.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "ATTUNE_K3_RVV_REQUIRE_PERF=1" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "Configure Attune scheduler-native AI settings" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "Require local scheduler chat metadata" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 
 bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
   --dry-run \
@@ -125,6 +135,7 @@ bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
 test -f "$TMP/reports/k3-rvv-runtime-gate-dry-run.md"
 grep -q "K3 RVV Runtime Performance Gate" "$TMP/reports/k3-rvv-runtime-gate-dry-run.md"
 grep -q "worker_benchmark_gate.py" "$TMP/reports/k3-rvv-runtime-gate-dry-run.md"
+grep -q "cd .*SCHEDULER_ROOT" "$TMP/reports/k3-rvv-runtime-gate-dry-run.md"
 
 bash "$ROOT/scripts/maintenance/audit-scripts-and-outputs.sh" \
   --report-dir "$TMP/maintenance"

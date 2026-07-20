@@ -128,11 +128,11 @@ record_command() {
 if [ "$DRY_RUN" = "1" ]; then
   append_report "## Planned Gates"
   append_report "- Probe Attune-side scheduler contract with scripts/probe-edge-scheduler-contract.py."
-  append_report "- Run k3-scheduler/tools/worker_benchmark_gate.py when available."
+  append_report "- Run k3-scheduler/tools/worker_benchmark_gate.py from cd \$SCHEDULER_ROOT so scheduler fixture paths resolve under the scheduler checkout."
   append_report "- Require scheduler /benchmark/contract, /models, or /capacity to advertise RVV/IME/SpacemiT acceleration metadata."
   append_report "- Require live p50/last latency evidence when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   record_command python3 "$ROOT/scripts/probe-edge-scheduler-contract.py" --base-url "${SCHEDULER_URL:-http://<nas-ip>:8090}" --strict
-  record_command python3 "$WORKER_GATE" --base "${SCHEDULER_URL:-http://<nas-ip>:8090}" --out "$WORKER_JSON" --timeout "$TIMEOUT"
+  record_command bash -lc "cd \"\$SCHEDULER_ROOT\" && python3 tools/worker_benchmark_gate.py --base \"${SCHEDULER_URL:-http://<nas-ip>:8090}\" --out \"$WORKER_JSON\" --timeout \"$TIMEOUT\""
   log "dry-run report: $REPORT"
   exit 0
 fi
@@ -155,8 +155,12 @@ append_report "## Scheduler Worker Benchmark Gate"
 if [ "$SKIP_WORKER_GATE" = "1" ]; then
   append_report "Skipped by --skip-worker-gate."
 elif [ -f "$WORKER_GATE" ]; then
-  record_command python3 "$WORKER_GATE" --base "$SCHEDULER_URL" --out "$WORKER_JSON" --timeout "$TIMEOUT"
-  python3 "$WORKER_GATE" --base "$SCHEDULER_URL" --out "$WORKER_JSON" --timeout "$TIMEOUT" | tee -a "$REPORT"
+  append_report "Worker gate cwd: $SCHEDULER_ROOT"
+  record_command bash -lc "cd \"\$SCHEDULER_ROOT\" && python3 tools/worker_benchmark_gate.py --base \"$SCHEDULER_URL\" --out \"$WORKER_JSON\" --timeout \"$TIMEOUT\""
+  (
+    cd "$SCHEDULER_ROOT"
+    python3 tools/worker_benchmark_gate.py --base "$SCHEDULER_URL" --out "$WORKER_JSON" --timeout "$TIMEOUT"
+  ) | tee -a "$REPORT"
 else
   echo "missing scheduler worker benchmark gate: $WORKER_GATE" >&2
   exit 2
