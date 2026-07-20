@@ -29,17 +29,45 @@ pub async fn classify_one(
         }
     };
 
-    let (title, content) = {
+    let classifier_is_local = classifier.is_local();
+    let (title, content, contains_l0) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault
             .dek_db()
             .map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let contains_l0 = match vault.store().get_item_privacy_tier(&id) {
+            Ok(tier) => matches!(tier, attune_core::store::audit::PrivacyTier::L0),
+            Err(attune_core::error::VaultError::NotFound(_)) => {
+                return Err(AppError::NotFound("not found".into()))
+            }
+            Err(e) => return Err(AppError::Internal(e.to_string())),
+        };
         match vault.store().get_item(&dek, &id) {
-            Ok(Some(item)) => (item.title, item.content),
+            Ok(Some(item)) => (item.title, item.content, contains_l0),
             Ok(None) => return Err(AppError::NotFound("not found".into())),
             Err(e) => return Err(AppError::Internal(e.to_string())),
         }
     };
+
+    let redactor = attune_core::pii::Redactor::new();
+    let (title, content) = crate::state::govern_classification_input(
+        classifier_is_local,
+        crate::routes::privacy::outbound_enabled(&state, "llm"),
+        true,
+        contains_l0,
+        &redactor,
+        &title,
+        &content,
+    )
+    .map_err(|e| {
+        AppError::detailed(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": e.to_string(),
+                "code": "classification-egress-blocked",
+            }),
+        )
+    })?;
 
     let result = tokio::task::spawn_blocking(move || classifier.classify_one(&title, &content))
         .await

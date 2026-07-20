@@ -94,13 +94,18 @@ pub async fn ingest(
     let outcome = ingest_document_with_options(vault.store(), &dek, &raw, &ingest_options)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let (id, chunks_queued) = match &outcome {
+    let (id, chunks_queued, status) = match &outcome {
         IngestOutcome::Inserted {
             item_id,
             chunks_enqueued,
-        } => (item_id.clone(), *chunks_enqueued),
-        IngestOutcome::Duplicate { item_id } => (item_id.clone(), 0),
-        IngestOutcome::Updated { item_id, .. } => (item_id.clone(), 0),
+        } => (item_id.clone(), *chunks_enqueued, "ok"),
+        IngestOutcome::Duplicate { item_id } => (item_id.clone(), 0, "duplicate"),
+        IngestOutcome::Updated { item_id, .. } => (item_id.clone(), 0, "ok"),
+        IngestOutcome::Degraded {
+            item_id,
+            chunks_enqueued,
+            ..
+        } => (item_id.clone(), *chunks_enqueued, "degraded"),
         IngestOutcome::Skipped { reason } => {
             return Err(AppError::Unprocessable(reason.clone()));
         }
@@ -114,7 +119,14 @@ pub async fn ingest(
     // 此路由只调 ingest_document（非 _replacing），outcome 只会是 Inserted/Duplicate/Skipped，
     // 不会出现 Updated。仅 Inserted 需失效 search 缓存 + 即时 FTS（搜索不等 embedding）；
     // Duplicate 数据库状态未变，无需失效。
-    if matches!(outcome, IngestOutcome::Inserted { .. }) {
+    if matches!(
+        outcome,
+        IngestOutcome::Inserted { .. }
+            | IngestOutcome::Degraded {
+                chunks_enqueued: 1..,
+                ..
+            }
+    ) {
         if let Ok(mut cache) = state.search_cache.lock() {
             cache.clear();
         }
@@ -126,7 +138,7 @@ pub async fn ingest(
 
     Ok(Json(serde_json::json!({
         "id": id,
-        "status": "ok",
+        "status": status,
         "chunks_queued": chunks_queued
     })))
 }

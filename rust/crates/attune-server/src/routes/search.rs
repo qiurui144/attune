@@ -10,7 +10,7 @@ use crate::state::SharedState;
 
 /// 从 app_settings 读取 search.query_rewrite.enabled 开关。
 /// 未配置时返回 false（保守默认：LLM 不可用时不应在后台静默等待）。
-fn query_rewrite_enabled(state: &crate::state::AppState) -> bool {
+fn query_rewrite_enabled(state: &SharedState) -> bool {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(Some(data)) = vault.store().get_meta("app_settings") else {
         return false;
@@ -25,7 +25,7 @@ fn query_rewrite_enabled(state: &crate::state::AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn local_scheduler_native_kb_enabled(state: &crate::state::AppState) -> bool {
+fn local_scheduler_native_kb_enabled(state: &SharedState) -> bool {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let settings = vault
         .store()
@@ -38,12 +38,16 @@ fn local_scheduler_native_kb_enabled(state: &crate::state::AppState) -> bool {
 }
 
 /// 若开关开启且 LLM 可用，改写 query；失败或关闭时降级返回原始 query。
-async fn maybe_rewrite_query(state: &crate::state::AppState, query: &str) -> String {
+async fn maybe_rewrite_query(state: &SharedState, query: &str) -> String {
     if !query_rewrite_enabled(state) {
         return query.to_string();
     }
-    let Some(llm) = state.llm() else {
-        return query.to_string();
+    let llm = match crate::routes::privacy::governed_llm(state, false) {
+        Ok(llm) => llm,
+        Err(error) => {
+            tracing::debug!(%error, "query_rewrite: governed LLM unavailable; using original query");
+            return query.to_string();
+        }
     };
     match attune_core::query_rewrite::rewrite_query(query, llm).await {
         Ok(rewritten) if !rewritten.is_empty() => {
@@ -104,11 +108,10 @@ pub(crate) async fn search_with_state_blocking(
             .lock()
             .map_err(|_| "reranker lock".to_string())?
             .clone();
-        let emb = state
-            .embedding
-            .lock()
-            .map_err(|_| "emb lock".to_string())?
-            .clone();
+        // The provider returned here is either local or a consent-gated,
+        // redacting cloud wrapper. `None` intentionally degrades to full-text
+        // search instead of leaking the query through an ungoverned embedder.
+        let emb = crate::routes::privacy::governed_embedding(&state, false);
 
         let ft_guard = if search_params.skip_vector && best_effort_fulltext_when_vector_skipped {
             state.fulltext.try_lock().ok()

@@ -7,6 +7,7 @@ import { t } from '../i18n';
 import { api } from '../store/api';
 import { toast } from '../components/Toast';
 import { memberActivateLicense, memberLoginPassword } from '../hooks/useMember';
+import { isCloudNetworkEndpoint, schedulerNativeBase } from '../llmConfig';
 import type { WizardContext } from './types';
 
 type Diagnostics = {
@@ -37,8 +38,8 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [localSchedulerModels, setLocalSchedulerModels] = useState<string[]>([]);
   // 形态分裂：本地调度器设备优先本地推理；Laptop/Server 默认远端 token
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
-  // local-scheduler :8090 统一收口(OpenAI-compatible)。
-  const [localSchedulerEndpoint, setLocalSchedulerEndpoint] = useState('http://127.0.0.1:8090/v1');
+  // Scheduler-native API base; the server appends `/v1` only for its chat adapter.
+  const [localSchedulerEndpoint, setLocalSchedulerEndpoint] = useState('http://127.0.0.1:8090');
   const [localSchedulerDetecting, setLocalSchedulerDetecting] = useState(false);
   const [localSchedulerDetectResult, setLocalSchedulerDetectResult] = useState<string | null>(null);
   const [localSchedulerTargetModel, setLocalSchedulerTargetModel] = useState('llm-chat');
@@ -87,8 +88,9 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     try {
       const res = await api.post<ProbeLocalSchedulerResponse>('/llm/probe-edge-scheduler', {});
       if (res.found && res.endpoint) {
-        setLocalSchedulerEndpoint(res.endpoint);
-        const msg = t('wizard.llm.local_scheduler.detected', { endpoint: res.endpoint });
+        const schedulerBase = schedulerNativeBase(res.endpoint);
+        setLocalSchedulerEndpoint(schedulerBase);
+        const msg = t('wizard.llm.local_scheduler.detected', { endpoint: schedulerBase });
         setLocalSchedulerDetectResult(msg);
         if (!silent) {
           toast('success', msg);
@@ -120,6 +122,11 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     setTesting(true);
     setTestResult(null);
     try {
+      if (isCloudNetworkEndpoint(endpoint)) {
+        // Clicking “test” is explicit cloud-LLM egress consent. Persist it
+        // before the fail-closed backend probe so a fresh wizard can test.
+        await api.patch('/privacy/settings', { llm: true });
+      }
       const res = await api.post<{ ok: boolean; latency_ms?: number; error?: string }>(
         '/llm/test',
         { endpoint, api_key: apiKey, model: cloudModel },
@@ -137,7 +144,8 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   }
 
   async function selectLocalScheduler() {
-    if (!localSchedulerEndpoint.trim()) {
+    const schedulerBase = schedulerNativeBase(localSchedulerEndpoint);
+    if (!schedulerBase) {
       toast('error', t('wizard.llm.local_scheduler.need_endpoint'));
       return;
     }
@@ -145,14 +153,15 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     try {
       await api.patch('/settings', {
         llm: {
-          endpoint: localSchedulerEndpoint.trim(),
+          endpoint: schedulerBase,
           api_key: '',
           model: localSchedulerModels[0] ?? 'llm-chat',
           provider: 'local_scheduler',
         },
       });
     } catch {
-      /* 保存失败不阻塞流程 */
+      toast('error', t('settings.ai.llm.save_failed_toast'));
+      return;
     }
     onContinue();
   }
@@ -182,17 +191,34 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       return;
     }
     onUpdate({ llmMode: 'cloud' });
+    if (provider === 'attune-pro') {
+      // Login already persisted the membership-owned gateway token and endpoint.
+      try {
+        await api.patch('/privacy/settings', { llm: true });
+      } catch {
+        toast('error', t('settings.ai.llm.save_failed_toast'));
+        return;
+      }
+      onContinue();
+      return;
+    }
+    // Vendor choices select presets only; every BYOK request uses the same
+    // OpenAI-compatible transport implemented by the server.
+    const persistedProvider = 'openai_compat';
     try {
       await api.patch('/settings', {
         llm: {
           endpoint,
-          api_key: provider === 'attune-pro' ? '' : apiKey,
+          api_key: apiKey,
           model: cloudModel,
-          provider,
+          provider: persistedProvider,
         },
       });
+      // Selecting a cloud provider here is the explicit LLM egress opt-in.
+      await api.patch('/privacy/settings', { llm: true });
     } catch {
-      /* 保存失败不阻塞 */
+      toast('error', t('settings.ai.llm.save_failed_toast'));
+      return;
     }
     onContinue();
   }
@@ -308,18 +334,18 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               value={provider}
               onChange={(e) => {
                 setProvider(e.currentTarget.value);
+                setTestResult(null);
                 // 预填常见 provider endpoint
                 // 设计（2026-05-01 用户拍板，澄清版）：
                 //   - 笔电暂时不走本地 LLM（研发成本高，云端更准确，等本地解决不了再上）
                 //   - 主推 attune Pro 会员（登录即用，token 配额由 attune 计费跟踪）
-                //   - 用户已有的 web 会员（ChatGPT Plus / Claude Pro / Gemini Advanced）→ 走 BYOK API key
-                //   - 不预设第三方 "free API tier"（避免误导，用户的"免费"指浏览器 web 会话）
+                //   - BYOK means a separately billed provider API account/key;
+                //     consumer web subscriptions do not supply API credits.
                 const presets: Record<string, { endpoint: string; model: string }> = {
                   // ── ★ 主推：attune Pro 会员 gateway ──
                   'attune-pro': { endpoint: 'https://gateway.engi-stack.com/v1', model: 'auto' },
-                  // ── BYOK：用户已有付费会员的 API key ──
+                  // ── BYOK：用户自己的 API account/key ──
                   openai: { endpoint: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-                  anthropic: { endpoint: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' },
                   gemini: { endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
                   deepseek: { endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
                   qwen: { endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
@@ -344,7 +370,6 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               </optgroup>
               <optgroup label={t('wizard.llm.cloud.optgroup_byok')}>
                 <option value="openai">{t('wizard.llm.cloud.opt_openai')}</option>
-                <option value="anthropic">{t('wizard.llm.cloud.opt_anthropic')}</option>
                 <option value="gemini">{t('wizard.llm.cloud.opt_gemini')}</option>
                 <option value="deepseek">{t('wizard.llm.cloud.opt_deepseek')}</option>
                 <option value="qwen">{t('wizard.llm.cloud.opt_qwen')}</option>
@@ -368,20 +393,22 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                   label={t('wizard.member.email')}
                   placeholder={t('wizard.member.email_placeholder')}
                   value={ctx.memberEmail ?? ''}
-                  onInput={(e) => onUpdate({ memberEmail: e.currentTarget.value })}
+                  onInput={(e) => {
+                    onUpdate({ memberEmail: e.currentTarget.value });
+                    setMemberReady(false);
+                    setTestResult(null);
+                  }}
                 />
                 <Input
                   type="password"
                   label={t('wizard.member.password')}
                   placeholder={t('wizard.member.password_placeholder')}
                   value={ctx.memberPassword ?? ''}
-                  onInput={(e) => onUpdate({ memberPassword: e.currentTarget.value })}
-                />
-                <Input
-                  type="text"
-                  placeholder={t('wizard.llm.cloud.endpoint_default_placeholder')}
-                  value={endpoint}
-                  onInput={(e) => setEndpoint(e.currentTarget.value)}
+                  onInput={(e) => {
+                    onUpdate({ memberPassword: e.currentTarget.value });
+                    setMemberReady(false);
+                    setTestResult(null);
+                  }}
                 />
                 <Button
                   size="sm"
@@ -400,13 +427,19 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                   type="text"
                   placeholder={provider === 'custom' ? t('wizard.llm.cloud.custom_url_placeholder') : t('wizard.llm.cloud.endpoint_url_placeholder')}
                   value={endpoint}
-                  onInput={(e) => setEndpoint(e.currentTarget.value)}
+                  onInput={(e) => {
+                    setEndpoint(e.currentTarget.value);
+                    setTestResult(null);
+                  }}
                 />
                 <Input
                   type="password"
                   placeholder={provider === 'custom' ? t('wizard.llm.cloud.custom_token_placeholder') : t('wizard.llm.cloud.apikey_placeholder')}
                   value={apiKey}
-                  onInput={(e) => setApiKey(e.currentTarget.value)}
+                  onInput={(e) => {
+                    setApiKey(e.currentTarget.value);
+                    setTestResult(null);
+                  }}
                 />
               </>
             )}
@@ -414,7 +447,10 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               type="text"
               placeholder={t('wizard.llm.cloud.model_placeholder')}
               value={cloudModel}
-              onInput={(e) => setCloudModel(e.currentTarget.value)}
+              onInput={(e) => {
+                setCloudModel(e.currentTarget.value);
+                setTestResult(null);
+              }}
             />
             <Button
               size="sm"

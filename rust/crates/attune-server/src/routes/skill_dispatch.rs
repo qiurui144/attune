@@ -18,9 +18,9 @@
 //! 4. **Timeout + resource bound.** The subprocess is killed past [`AGENT_RUN_TIMEOUT`]; the
 //!    plugin's `resources` (cpu/token caps) apply via the agent binary's own SDK; the skill-level
 //!    token cap (`MAX_TOTAL_TOKENS`) additionally bounds the whole chain.
-//! 5. **LLM env only.** Just the `LLM_*` vars are forwarded (never the full parent env), through
-//!    the same `llm_env_from_settings` the HTTP route uses — so a pro agent reaches the configured
-//!    cloud LLM (member gateway / BYOK) without env leakage.
+//! 5. **Local LLM env only.** The child starts with an empty environment and receives a complete
+//!    `LLM_*` override only through the same local-destination policy as `/agents/{id}/run`.
+//!    Cloud, named-host, malformed, and key-only settings fail closed before the subprocess.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,8 +43,10 @@ pub struct SubprocessAgentDispatcher {
     /// Entitlement cache (T10 gate); shares the `Arc<RwLock>` inner state via cheap clone — no
     /// vault/network on dispatch, just an O(1) keyed lookup.
     entitlement_cache: attune_core::entitlement::EntitlementCache,
-    /// The `LLM_*` env forwarded to each agent subprocess (resolved once from settings).
-    llm_env: Vec<(String, String)>,
+    /// The `LLM_*` env forwarded to each agent subprocess (resolved once from settings). A policy
+    /// error is retained so non-agent skills remain usable, but any attempted plugin dispatch is
+    /// rejected before the child is spawned.
+    llm_env: Result<Vec<(String, String)>, String>,
     /// Plugins root (`plugin-install` layout: `<root>/<plugin_id>`).
     plugins_root: std::path::PathBuf,
 }
@@ -55,7 +57,14 @@ impl SubprocessAgentDispatcher {
     /// root can't be resolved (no plugin agent can run then — the runner degrades gracefully).
     pub fn from_state(state: &SharedState) -> Option<Self> {
         let plugins_root = PluginRegistry::default_plugins_dir().ok()?;
-        let llm_env = resolve_llm_env(state);
+        let llm_env = resolve_llm_env(state).map_err(|error| match error {
+            crate::error::AppError::Detailed { body, .. } => body
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("agent-llm-policy-rejected")
+                .to_string(),
+            other => other.to_string(),
+        });
         Some(SubprocessAgentDispatcher {
             registry: crate::routes::plugins::current_plugin_registry(state),
             entitlement_cache: state.entitlement_cache.clone(),
@@ -117,13 +126,16 @@ impl AgentDispatcher for SubprocessAgentDispatcher {
         let stdin_json =
             serde_json::to_string(input).map_err(|e| format!("serialize agent input: {e}"))?;
 
-        // (4)/(5) subprocess with timeout + LLM-env-only forwarding.
+        // (4)/(5) subprocess with timeout + isolated, local-only LLM env. Resolve this before
+        // touching the binary so a cloud/uncertain configuration cannot degrade into inherited
+        // process credentials.
+        let llm_env = self.llm_env.as_ref().map_err(Clone::clone)?.clone();
         let result = attune_core::agent_runner::run_agent_subprocess(
             &self.registry,
             agent_id,
             &plugin_dir,
             &stdin_json,
-            self.llm_env.clone(),
+            llm_env,
             AGENT_RUN_TIMEOUT,
         )
         .map_err(|e| format!("agent run: {e}"))?;
@@ -171,29 +183,25 @@ fn extract_llm_tokens(envelope: &Value) -> u32 {
         .unwrap_or(0)
 }
 
-/// Resolve the `LLM_*` env from `app_settings` (same shape + bare-prefix names as the HTTP
-/// `/agents/{id}/run` route's `llm_env_from_settings`).
-fn resolve_llm_env(state: &SharedState) -> Vec<(String, String)> {
-    let settings: Value = state
-        .vault
-        .lock()
-        .ok()
-        .and_then(|vault| {
-            vault
-                .store()
-                .get_meta("app_settings")
-                .ok()
-                .flatten()
-                .and_then(|data| serde_json::from_slice(&data).ok())
-        })
-        .unwrap_or_else(|| serde_json::json!({}));
-    crate::routes::agents::llm_env_from_settings(&settings)
+/// Resolve the exact same isolated, local-only environment used by the direct
+/// HTTP agent route. Keeping this thin prevents skill chains from acquiring a
+/// second, weaker outbound policy.
+fn resolve_llm_env(state: &SharedState) -> crate::error::AppResult<Vec<(String, String)>> {
+    crate::routes::agents::load_isolated_local_agent_llm_env(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn state_with_settings(settings: Value) -> SharedState {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-skill-agent-egress").expect("setup");
+        crate::settings_store::persist_settings(&vault, settings).expect("persist settings");
+        Arc::new(crate::state::AppState::new(vault, false))
+    }
 
     #[test]
     fn extract_llm_tokens_from_cost_used() {
@@ -214,6 +222,96 @@ mod tests {
     }
 
     #[test]
+    fn skill_chain_cloud_llm_fails_closed_and_never_forwards_the_key() {
+        let state = state_with_settings(json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://api.openai.com/v1",
+                "model": "gpt-test",
+                "api_key": "sk-must-not-reach-plugin"
+            }
+        }));
+
+        let error = resolve_llm_env(&state).expect_err("cloud skill agent must fail closed");
+        match error {
+            crate::error::AppError::Detailed { status, body } => {
+                assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+                assert_eq!(body["code"], "cloud-agent-proxy-required");
+                assert!(
+                    !body.to_string().contains("sk-must-not-reach-plugin"),
+                    "policy errors must not echo the encrypted credential"
+                );
+            }
+            other => panic!("expected cloud-agent policy error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_chain_compute_only_env_has_complete_empty_llm_overrides() {
+        let state = state_with_settings(json!({}));
+        let env = resolve_llm_env(&state).expect("compute-only skill agent env");
+        for key in ["LLM_PROVIDER", "LLM_ENDPOINT", "LLM_MODEL", "LLM_API_KEY"] {
+            assert_eq!(
+                env.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_str()),
+                Some(""),
+                "{key} must override any inherited process value"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_chain_loads_a_stored_key_only_for_a_proven_local_endpoint() {
+        let state = state_with_settings(json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "http://127.0.0.1:8090/v1",
+                "model": "local-model",
+                "api_key": "local-only-token"
+            }
+        }));
+        let env = resolve_llm_env(&state).expect("local endpoint should be dispatchable");
+
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "LLM_ENDPOINT" && value == "http://127.0.0.1:8090/v1"));
+        assert!(env
+            .iter()
+            .any(|(key, value)| key == "LLM_API_KEY" && value == "local-only-token"));
+    }
+
+    #[test]
+    fn skill_dispatch_policy_error_precedes_subprocess_resolution() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let plugin_dir = tmp.path().join("local-helper");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: local-helper\nname: Local Helper\ntype: skill\nversion: \"1.0.0\"\npricing:\n  tier: free\nagents:\n  - id: chained_helper\n    runtime: rust_binary\n    binary: bin/must-not-run\n",
+        )
+        .expect("write plugin.yaml");
+        let (registry, warnings) = PluginRegistry::scan(tmp.path()).expect("scan plugin");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let dispatcher = SubprocessAgentDispatcher {
+            registry: Arc::new(registry),
+            entitlement_cache: attune_core::entitlement::EntitlementCache::new(),
+            llm_env: Err("cloud-agent-proxy-required".to_string()),
+            plugins_root: tmp.path().to_path_buf(),
+        };
+        let error = dispatcher
+            .dispatch("chained_helper", &json!({"raw": "private"}))
+            .expect_err("policy error must stop dispatch");
+
+        assert_eq!(error, "cloud-agent-proxy-required");
+        assert!(
+            !error.contains("binary not found"),
+            "the subprocess resolver must not run after a policy failure"
+        );
+    }
+
+    #[test]
     fn dispatch_blocks_pro_plugin_without_entitlement_before_subprocess() {
         let tmp = tempfile::TempDir::new().expect("tmp");
         let plugin_dir = tmp.path().join("law-pro");
@@ -229,7 +327,7 @@ mod tests {
         let dispatcher = SubprocessAgentDispatcher {
             registry: Arc::new(registry),
             entitlement_cache: attune_core::entitlement::EntitlementCache::new(),
-            llm_env: Vec::new(),
+            llm_env: Ok(Vec::new()),
             plugins_root: tmp.path().to_path_buf(),
         };
         let err = dispatcher

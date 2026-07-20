@@ -86,7 +86,7 @@ fn warm_retrieval_after_unlock(state: &SharedState) {
     };
 
     let reranker = state.reranker.lock().ok().and_then(|g| g.clone());
-    let embedding = state.embedding.lock().ok().and_then(|g| g.clone());
+    let embedding = crate::routes::privacy::governed_embedding(state, false);
     let queries = retrieval_warmup_queries();
     let mut warmed = 0usize;
 
@@ -148,33 +148,20 @@ fn warm_retrieval_after_unlock(state: &SharedState) {
     );
 }
 
-/// Trust-chain T8: hydrate the in-memory [`attune_core::entitlement::EntitlementCache`]
-/// from the `plugin_entitlements` vault table at unlock. Reads rows under a SHORT vault
-/// lock (get dek + `list_entitlements` → owned Vec), then populates the cache (cache's
-/// own independent lock) AFTER the vault lock drops — never nested (lock-ordering 铁律).
-/// Best-effort: a locked / empty / unparseable vault leaves the cache empty (free users
-/// or no entitlements → no dispatch gate).
-fn hydrate_entitlement_cache(state: &SharedState) {
-    let rows = {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(dek) = vault.dek_db() else { return };
-        vault.store().list_entitlements(&dek).unwrap_or_default()
-        // vault lock drops here
-    };
-    state.entitlement_cache.hydrate_from_rows(rows);
-}
-
 fn spawn_post_unlock_services(state: SharedState) {
     // Keep unlock/setup responsive: crypto unlock returns the bearer token immediately,
     // while local indexes, model bootstrap, EP stack probing, and workers warm up in the
-    // background. LLM and entitlement cache hydration stay synchronous because they are
-    // short local reads and make post-login/chat routes usable right away.
+    // background. Membership-owned LLM/PluginHub credentials and entitlement
+    // rows deliberately remain inactive until the cloud-session restore below
+    // has re-verified the account, paid license, and device binding.
     state.reload_llm();
-    hydrate_entitlement_cache(&state);
+    state.reload_plugin_hub_from_settings();
+    state.entitlement_cache.hydrate_from_rows(Vec::new());
     let member_restore_state = state.clone();
-    tokio::task::spawn_blocking(move || {
+    tokio::spawn(async move {
         let _ =
-            crate::routes::member::restore_member_state_from_cloud_session(&member_restore_state);
+            crate::routes::member::restore_member_state_from_cloud_session(&member_restore_state)
+                .await;
     });
 
     tokio::task::spawn_blocking(move || {
@@ -268,6 +255,7 @@ pub async fn vault_setup(
             .map_err(|e| AppError::Internal(e.to_string()))?;
         (token, recovery_key)
     };
+    state.clear_locked_privacy_authorization();
     // Bug-C: vault unlock 后立即触发 reload_llm,确保 settings 中已有的 llm config
     // 在 server restart 后第一次 chat 即可工作(不再依赖 member-login gateway_should_apply
     // 走 reload_llm 分支)。
@@ -290,21 +278,38 @@ pub async fn vault_unlock(
             .unlock(&body.password)
             .map_err(|e| AppError::Unauthorized(e.to_string()))?
     };
+    state.clear_locked_privacy_authorization();
     // Bug-C: per setup 同步注释,unlock 后强制 reload_llm,杜绝
     // "server restart → unlock → chat 503" 的 P3。
     spawn_post_unlock_services(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
 }
 
+/// Flush and remove all vault-derived runtime handles before dropping the DEKs.
+/// Both public lock surfaces must use this helper so their security semantics
+/// cannot drift.
+pub(crate) async fn lock_and_clear_runtime(state: &SharedState) -> attune_core::error::Result<()> {
+    let blocking_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        // The guard belongs to the blocking transaction, not to its async
+        // waiter. If a disconnected client cancels the handler, Tokio detaches
+        // this closure; keeping the guard here still serializes member
+        // login/logout/restore until the actual vault clear+lock completes.
+        let _transition = blocking_state.member_transition.blocking_lock();
+        blocking_state.lock_vault_and_clear_runtime()
+    })
+    .await
+    .map_err(|_| {
+        attune_core::error::VaultError::Io(std::io::Error::other(
+            "vault runtime clear worker failed",
+        ))
+    })?
+}
+
 pub async fn vault_lock(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
-    // Clear search engines before locking (no vault mutex held)
-    state.clear_search_engines();
-    {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault
-            .lock()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-    }
+    lock_and_clear_runtime(&state)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(serde_json::json!({"status": "ok", "state": "locked"})))
 }
 
@@ -357,14 +362,24 @@ pub async fn vault_forgot_password_reset(
     State(state): State<SharedState>,
     Json(body): Json<ForgotPasswordResetRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // reset 前先清理内存索引，避免残留状态继续服务。
-    state.clear_search_engines();
-    {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault
-            .forgot_password_reset(&body.confirmation)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    }
+    // Clearing scheduler-native providers can release a blocking HTTP client's
+    // private Tokio runtime. Keep the complete clear/reset transaction off the
+    // async handler worker so the response cannot be reset midway through.
+    let confirmation = body.confirmation;
+    let blocking_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _transition = blocking_state.member_transition.blocking_lock();
+        blocking_state.clear_search_engines();
+        let vault = blocking_state
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        vault.forgot_password_reset(&confirmation)
+    })
+    .await
+    .map_err(|_| AppError::Internal("vault reset worker failed".into()))?
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.clear_locked_privacy_authorization();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -386,6 +401,7 @@ pub async fn vault_reset_with_recovery_key(
             .unlock(&body.new_password)
             .map_err(|e| AppError::Unauthorized(e.to_string()))?
     };
+    state.clear_locked_privacy_authorization();
 
     // Bug-C: reset 后也走 unlock 同样路径,显式 reload_llm。
     spawn_post_unlock_services(state.clone());
@@ -548,5 +564,169 @@ mod tests {
 
         assert_eq!(retrieval_warmup_metadata_limit(), 123);
         assert_eq!(retrieval_warmup_top_k(), 20);
+    }
+
+    fn install_blocking_scheduler_reranker(state: &SharedState) {
+        let install_state = state.clone();
+        std::thread::spawn(move || {
+            install_state.set_reranker(Some(std::sync::Arc::new(
+                attune_core::infer::reranker::LocalSchedulerRerankProvider::new(
+                    "http://127.0.0.1:8090",
+                    "kb.query.rerank",
+                    60_000,
+                ),
+            )));
+        })
+        .join()
+        .expect("install scheduler reranker");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vault_lock_drops_blocking_scheduler_client_off_tokio_worker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open vault");
+        vault.setup("vault-lock-runtime-test").expect("setup vault");
+        let state = std::sync::Arc::new(crate::state::AppState::new(vault, false));
+        install_blocking_scheduler_reranker(&state);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lock_and_clear_runtime(&state),
+        )
+        .await
+        .expect("vault lock must not reset the async connection")
+        .expect("vault lock must succeed");
+
+        assert!(matches!(
+            state
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state(),
+            attune_core::vault::VaultState::Locked
+        ));
+        assert!(state.reranker().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_vault_lock_keeps_member_transition_until_transaction_finishes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open vault");
+        vault
+            .setup("vault-lock-cancellation-test")
+            .expect("setup vault");
+        let state = std::sync::Arc::new(crate::state::AppState::new(vault, false));
+        install_blocking_scheduler_reranker(&state);
+
+        // Hold the vault mutex so the detached blocking transaction cannot
+        // finish before we cancel its async waiter.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder_state = state.clone();
+        let holder = std::thread::spawn(move || {
+            let _vault = holder_state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            held_tx.send(()).expect("signal held vault");
+            release_rx.recv().expect("release held vault");
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("vault mutex holder started");
+
+        let task_state = state.clone();
+        let lock_task = tokio::spawn(async move { lock_and_clear_runtime(&task_state).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if state.member_transition.try_lock().is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("blocking transaction acquired member transition");
+
+        lock_task.abort();
+        let _ = lock_task.await;
+        assert!(
+            state.member_transition.try_lock().is_err(),
+            "canceling the waiter must not release the transaction guard"
+        );
+
+        release_tx.send(()).expect("release held vault");
+        tokio::task::spawn_blocking(move || holder.join().expect("vault holder thread"))
+            .await
+            .expect("join vault holder");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(guard) = state.member_transition.try_lock() {
+                    drop(guard);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached blocking transaction completed");
+        assert!(matches!(
+            state
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state(),
+            attune_core::vault::VaultState::Locked
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forgot_password_reset_clear_drops_blocking_scheduler_client_off_tokio_worker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open vault");
+        vault
+            .setup("vault-reset-runtime-test")
+            .expect("setup vault");
+        let state = std::sync::Arc::new(crate::state::AppState::new(vault, false));
+        install_blocking_scheduler_reranker(&state);
+
+        let lock_state = state.clone();
+        std::thread::spawn(move || {
+            lock_state
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .lock()
+                .expect("lock vault without clearing runtime");
+        })
+        .join()
+        .expect("lock vault thread");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            vault_forgot_password_reset(
+                State(state.clone()),
+                Json(ForgotPasswordResetRequest {
+                    // An invalid confirmation still exercises the route's
+                    // clear-before-reset lifecycle without deleting any real
+                    // platform data directory from this parallel unit test.
+                    confirmation: "WRONG".into(),
+                }),
+            ),
+        )
+        .await
+        .expect("vault reset clear must not reset the async connection");
+
+        assert!(
+            result.is_err(),
+            "invalid reset confirmation must be rejected"
+        );
+        assert!(matches!(
+            state
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state(),
+            attune_core::vault::VaultState::Locked
+        ));
+        assert!(state.reranker().is_none());
     }
 }

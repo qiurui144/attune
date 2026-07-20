@@ -272,7 +272,7 @@ pub async fn ai_analyze(
     }
 
     // 2. 锁 vault 拉内容 + LLM 句柄（放在一个锁临时作用域里避免长持有）
-    let (item_content, llm_arc) = {
+    let (item_content, contains_l0) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault
             .dek_db()
@@ -282,21 +282,17 @@ pub async fn ai_analyze(
             .get_item(&dek, &body.item_id)
             .map_err(|e| AppError::Internal(e.to_string()))?
             .ok_or_else(|| AppError::NotFound("item not found".into()))?;
-        let llm = state
-            .llm
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .cloned();
-        (item.content, llm)
+        let contains_l0 = matches!(
+            vault
+                .store()
+                .get_item_privacy_tier(&body.item_id)
+                .map_err(|e| AppError::Internal(e.to_string()))?,
+            attune_core::store::audit::PrivacyTier::L0
+        );
+        (item.content, contains_l0)
     };
 
-    let llm = llm_arc.ok_or_else(|| {
-        AppError::ServiceUnavailable(
-            "LLM not configured. Start local scheduler or configure cloud provider in Settings."
-                .into(),
-        )
-    })?;
+    let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
 
     // 3. 确定分析范围
     let (scope_text, scope_base) = if body.scope == "selection" {

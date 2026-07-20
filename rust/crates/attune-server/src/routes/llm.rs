@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use crate::state::SharedState;
 use attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE;
 use attune_core::llm::{ChatMessage, LlmProvider, OpenAiLlmProvider};
-use attune_core::llm_settings::SETTINGS_META_KEY;
 use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
 use attune_core::vault::VaultState;
 
@@ -71,9 +70,23 @@ pub async fn test_llm(
             })),
         ));
     }
+    if !is_local_probe_target(ep) {
+        super::chat::enforce_cloud_llm_outbound(&state).map_err(|e| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": e.to_string(),
+                    "code": "cloud-llm-disabled"
+                })),
+            )
+        })?;
+    }
 
     let api_key = if body.api_key.trim().is_empty() {
-        stored_llm_api_key(&state).unwrap_or_default()
+        // GET /settings intentionally redacts secrets, so an unchanged form may
+        // omit the key. Reuse it only for the exact configured origin: changing
+        // a test endpoint must never replay an OpenAI/member token to a new host.
+        stored_llm_api_key_for_endpoint(&state, ep).unwrap_or_default()
     } else {
         body.api_key.trim().to_string()
     };
@@ -110,12 +123,38 @@ pub async fn test_llm(
     }
 }
 
-fn stored_llm_api_key(state: &SharedState) -> Option<String> {
+fn http_origin(raw: &str) -> Option<(String, String, u16)> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    Some((
+        url.scheme().to_ascii_lowercase(),
+        url.host_str()?.to_ascii_lowercase(),
+        url.port_or_known_default()?,
+    ))
+}
+
+fn same_http_origin(left: &str, right: &str) -> bool {
+    http_origin(left)
+        .zip(http_origin(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn stored_llm_api_key_for_endpoint(
+    state: &SharedState,
+    requested_endpoint: &str,
+) -> Option<String> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let raw = vault.store().get_meta(SETTINGS_META_KEY).ok().flatten()?;
-    let json: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    json.get("llm")
-        .and_then(|llm| llm.get("api_key"))
+    let json = crate::settings_store::load_settings(&vault)
+        .ok()
+        .flatten()?;
+    let llm = json.get("llm")?;
+    let configured_endpoint = llm.get("endpoint")?.as_str()?;
+    if !same_http_origin(configured_endpoint, requested_endpoint) {
+        return None;
+    }
+    llm.get("api_key")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -180,8 +219,7 @@ pub async fn probe_local_scheduler(
         .into_iter()
         .partition(|ep| is_local_probe_target(ep));
     if !nonlocal.is_empty() {
-        let enabled =
-            super::chat::read_privacy_outbound_enabled(&state, OutboundKind::Llm.as_str());
+        let enabled = super::privacy::outbound_enabled(&state, OutboundKind::Llm.as_str());
         let vault_unlocked = matches!(
             state
                 .vault
@@ -210,8 +248,9 @@ pub async fn probe_local_scheduler(
         }));
     }
 
-    let client = reqwest::Client::builder()
+    let remote_client = reqwest::Client::builder()
         .timeout(Duration::from_millis(350))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| {
             (
@@ -219,11 +258,26 @@ pub async fn probe_local_scheduler(
                 Json(serde_json::json!({"error": format!("probe client init failed: {e}")})),
             )
         })?;
+    let local_client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(350))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("local probe client init failed: {e}")})),
+            )
+        })?;
 
     let mut set = tokio::task::JoinSet::new();
     for endpoint in &candidates {
         let ep = endpoint.clone();
-        let client = client.clone();
+        let client = if attune_core::net::destination::is_local_network_url(&ep) {
+            local_client.clone()
+        } else {
+            remote_client.clone()
+        };
         set.spawn(async move {
             let ok = probe_scheduler_models(&client, &ep).await;
             (ep, ok)
@@ -267,28 +321,7 @@ fn normalize_probe_endpoint(input: &str) -> Option<String> {
 /// named hosts (a name can resolve anywhere, fail closed) — is non-local and
 /// must pass the OutboundGate before being probed.
 fn is_local_probe_target(ep: &str) -> bool {
-    let rest = ep
-        .strip_prefix("http://")
-        .or_else(|| ep.strip_prefix("https://"))
-        .unwrap_or(ep);
-    let authority = rest.split('/').next().unwrap_or("");
-    // strip port; tolerate bracketed IPv6 (`[::1]:8090`)
-    let host = if let Some(h) = authority.strip_prefix('[') {
-        h.split(']').next().unwrap_or("")
-    } else {
-        authority
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(authority)
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
-        Ok(IpAddr::V6(v6)) => v6.is_loopback(),
-        Err(_) => false,
-    }
+    attune_core::net::destination::is_local_network_url(ep)
 }
 
 fn discover_local_subnet_candidates() -> Vec<String> {
@@ -506,32 +539,57 @@ pub struct ReadinessQuery {
     pub model: Option<String>,
 }
 
+fn scheduler_readiness_state(
+    configured: &str,
+    probe: &crate::local_scheduler::SchedulerRuntimeProbe,
+) -> &'static str {
+    if probe.status != "ready" {
+        return "daemon_down";
+    }
+    if configured.is_empty()
+        || probe
+            .models
+            .iter()
+            .any(|model| model.name.eq_ignore_ascii_case(configured))
+    {
+        "ready"
+    } else {
+        "model_missing"
+    }
+}
+
 pub async fn local_scheduler_readiness(
     State(state): State<SharedState>,
     axum::extract::Query(q): axum::extract::Query<ReadinessQuery>,
 ) -> Json<serde_json::Value> {
     let scheduler_base = crate::local_scheduler::base_from_state(&state);
     let configured = q.model.unwrap_or_default().trim().to_string();
+    let probe = crate::local_scheduler::probe_scheduler_runtime(scheduler_base.clone()).await;
+    let readiness_state = scheduler_readiness_state(&configured, &probe);
+    let models = probe
+        .models
+        .iter()
+        .map(|model| model.name.clone())
+        .collect::<Vec<_>>();
     let resolved = if configured.is_empty() {
         "local-scheduler".to_string()
     } else {
         configured.clone()
     };
-    let models = if configured.is_empty() {
-        Vec::new()
-    } else {
-        vec![configured]
-    };
     Json(serde_json::json!({
         "readiness": {
-            "state": "ready",
+            "state": readiness_state,
+            "configured": configured,
+            "available": models,
             "resolved": resolved,
         },
-        "models": models,
+        "models": probe.models.iter().map(|model| &model.name).collect::<Vec<_>>(),
         "install_plan": scheduler_managed_install_plan(&scheduler_base),
         "scheduler": {
             "managed": true,
             "endpoint": format!("{scheduler_base}/v1"),
+            "status": probe.status,
+            "error": probe.error,
         },
     }))
 }
@@ -583,6 +641,12 @@ fn scheduler_managed_install_plan(base_url: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    fn scheduler_model(name: &str) -> attune_core::edge_cloud::SchedulerModelStatus {
+        attune_core::edge_cloud::SchedulerModelStatus {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn scheduler_native_probe_endpoint_strips_v1_suffix() {
@@ -620,6 +684,32 @@ mod tests {
             "scheduler-native /models should be accepted after stripping /v1"
         );
     }
+
+    #[test]
+    fn scheduler_readiness_reports_daemon_missing_and_ready_states() {
+        let daemon_down = crate::local_scheduler::SchedulerRuntimeProbe {
+            status: "missing".to_string(),
+            error: Some("connection refused".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            scheduler_readiness_state("llm-chat", &daemon_down),
+            "daemon_down"
+        );
+
+        let ready = crate::local_scheduler::SchedulerRuntimeProbe {
+            status: "ready".to_string(),
+            models: vec![scheduler_model("llm-chat")],
+            ..Default::default()
+        };
+        assert_eq!(
+            scheduler_readiness_state("missing-model", &ready),
+            "model_missing"
+        );
+        assert_eq!(scheduler_readiness_state("LLM-CHAT", &ready), "ready");
+        assert_eq!(scheduler_readiness_state("", &ready), "ready");
+    }
+
     // normalize_probe_endpoint: 已有 http:// → 加 /v1
     #[test]
     fn normalize_adds_v1_suffix() {
@@ -763,6 +853,29 @@ mod tests {
         }
         for good in ["http://h:8090", "https://api.x.com/v1"] {
             assert!(good.starts_with("http://") || good.starts_with("https://"));
+        }
+    }
+
+    #[test]
+    fn stored_test_credentials_are_bound_to_the_configured_origin() {
+        assert!(super::same_http_origin(
+            "https://api.openai.com/v1",
+            "https://API.OPENAI.COM:443/v1/chat/completions"
+        ));
+        assert!(super::same_http_origin(
+            "http://127.0.0.1:8090/v1",
+            "http://127.0.0.1:8090/other"
+        ));
+        for endpoint in [
+            "https://evil.example/v1",
+            "http://api.openai.com/v1",
+            "https://api.openai.com:8443/v1",
+            "not-a-url",
+        ] {
+            assert!(
+                !super::same_http_origin("https://api.openai.com/v1", endpoint),
+                "must not reuse a stored key for {endpoint}"
+            );
         }
     }
 

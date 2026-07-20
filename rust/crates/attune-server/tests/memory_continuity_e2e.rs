@@ -62,7 +62,10 @@ fn spawn_unlocked(active_dims: usize) -> (Arc<AppState>, tempfile::TempDir) {
 
     let state = Arc::new(AppState::new(vault, false));
     state.install_job_store(); // job-store ready before any route runs
-    state.set_embedding(Some(Arc::new(MockEmbeddingProvider::new(active_dims))));
+    state.set_embedding_with_locality(
+        Some(Arc::new(MockEmbeddingProvider::new(active_dims))),
+        true,
+    );
     (state, tmp)
 }
 

@@ -554,6 +554,8 @@ impl OllamaLlmProvider {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client"),
             base_url: "http://localhost:11434".to_string(),
@@ -1060,7 +1062,12 @@ async fn resolve_openai_compat_model(
 
 impl OpenAiLlmProvider {
     pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
-        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none());
+        if crate::net::destination::is_local_network_url(endpoint) {
+            builder = builder.no_proxy();
+        }
         // Self-hosted / LAN gateway support: trust an operator-provided CA via env
         // ATTUNE_CLOUD_CA_PEM (a path to a PEM file, or inline PEM). The CA is ADDED
         // to the trust store — full TLS chain/hostname/validity verification stays
@@ -1556,24 +1563,10 @@ impl LlmProvider for OpenAiLlmProvider {
     }
 
     fn is_local(&self) -> bool {
-        // OpenAI 兼容协议既可指向云端也可指向本地（Ollama v1 / LM Studio / vLLM）。
-        // 按 endpoint 的 **host 精确判定**（解析 URL 取 host，非子串匹配）——
-        // 子串匹配会把 `https://localhost.evil.com/v1` 这类含 "localhost" 的
-        // 云端地址误判为本地, 绕过 F1 隐私守卫使证据对话外发。
-        let Ok(url) = reqwest::Url::parse(&self.endpoint) else {
-            return false; // 解析失败 → 保守视为云端
-        };
-        let Some(host) = url.host_str() else {
-            return false;
-        };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        if host.eq_ignore_ascii_case("localhost") {
-            return true;
-        }
-        // is_loopback 覆盖 127.0.0.0/8 与 ::1；is_unspecified 覆盖 0.0.0.0 与 ::
-        host.parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback() || ip.is_unspecified())
-            .unwrap_or(false)
+        // OpenAI-compatible endpoints include local scheduler/Ollama/vLLM as well as clouds.
+        // Keep this boundary identical to embedding and scheduler probing so an RFC1918
+        // scheduler is not accidentally treated as public egress.
+        crate::net::destination::is_local_network_url(&self.endpoint)
     }
 }
 
@@ -2020,6 +2013,11 @@ mod tests {
         assert!(local("http://127.0.0.1:1234/v1"));
         assert!(local("http://[::1]:8090/v1"));
         assert!(local("http://127.0.0.5/v1"), "127.0.0.0/8 回环段应判本地");
+        assert!(
+            local("http://10.0.0.2:8090/v1"),
+            "RFC1918 scheduler 应判本地"
+        );
+        assert!(local("http://192.168.1.2:8090/v1"));
         // 正常云端 → false
         assert!(!local("https://api.openai.com/v1"));
         assert!(!local("https://hiapi.online/v1"));

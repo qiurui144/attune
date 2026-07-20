@@ -8,11 +8,13 @@
 //! provider call site, and that providers advertise their honored determinism level
 //! via `EvalBlock { determinism, seed_used }` in the chat response.
 
-use attune_server::test_support::{spawn_eval_server, EvalTestClient};
+use attune_server::test_support::{
+    spawn_eval_server, spawn_eval_server_with_cloud_llm, EvalTestClient,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seed_header_propagates_to_llm_options() {
-    let srv = spawn_eval_server().await;
+    let srv = spawn_eval_server_with_cloud_llm().await;
     let client = EvalTestClient::new(srv.url());
 
     // Same query, same seed, force temp 0 -> same answer (using MockLlmProvider that hashes seed).
@@ -30,7 +32,7 @@ async fn seed_header_propagates_to_llm_options() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn different_seeds_produce_different_answers() {
-    let srv = spawn_eval_server().await;
+    let srv = spawn_eval_server_with_cloud_llm().await;
     let client = EvalTestClient::new(srv.url());
 
     let r1 = client.chat("hello", Some(1), true).await;
@@ -47,7 +49,7 @@ async fn anthropic_provider_degrades_to_temp0() {
     // Anthropic doesn't support seed -> must return determinism="temp0"
     // (test client passes provider_label header so server installs an Anthropic-like
     // mock that reports DeterminismLevel::Temp0).
-    let srv = spawn_eval_server().await;
+    let srv = spawn_eval_server_with_cloud_llm().await;
     let client = EvalTestClient::with_provider(srv.url(), "anthropic");
 
     let r = client.chat("hi", Some(42), true).await;

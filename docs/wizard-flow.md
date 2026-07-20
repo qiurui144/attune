@@ -48,13 +48,15 @@ attune 桌面/服务端首次启动走 5 步 wizard, 完成后进入主 UI. 本�
 
 选项:
 - **★ 云端 API** — 默认推荐. 下拉选 vendor (Attune Pro Membership Gateway /
-  OpenAI / Anthropic / Gemini / DeepSeek / Qwen / 自定义 OpenAI 兼容).
-  填账号 → 测试连接 → 验证登录 → 使用云端
+  OpenAI / Gemini OpenAI-compatible / DeepSeek / Qwen / 自定义 OpenAI-compatible).
+  会员模式填写账号并验证登录；BYOK 模式填写 endpoint、开发者 API key 与模型，
+  可测试连接后使用云端
 - **暂不配置 (演示模式)** — 跳过 LLM, chat 禁用, 可浏览所有界面 + 索引文件
 
 **FormFactor 形态感知** (per [ADR 0002](adr/0002-formfactor-llm-split.md)):
 - Laptop / Server / Unknown → 默认呈现"云端 API"卡片优先
-- 本地调度器设备 → 额外显示"本地 Ollama" 自动检测卡片
+- 所有形态均可在高级选项中展开“边缘调度器”自动检测卡片；本地调度器设备
+  会优先推荐该路径。Attune 只连接 scheduler，不直连或管理 Ollama worker
 
 ## Step 4 — 硬件
 

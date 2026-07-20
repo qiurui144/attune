@@ -29,7 +29,24 @@ async fn spawn_mock_cloud(
     activate_body: serde_json::Value,
     activate_status: u16,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    let (url, handle, _, _) = spawn_counted_mock_cloud(activate_body, activate_status).await;
+    (url, handle)
+}
+
+async fn spawn_counted_mock_cloud(
+    activate_body: serde_json::Value,
+    activate_status: u16,
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
     use axum::{routing::post, Json, Router};
+    use std::sync::atomic::Ordering;
+
+    let activate_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let device_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let device_body = serde_json::json!({
         "device_token": "dev-token-not-real",
         "device_id": "test-device-id",
@@ -37,12 +54,16 @@ async fn spawn_mock_cloud(
         "max_activations": 3,
         "current_activations": 1
     });
+    let activate_calls_for_route = Arc::clone(&activate_calls);
+    let device_calls_for_route = Arc::clone(&device_calls);
     let app = Router::new()
         .route(
             "/api/v1/member/activate",
             post(move || {
                 let body = activate_body.clone();
+                let calls = Arc::clone(&activate_calls_for_route);
                 async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
                     (
                         axum::http::StatusCode::from_u16(activate_status).unwrap(),
                         Json(body),
@@ -54,7 +75,11 @@ async fn spawn_mock_cloud(
             "/api/v1/devices/activate",
             post(move || {
                 let body = device_body.clone();
-                async move { (axum::http::StatusCode::OK, Json(body)) }
+                let calls = Arc::clone(&device_calls_for_route);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (axum::http::StatusCode::OK, Json(body))
+                }
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -62,7 +87,12 @@ async fn spawn_mock_cloud(
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app.into_make_service()).await;
     });
-    (format!("http://{addr}"), handle)
+    (
+        format!("http://{addr}"),
+        handle,
+        activate_calls,
+        device_calls,
+    )
 }
 
 async fn member_state(client: &reqwest::Client, base: &str) -> serde_json::Value {
@@ -119,7 +149,9 @@ async fn activate_license_full_contract() {
     }
 
     // ── attune server (require_auth=false → 聚焦激活逻辑) ─────────────────────
-    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    let db_path = tmp.path().join("vault.db");
+    let config_dir = tmp.path().join("vault-config");
+    let vault = attune_core::vault::Vault::open(&db_path, &config_dir).expect("open vault");
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
     let router = attune_server::build_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -196,6 +228,38 @@ async fn activate_license_full_contract() {
         "failed activation must NOT set Paid (fail-closed)"
     );
 
+    // A successful HTTP response is not itself a paid entitlement. A valid
+    // individual/free license must fail closed before device binding, plugin
+    // download, or local Paid state is applied.
+    let (free_cloud, free) = spawn_mock_cloud(
+        serde_json::json!({
+            "plan": "individual",
+            "allowed_plugins": ["law-pro"],
+            "gateway_token": "must-not-be-installed",
+            "gateway_url": "https://gateway.engi-stack.com/v1"
+        }),
+        200,
+    )
+    .await;
+    set_accounts_url(&client, &base, &free_cloud).await;
+    let resp = client
+        .post(format!("{base}/api/v1/member/activate-license"))
+        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-FREE" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 403, "free plan must not grant Paid");
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["code"],
+        "license-plan-not-paid"
+    );
+    free.abort();
+    assert_eq!(
+        member_state(&client, &base).await["is_paid"],
+        false,
+        "non-paid license response must leave member state unpaid"
+    );
+
     // ── 异常: cloud 200 但 gateway 字段缺 (manual 会员无 gateway) → 仍 Paid,但
     //    不写 gateway settings (此时 vault 刚 unlock,llm 未配置 → api_key_set 应仍 false)。
     //    必须在 full-contract 写入之前断言,否则会读到后写入的 gateway key。
@@ -227,8 +291,85 @@ async fn activate_license_full_contract() {
         "no gateway token present → must not have written one"
     );
 
+    // Consent durability is the first local commit barrier. If the privacy
+    // block cannot be persisted, activation must return an error without
+    // clearing the existing session or replacing its active member state.
+    let (consent_cloud, consent_server) = spawn_mock_cloud(
+        serde_json::json!({"plan": "pro", "allowed_plugins": []}),
+        200,
+    )
+    .await;
+    set_accounts_url(&client, &base, &consent_cloud).await;
+    let before_consent_failure = member_state(&client, &base).await;
+    // The previous license-code activation has no account cookie. A failed
+    // replacement must preserve that active runtime and must not manufacture
+    // or retire unrelated durable session state. Account-cookie switching is
+    // covered separately by the epoch/transaction regression tests.
+    assert!(attune_core::cloud_session::load_cloud_session()
+        .expect("load session precondition")
+        .is_none());
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let raw = vault
+            .store()
+            .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+            .unwrap()
+            .unwrap();
+        let mut settings: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        settings["privacy"] = serde_json::json!([]);
+        vault
+            .store()
+            .set_meta(
+                attune_core::llm_settings::SETTINGS_META_KEY,
+                &serde_json::to_vec(&settings).unwrap(),
+            )
+            .unwrap();
+    }
+    let resp = client
+        .post(format!("{base}/api/v1/member/activate-license"))
+        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-CONSENT-FAIL" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    assert_eq!(
+        member_state(&client, &base).await,
+        before_consent_failure,
+        "consent failure must occur before old member runtime is cleared"
+    );
+    assert!(attune_core::cloud_session::load_cloud_session()
+        .expect("load cloud session after failed activation")
+        .is_none());
+    consent_server.abort();
+    // Repair the deliberately malformed privacy block for the remaining happy
+    // path. The previous successful activation had already opted in.
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let raw = vault
+            .store()
+            .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+            .unwrap()
+            .unwrap();
+        let mut settings: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        settings["privacy"] = serde_json::json!({
+            "llm": false,
+            "cloud_saas": true,
+            "webdav": false,
+            "web_search": false,
+            "telemetry": false,
+            "privacy_tour_seen": false
+        });
+        vault
+            .store()
+            .set_meta(
+                attune_core::llm_settings::SETTINGS_META_KEY,
+                &serde_json::to_vec(&settings).unwrap(),
+            )
+            .unwrap();
+    }
+
     // ── happy path: full gateway contract → 200 Paid + gateway wired/locked ───
-    let (good_cloud, good) = spawn_mock_cloud(
+    let (good_cloud, good, activate_calls, device_calls) = spawn_counted_mock_cloud(
         serde_json::json!({
             "plan": "pro",
             "expires_at": "2026-12-31T00:00:00+00:00",
@@ -255,7 +396,6 @@ async fn activate_license_full_contract() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["plan"], "pro");
     assert_eq!(body["allowed_plugins"][0], "law-pro");
-    good.abort();
 
     // MemberState::Paid.
     assert_eq!(
@@ -295,5 +435,65 @@ async fn activate_license_full_contract() {
         "gateway default model written"
     );
 
+    // A license-code activation has no account cookie. Reopen the same vault
+    // in a fresh AppState, unlock it, and require a second online authorization
+    // + device proof before Paid/runtime state is rebuilt.
     srv.abort();
+    let _ = srv.await;
+    drop(state);
+
+    let restarted_vault =
+        attune_core::vault::Vault::open(&db_path, &config_dir).expect("reopen persisted vault");
+    assert!(matches!(
+        restarted_vault.state(),
+        attune_core::vault::VaultState::Locked
+    ));
+    let restarted_state = Arc::new(attune_server::state::AppState::new(restarted_vault, false));
+    let restarted_router = attune_server::build_router(Arc::clone(&restarted_state));
+    let restarted_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let restarted_addr = restarted_listener.local_addr().unwrap();
+    let restarted_server = tokio::spawn(async move {
+        let _ = axum::serve(restarted_listener, restarted_router.into_make_service()).await;
+    });
+    let restarted_base = format!("http://{restarted_addr}");
+    let unlock = client
+        .post(format!("{restarted_base}/api/v1/vault/unlock"))
+        .json(&serde_json::json!({ "password": "P@ss-activate-not-real" }))
+        .send()
+        .await
+        .expect("unlock restarted vault");
+    assert!(
+        unlock.status().is_success(),
+        "restart unlock: {}",
+        unlock.status()
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let restored = loop {
+        let snapshot = member_state(&client, &restarted_base).await;
+        if snapshot["is_paid"] == true || std::time::Instant::now() >= deadline {
+            break snapshot;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        restored["is_paid"], true,
+        "encrypted activation receipt must restore only after online re-verification: {restored}"
+    );
+    assert!(
+        activate_calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "restart restore must call cloud authorization again"
+    );
+    assert!(
+        device_calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "restart restore must prove the device again"
+    );
+    assert_eq!(
+        get_settings(&client, &restarted_base).await["llm"]["api_key_set"],
+        true,
+        "restored activation must rebuild the encrypted member gateway"
+    );
+
+    restarted_server.abort();
+    good.abort();
 }

@@ -59,11 +59,7 @@ pub fn entitlement_row_for(
     } else {
         "paid"
     };
-    // license_id: prefer the explicit numeric license_id, else the row id.
-    let license_id = lic
-        .license_id
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| lic.id.to_string());
+    let license_id = lic.canonical_id();
     // revoked license → status revoked (fail-closed even before first re-verify).
     let status = if lic.revoked_at.is_some() {
         "revoked"

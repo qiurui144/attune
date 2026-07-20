@@ -1,5 +1,6 @@
 //! 本地文件夹采集源。遍历目录、按扩展名过滤、把每个文件读成 RawDocument。
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use walkdir::WalkDir;
@@ -7,6 +8,46 @@ use walkdir::WalkDir;
 use crate::error::Result;
 use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
 use crate::parser;
+
+/// Keep directory scans aligned with the HTTP upload ceiling.  The metadata
+/// check is only an optimization: the bounded reader below is the actual
+/// TOCTOU-safe memory guard when a file grows while it is being scanned.
+const DEFAULT_MAX_LOCAL_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_local_file_bytes() -> u64 {
+    std::env::var("ATTUNE_LOCAL_SCAN_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_MAX_LOCAL_FILE_BYTES)
+}
+
+fn read_file_bounded(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!(
+                "file is {} bytes, above the local scan limit of {max_bytes} bytes",
+                metadata.len()
+            ),
+        ));
+    }
+
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len().min(max_bytes).min(64 * 1024)).unwrap_or(64 * 1024),
+    );
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("file grew above the local scan limit of {max_bytes} bytes while reading"),
+        ));
+    }
+    Ok(bytes)
+}
 
 /// 本地文件夹采集源。
 pub struct LocalFolderConnector {
@@ -69,7 +110,7 @@ impl SourceConnector for LocalFolderConnector {
                 continue;
             }
             // 读字节 + 算 SHA-256 作为增量 marker。单文件读失败不致命。
-            let bytes = match std::fs::read(path) {
+            let bytes = match read_file_bounded(path, max_local_file_bytes()) {
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!("LocalFolderConnector: read {} failed: {e}", path.display());
@@ -167,5 +208,16 @@ mod tests {
             connector.fetch_documents(&mut sink).unwrap();
         } // sink drop，释放对 count 的借用
         assert_eq!(count, 1, "non-recursive 只枚举顶层");
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_file_before_allocating_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oversized.pdf");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(4097).unwrap();
+
+        let error = read_file_bounded(&path, 4096).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
     }
 }

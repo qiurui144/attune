@@ -158,8 +158,6 @@ pub async fn post_ocr(
             "profile": profile.clone(),
             "id_card_subtype": id_card_subtype.clone(),
             "file_base64": BASE64_STANDARD.encode(&bytes),
-            "timeout_ms": OCR_SCHEDULER_TIMEOUT.as_millis() as u64,
-            "ttl_ms": OCR_SCHEDULER_TIMEOUT.as_millis() as u64,
         }),
         true,
         OCR_SCHEDULER_TIMEOUT,

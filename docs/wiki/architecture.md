@@ -232,8 +232,8 @@ Attune bind/search/chat
 
 - 不把整本手册塞进 LLM，即使提供方声称 1M 窗口也一样；用分区、混合检索、SRAS 和小证据包。
 - 大体量向量库构建默认后台运行；API 回归仍可走同步 bind，以便测量完整耗时。
-- PDF 文本层优先。PDF 页级 OCR 默认关闭，只有设置
-  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1` 才进入有界页面 OCR。
+- PDF 文本层优先。PDF 页级 OCR 默认进入有界页面 OCR；可用
+  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0` 显式关闭。
 - OCR/ASR 不可用时，Attune 记录 metadata-only fallback，不伪造正文；详细内容查询必须拒答或说明内容不可用。
 - 短关键词、型号、ATA 编号、路径/代码式标识符在 BM25/exact 已命中时跳过 scheduler query embedding，避免简单查询被后台批量向量构建拖慢。
 - 本机 scheduler embedding 默认 512 条任务批量，可配置到 2048；若 scheduler 报物理 batch 限制，Attune 自动拆分重试。

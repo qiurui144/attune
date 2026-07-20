@@ -23,11 +23,19 @@ import { MainShell } from './layout';
 import { PrivacyTour } from './views/PrivacyTour';
 import { useShortcut } from './hooks/useShortcut';
 import { api, ApiError, clearToken, getToken } from './store/api';
-import { currentView, memberState, settingsInitialTab, vaultState, sidebarCollapsed } from './store/signals';
+import {
+  currentView,
+  memberState,
+  settings as appSettings,
+  settingsInitialTab,
+  vaultState,
+  sidebarCollapsed,
+} from './store/signals';
 import type { SettingsTabId, View } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
 import { startProgressWS } from './store/ws';
 import { loadMemberState } from './hooks/useMember';
+import { loadSettings } from './hooks/useSettings';
 import { t } from './i18n';
 
 type VaultStatusResponse = {
@@ -259,6 +267,7 @@ export function App(): JSX.Element {
       let settings: SettingsResponse;
       try {
         settings = await api.get<SettingsResponse>('/settings');
+        appSettings.value = settings as Record<string, unknown>;
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           phase.value = { kind: 'login' };
@@ -289,6 +298,7 @@ export function App(): JSX.Element {
     }
     // Reconnect the progress WebSocket now that a token is available.
     startProgressWS();
+    await loadSettings();
     phase.value = { kind: 'main' };
   }
 
@@ -297,6 +307,7 @@ export function App(): JSX.Element {
     // Reconnect the progress WebSocket now that a token is available.
     startProgressWS();
     const settings = await api.get<SettingsResponse>('/settings').catch(() => ({}) as SettingsResponse);
+    appSettings.value = settings as Record<string, unknown>;
     if (settings.wizard?.complete) {
       phase.value = { kind: 'main' };
     } else {

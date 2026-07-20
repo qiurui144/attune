@@ -12,12 +12,16 @@ use crate::error::{Result, VaultError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::time::Duration;
+
+const DEFAULT_MAX_SCHEDULER_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Blocking client for scheduler control/contract APIs.
 pub struct LocalSchedulerClient {
     base_url: String,
     client: reqwest::blocking::Client,
+    max_response_bytes: usize,
 }
 
 impl LocalSchedulerClient {
@@ -29,12 +33,32 @@ impl LocalSchedulerClient {
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .connect_timeout(timeout)
+            .no_proxy()
+            // A local scheduler must never redirect a prompt/document-bearing
+            // request to another origin after the destination check above.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         LocalSchedulerClient {
             base_url: normalize_scheduler_base(base_url),
             client,
+            max_response_bytes: DEFAULT_MAX_SCHEDULER_RESPONSE_BYTES,
         }
+    }
+
+    /// Bound the bytes retained before JSON decoding. Scheduler responses are
+    /// untrusted local IPC; semantic validators run only after this transport
+    /// guard has prevented an oversized body from being allocated in full.
+    pub fn with_max_response_bytes(mut self, max_response_bytes: usize) -> Self {
+        self.max_response_bytes = max_response_bytes.max(1);
+        self
+    }
+
+    /// Rebuild this client against the same normalized scheduler origin with a
+    /// tighter per-request timeout. Polling callers use this to ensure no job
+    /// status request can outlive their remaining total deadline.
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        Self::with_base(&self.base_url, timeout).with_max_response_bytes(self.max_response_bytes)
     }
 
     pub fn benchmark_contract(&self) -> Result<SchedulerBenchmarkContract> {
@@ -56,7 +80,18 @@ impl LocalSchedulerClient {
 
     pub fn job(&self, job_id: &str) -> Result<SchedulerJobStatus> {
         validate_path_segment("job_id", job_id)?;
-        self.get_json(&format!("/jobs/{job_id}"))
+        let path = format!("/jobs/{job_id}");
+        let url = self.request_url(&path)?;
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .map_err(|e| scheduler_transport_error(&path, e))?;
+        let http_status = resp.status().as_u16();
+        let mut response: SchedulerJobStatus =
+            parse_response(&path, resp, self.max_response_bytes)?;
+        response.http_status = Some(http_status);
+        Ok(response)
     }
 
     pub fn cancel_job(&self, job_id: &str) -> Result<SchedulerJobStatus> {
@@ -72,38 +107,48 @@ impl LocalSchedulerClient {
     ) -> Result<SchedulerKbTaskResponse> {
         validate_path_segment("task", task)?;
         let suffix = if explicit_async { ":async" } else { "" };
-        self.post_json(&format!("/kb/tasks/{task}{suffix}"), body)
-    }
-
-    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .map_err(|e| scheduler_transport_error(path, e))?;
-        parse_response(path, resp)
-    }
-
-    fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .post(&url)
-            .send()
-            .map_err(|e| scheduler_transport_error(path, e))?;
-        parse_response(path, resp)
-    }
-
-    fn post_json<T: DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
+        let path = format!("/kb/tasks/{task}{suffix}");
+        let url = self.request_url(&path)?;
         let resp = self
             .client
             .post(&url)
             .json(body)
             .send()
+            .map_err(|e| scheduler_transport_error(&path, e))?;
+        let http_status = resp.status().as_u16();
+        let mut response: SchedulerKbTaskResponse =
+            parse_response(&path, resp, self.max_response_bytes)?;
+        response.http_status = Some(http_status);
+        Ok(response)
+    }
+
+    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = self.request_url(path)?;
+        let resp = self
+            .client
+            .get(&url)
+            .send()
             .map_err(|e| scheduler_transport_error(path, e))?;
-        parse_response(path, resp)
+        parse_response(path, resp, self.max_response_bytes)
+    }
+
+    fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = self.request_url(path)?;
+        let resp = self
+            .client
+            .post(&url)
+            .send()
+            .map_err(|e| scheduler_transport_error(path, e))?;
+        parse_response(path, resp, self.max_response_bytes)
+    }
+
+    fn request_url(&self, path: &str) -> Result<String> {
+        crate::net::destination::join_local_scheduler_url(&self.base_url, path).ok_or_else(|| {
+            VaultError::LlmUnavailable(
+                "local scheduler endpoint must use an unambiguous localhost, loopback, or private IP URL"
+                    .to_string(),
+            )
+        })
     }
 }
 
@@ -343,6 +388,11 @@ pub struct SchedulerMemorySnapshot {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SchedulerJobStatus {
+    /// Transport status captured by [`LocalSchedulerClient`].
+    #[serde(skip)]
+    pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub schema_version: String,
     #[serde(default)]
     pub job_id: String,
     #[serde(default)]
@@ -387,6 +437,12 @@ pub struct SchedulerJobStatus {
     pub worker_pid: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_optional_error_string")]
     pub error: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_error_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub error_code: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
     #[serde(default)]
@@ -401,8 +457,68 @@ pub struct SchedulerJobStatus {
     pub refusal_policy: Option<String>,
 }
 
+/// Normalized lifecycle state for scheduler jobs.
+///
+/// The scheduler contract uses `queued`, `running`, `cancel_requested`, `done`,
+/// `error`, `canceled`, and `expired`, while older deployments and adapters may
+/// return common aliases. Unknown values remain waiting so callers preserve the
+/// existing conservative behavior of polling until their local deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerJobState {
+    Succeeded,
+    Failed,
+    Waiting,
+}
+
+impl SchedulerJobStatus {
+    pub fn normalized_state(&self) -> SchedulerJobState {
+        if self
+            .error
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return SchedulerJobState::Failed;
+        }
+        SchedulerJobState::from_status(&self.status)
+    }
+
+    pub fn failure_detail(&self) -> Option<&str> {
+        self.error
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.detail
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .or_else(|| {
+                self.reason
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+    }
+}
+
+impl SchedulerJobState {
+    pub fn from_status(status: &str) -> Self {
+        match status.trim().to_ascii_lowercase().as_str() {
+            "done" | "completed" | "complete" | "ok" | "success" | "succeeded" => Self::Succeeded,
+            "error" | "failed" | "failure" | "canceled" | "cancelled" | "expired" | "timeout"
+            | "timed_out" | "timed-out" => Self::Failed,
+            _ => Self::Waiting,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct SchedulerKbTaskResponse {
+    /// Transport status captured by [`LocalSchedulerClient`]. It is not part of
+    /// the scheduler JSON contract, but `202 Accepted` itself proves that the
+    /// result is asynchronous and therefore must carry a trackable job id.
+    #[serde(skip)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub schema_version: String,
     #[serde(default)]
     pub scheduled_as: String,
     #[serde(default)]
@@ -437,6 +553,8 @@ pub struct SchedulerKbTaskResponse {
     pub worker_pid: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_optional_error_string")]
     pub error: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_error_string")]
+    pub error_code: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
     #[serde(default)]
@@ -449,6 +567,109 @@ pub struct SchedulerKbTaskResponse {
     pub prompt_cache_policy: Option<String>,
     #[serde(default)]
     pub refusal_policy: Option<String>,
+}
+
+impl SchedulerKbTaskResponse {
+    pub fn normalized_state(&self) -> SchedulerJobState {
+        if self
+            .error
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return SchedulerJobState::Failed;
+        }
+        if self.http_status == Some(202) {
+            return SchedulerJobState::Waiting;
+        }
+        self.status
+            .as_deref()
+            .map(SchedulerJobState::from_status)
+            .unwrap_or(SchedulerJobState::Waiting)
+    }
+
+    pub fn failure_detail(&self) -> Option<&str> {
+        self.error
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.detail
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .or_else(|| {
+                self.reason
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+    }
+
+    /// Whether this response represents work that must be followed through the
+    /// async job API. Every non-empty status normalized as waiting needs a
+    /// `job_id`, including statuses introduced by newer schedulers. A missing
+    /// status remains the legacy synchronous-response shape.
+    pub fn requires_job_id(&self) -> bool {
+        let scheduled_as = self.scheduled_as.trim();
+        // Only a missing/blank mode is the legacy shape. `sync` is the sole
+        // explicit synchronous mode; every unknown non-empty future mode must
+        // fail closed behind a trackable job id.
+        if !scheduled_as.is_empty() && !scheduled_as.eq_ignore_ascii_case("sync") {
+            return true;
+        }
+        self.status
+            .as_deref()
+            .map(str::trim)
+            .filter(|status| !status.is_empty())
+            .is_some_and(|status| {
+                SchedulerJobState::from_status(status) == SchedulerJobState::Waiting
+            })
+    }
+
+    pub fn missing_required_job_id(&self) -> bool {
+        self.requires_job_id()
+            && self
+                .job_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|job_id| !job_id.is_empty())
+                .is_none()
+    }
+
+    /// Validate the scheduler's 2xx submission payload. HTTP success is only
+    /// transport success: explicit async calls and async/future response modes
+    /// require a job id, while failed/error-bearing bodies are never accepted
+    /// as completed work.
+    pub fn validate_submission(&self, explicit_async: bool, label: &str) -> Result<()> {
+        if let Some(status) = self
+            .http_status
+            .filter(|status| *status != 200 && *status != 202)
+        {
+            return Err(VaultError::LlmUnavailable(format!(
+                "{label} returned unsupported successful HTTP status {status}"
+            )));
+        }
+        if self.normalized_state() == SchedulerJobState::Failed {
+            return Err(VaultError::LlmUnavailable(format!(
+                "{label} failed: {}",
+                self.failure_detail()
+                    .or(self.status.as_deref())
+                    .unwrap_or("unknown error")
+            )));
+        }
+        let missing_job_id = self
+            .job_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|job_id| !job_id.is_empty())
+            .is_none();
+        if missing_job_id
+            && (explicit_async || self.http_status == Some(202) || self.requires_job_id())
+        {
+            return Err(VaultError::LlmUnavailable(format!(
+                "{label} returned async/pending status without job_id"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,18 +773,62 @@ pub fn classify_scheduler_error(err: &VaultError) -> Option<SchedulerErrorKind> 
     })
 }
 
-fn parse_response<T: DeserializeOwned>(path: &str, resp: reqwest::blocking::Response) -> Result<T> {
+fn parse_response<T: DeserializeOwned>(
+    path: &str,
+    mut resp: reqwest::blocking::Response,
+    max_response_bytes: usize,
+) -> Result<T> {
     let status = resp.status();
+    if resp
+        .content_length()
+        .is_some_and(|length| length > max_response_bytes as u64)
+    {
+        return Err(oversized_response_error(path, status, max_response_bytes));
+    }
+    let mut bytes = Vec::with_capacity(
+        resp.content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(max_response_bytes)
+            .min(64 * 1024),
+    );
+    resp.by_ref()
+        .take(max_response_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            VaultError::LlmUnavailable(format!(
+                "local scheduler {path} request failed: response read failed: {error}"
+            ))
+        })?;
+    if bytes.len() > max_response_bytes {
+        return Err(oversized_response_error(path, status, max_response_bytes));
+    }
     if !status.is_success() {
-        let body = resp.text().unwrap_or_default();
+        let body = String::from_utf8_lossy(&bytes);
         return Err(VaultError::LlmUnavailable(format!(
             "local scheduler {path} returned {status}: {}",
             truncate_body(&body)
         )));
     }
-    resp.json::<T>().map_err(|e| {
+    serde_json::from_slice::<T>(&bytes).map_err(|e| {
         VaultError::LlmUnavailable(format!("local scheduler {path} invalid json: {e}"))
     })
+}
+
+fn oversized_response_error(
+    path: &str,
+    status: reqwest::StatusCode,
+    max_response_bytes: usize,
+) -> VaultError {
+    if status.is_success() {
+        VaultError::LlmUnavailable(format!(
+            "local scheduler {path} invalid json: response body exceeds {max_response_bytes} bytes"
+        ))
+    } else {
+        VaultError::LlmUnavailable(format!(
+            "local scheduler {path} returned {status}: response body exceeds {max_response_bytes} bytes"
+        ))
+    }
 }
 
 fn parse_scheduler_status(message: &str) -> Option<u16> {
@@ -588,9 +853,13 @@ fn truncate_body(body: &str) -> String {
     }
 }
 
-fn validate_path_segment(name: &str, value: &str) -> Result<()> {
+pub(crate) fn validate_path_segment(name: &str, value: &str) -> Result<()> {
     let valid = !value.is_empty()
-        && !value.contains("..")
+        // Only a complete dot-segment can change URL path semantics. Embedded
+        // dots such as `tts..job` are safe because slash/backslash are not in
+        // the allowlist below and are valid Scheduler identifiers.
+        && value != "."
+        && value != ".."
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
@@ -645,12 +914,226 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalizes_scheduler_job_status_aliases() {
+        let cases = [
+            ("done", SchedulerJobState::Succeeded),
+            ("completed", SchedulerJobState::Succeeded),
+            ("complete", SchedulerJobState::Succeeded),
+            ("ok", SchedulerJobState::Succeeded),
+            ("success", SchedulerJobState::Succeeded),
+            ("succeeded", SchedulerJobState::Succeeded),
+            (" DoNe ", SchedulerJobState::Succeeded),
+            ("error", SchedulerJobState::Failed),
+            ("failed", SchedulerJobState::Failed),
+            ("failure", SchedulerJobState::Failed),
+            ("canceled", SchedulerJobState::Failed),
+            ("cancelled", SchedulerJobState::Failed),
+            ("expired", SchedulerJobState::Failed),
+            ("timeout", SchedulerJobState::Failed),
+            ("timed_out", SchedulerJobState::Failed),
+            ("timed-out", SchedulerJobState::Failed),
+            (" FaIlEd ", SchedulerJobState::Failed),
+            ("queued", SchedulerJobState::Waiting),
+            ("running", SchedulerJobState::Waiting),
+            ("cancel_requested", SchedulerJobState::Waiting),
+            ("pending", SchedulerJobState::Waiting),
+            ("accepted", SchedulerJobState::Waiting),
+            ("", SchedulerJobState::Waiting),
+            ("future_scheduler_state", SchedulerJobState::Waiting),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(
+                SchedulerJobState::from_status(status),
+                expected,
+                "unexpected normalized state for {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_response_exposes_normalized_state_and_failure_detail() {
+        let response = SchedulerKbTaskResponse {
+            status: Some("FAILED".to_string()),
+            error: Some("  ".to_string()),
+            detail: Some("model unavailable".to_string()),
+            reason: Some("fallback reason".to_string()),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert_eq!(response.normalized_state(), SchedulerJobState::Failed);
+        assert_eq!(response.failure_detail(), Some("model unavailable"));
+    }
+
+    #[test]
+    fn completed_job_with_error_payload_fails_closed() {
+        let job = SchedulerJobStatus {
+            status: "done".to_string(),
+            error: Some("OOM".to_string()),
+            outputs: serde_json::json!({"text": "must not be accepted"}),
+            ..SchedulerJobStatus::default()
+        };
+        assert_eq!(job.normalized_state(), SchedulerJobState::Failed);
+        assert_eq!(job.failure_detail(), Some("OOM"));
+    }
+
+    #[test]
+    fn async_or_pending_task_response_requires_job_id() {
+        for response in [
+            SchedulerKbTaskResponse {
+                scheduled_as: "async".to_string(),
+                ..SchedulerKbTaskResponse::default()
+            },
+            SchedulerKbTaskResponse {
+                status: Some("queued".to_string()),
+                ..SchedulerKbTaskResponse::default()
+            },
+            SchedulerKbTaskResponse {
+                status: Some("RUNNING".to_string()),
+                ..SchedulerKbTaskResponse::default()
+            },
+            SchedulerKbTaskResponse {
+                status: Some("async".to_string()),
+                job_id: Some("   ".to_string()),
+                ..SchedulerKbTaskResponse::default()
+            },
+            SchedulerKbTaskResponse {
+                status: Some("future_scheduler_state".to_string()),
+                ..SchedulerKbTaskResponse::default()
+            },
+            SchedulerKbTaskResponse {
+                scheduled_as: "deferred".to_string(),
+                status: Some("done".to_string()),
+                ..SchedulerKbTaskResponse::default()
+            },
+        ] {
+            assert!(response.requires_job_id(), "response={response:?}");
+            assert!(response.missing_required_job_id(), "response={response:?}");
+        }
+
+        let completed = SchedulerKbTaskResponse {
+            status: Some("done".to_string()),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert!(!completed.requires_job_id());
+        assert!(!completed.missing_required_job_id());
+
+        let ok = SchedulerKbTaskResponse {
+            status: Some(" OK ".to_string()),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert_eq!(ok.normalized_state(), SchedulerJobState::Succeeded);
+        assert!(!ok.requires_job_id());
+
+        for legacy_sync in [
+            SchedulerKbTaskResponse::default(),
+            SchedulerKbTaskResponse {
+                status: Some("   ".to_string()),
+                ..SchedulerKbTaskResponse::default()
+            },
+        ] {
+            assert!(!legacy_sync.requires_job_id(), "response={legacy_sync:?}");
+            assert!(
+                !legacy_sync.missing_required_job_id(),
+                "response={legacy_sync:?}"
+            );
+        }
+
+        let queued = SchedulerKbTaskResponse {
+            status: Some("queued".to_string()),
+            job_id: Some("job_123".to_string()),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert!(!queued.missing_required_job_id());
+    }
+
+    #[test]
+    fn submission_validation_uses_request_mode_and_error_body() {
+        let legacy = SchedulerKbTaskResponse::default();
+        assert!(legacy.validate_submission(false, "task").is_ok());
+        assert!(legacy
+            .validate_submission(true, "task")
+            .expect_err("explicit async request requires job id")
+            .to_string()
+            .contains("without job_id"));
+
+        let accepted_without_job = SchedulerKbTaskResponse {
+            http_status: Some(202),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert!(accepted_without_job
+            .validate_submission(false, "task")
+            .expect_err("HTTP 202 is asynchronous even when the body is legacy-shaped")
+            .to_string()
+            .contains("without job_id"));
+        let accepted_with_job = SchedulerKbTaskResponse {
+            http_status: Some(202),
+            job_id: Some("job-202".to_string()),
+            status: Some("done".to_string()),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert!(accepted_with_job.validate_submission(false, "task").is_ok());
+        assert_eq!(
+            accepted_with_job.normalized_state(),
+            SchedulerJobState::Waiting,
+            "HTTP 202 must be polled even if its JSON body says done"
+        );
+
+        let unsupported_success = SchedulerKbTaskResponse {
+            http_status: Some(201),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert!(unsupported_success
+            .validate_submission(false, "task")
+            .expect_err("the scheduler contract only permits 200 or 202")
+            .to_string()
+            .contains("unsupported successful HTTP status 201"));
+
+        let error_only = SchedulerKbTaskResponse {
+            error: Some("OOM".to_string()),
+            ..SchedulerKbTaskResponse::default()
+        };
+        assert_eq!(error_only.normalized_state(), SchedulerJobState::Failed);
+        assert!(error_only
+            .validate_submission(false, "task")
+            .expect_err("2xx error payload must fail")
+            .to_string()
+            .contains("OOM"));
+    }
+
+    #[test]
     fn rejects_unsafe_path_segments() {
         assert!(validate_path_segment("task", "kb.query.ask").is_ok());
         assert!(validate_path_segment("task", "../x").is_err());
-        assert!(validate_path_segment("task", "kb..query").is_err());
+        assert!(validate_path_segment("task", ".").is_err());
+        assert!(validate_path_segment("task", "..").is_err());
+        assert!(
+            validate_path_segment("job", "tts..job").is_ok(),
+            "embedded double dots are safe when slash/backslash are forbidden"
+        );
         assert!(validate_path_segment("job", "job_abc-123").is_ok());
         assert!(validate_path_segment("job", "job/abc").is_err());
+    }
+
+    #[test]
+    fn unsafe_scheduler_destinations_are_blocked_before_transport() {
+        for endpoint in [
+            "https://scheduler.example.test:8090",
+            "http://user@127.0.0.1:8090",
+            "http://127.0.0.1:8090/admin?target=/models",
+            "http://127.0.0.1:8090/#fragment",
+            "http://0.0.0.0:8090",
+            "http://169.254.169.254:80/latest",
+            "http://[fe80::2]:8090",
+        ] {
+            let client = LocalSchedulerClient::with_base(endpoint, Duration::from_millis(10));
+            let error = client
+                .models()
+                .expect_err("unsafe scheduler URL must be rejected before transport");
+            assert!(
+                error.to_string().contains("must use an unambiguous"),
+                "endpoint={endpoint}, error={error}"
+            );
+        }
     }
 
     #[test]

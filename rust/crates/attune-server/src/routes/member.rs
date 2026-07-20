@@ -2,7 +2,10 @@
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
-use attune_core::cloud_client::{CloudClient, License, UserInfo};
+use attune_core::cloud_client::{
+    current_plan_grants_paid, plan_grants_paid, CloudClient, License, UserInfo,
+};
+use attune_core::cloud_session::{CloudSessionStore, CloudSessionTransaction};
 use attune_core::entitlement::EntitlementCache;
 use attune_core::entitlement_reverify::{apply_refresh_rounds, RefreshSummary, ReverifyOutcome};
 use attune_core::llm_settings::SETTINGS_META_KEY;
@@ -14,11 +17,15 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{Datelike, Utc};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Default public cloud accounts endpoint when the self-host override
 /// (`settings.cloud.accounts_url`) is unset/empty.
 const DEFAULT_ACCOUNTS_URL: &str = "https://accounts.engi-stack.com";
 const DEFAULT_PLUGINHUB_URL: &str = "https://hub.engi-stack.com";
+const MEMBER_REVERIFY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const MEMBER_NETWORK_GRACE: Duration = Duration::from_secs(15 * 60);
 
 /// Resolve the cloud accounts base URL **server-side** from persisted settings
 /// (`app_settings.cloud.accounts_url`), defaulting to the public engi-stack
@@ -91,14 +98,14 @@ fn redact_license_key(license_key: &str) -> String {
 }
 
 /// Result of the blocking CloudClient interaction (B4): carried back from
-/// `spawn_blocking` into the async tail. `license`/`me` are `None` for free users
-/// or when the best-effort `/me` fetch failed.
+/// `spawn_blocking` into the async tail. `user` is the authoritative `/me`
+/// snapshot and `license` is `None` for free users.
 struct CloudLoginData {
     user: UserInfo,
     license: Option<License>,
-    me: Option<UserInfo>,
     cloud_url: String,
     session_token: Option<String>,
+    llm_quota_remaining: u64,
     device: Option<
         std::result::Result<
             attune_core::cloud_client::DeviceActivateResult,
@@ -112,6 +119,19 @@ struct CloudLoginData {
     plugin_sync: Option<attune_core::plugin_sync::SyncReport>,
 }
 
+fn validate_login_identity(
+    login_response: &UserInfo,
+    authenticated_user: &UserInfo,
+) -> Result<(), (StatusCode, String)> {
+    if login_response.id != authenticated_user.id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "authenticated account does not match login response".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// GET /api/v1/member/state — 当前会员状态 (UI 展示)
 pub async fn get_state(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let should_restore = {
@@ -119,11 +139,7 @@ pub async fn get_state(State(state): State<SharedState>) -> Json<serde_json::Val
         matches!(*m, MemberState::LoggedOut)
     };
     if should_restore {
-        let state_for_restore = state.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            restore_member_state_from_cloud_session(&state_for_restore)
-        })
-        .await;
+        let _ = restore_member_state_from_cloud_session(&state).await;
     }
 
     let m = state
@@ -176,6 +192,22 @@ pub async fn login_token(
     State(state): State<SharedState>,
     Json(req): Json<LoginTokenReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // The verifier reads the persisted session, so it belongs inside the same
+    // account transaction as cleanup/commit/runtime publication. Otherwise a
+    // concurrent login could replace the cookie after proof but before apply.
+    let _transition = state.member_transition.lock().await;
+    let session_transaction = acquire_cloud_session_transition(&state.cloud_session_store)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": e,
+                    "code": "cloud-session-lock-failed",
+                    "paid_applied": false,
+                })),
+            )
+        })?;
     let is_paid = req.tier.as_str() == "paid";
     let new_state = match req.tier.as_str() {
         "free" => MemberState::Free {
@@ -189,9 +221,24 @@ pub async fn login_token(
             // path. A forged / empty / unverifiable claim → 403, never Paid.
             let lic = req.license_id.unwrap_or_default();
             let verifier = state.member_verifier();
-            verifier
-                .verify_paid(&req.account_id, &lic)
-                .map_err(|e| paid_verification_error(&e))?;
+            let account_for_verify = req.account_id.clone();
+            let license_for_verify = lic.clone();
+            let transaction_for_verify = Arc::clone(&session_transaction);
+            tokio::task::spawn_blocking(move || {
+                verifier.verify_paid_with_session(
+                    &account_for_verify,
+                    &license_for_verify,
+                    transaction_for_verify.as_ref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("paid verification task: {e}")})),
+                )
+            })?
+            .map_err(|e| paid_verification_error(&e))?;
             MemberState::Paid {
                 account_id: req.account_id,
                 license_id: lic.trim().to_string(),
@@ -205,7 +252,118 @@ pub async fn login_token(
             ));
         }
     };
+
+    // An explicit successful token login opts into Cloud SaaS. Consent is the
+    // first durable mutation: if it cannot be stored, the old account cookie,
+    // runtime, and member state remain exactly as they were.
+    crate::routes::privacy::set_outbound_enabled(&state, "cloud_saas", true).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("persist cloud consent: {e}")})),
+        )
+    })?;
+
+    // Fence persisted-session restore before changing consent or runtime.
+    // - Free token login has no authoritative server-side session of its own,
+    //   so any previous cookie must be retired. `remove_cloud_session` writes a
+    //   durable suppression marker before deletion; even a deletion error
+    //   cannot resurrect the previous Paid/different account on restart.
+    // - Paid token login was verified against the persisted session above. If
+    //   one exists, temporarily suppress it while old local credentials are
+    //   cleared, then publish it again only after that cleanup commits.
+    // Test-only verifiers may prove Paid without a disk session, hence the
+    // `false` transaction result rather than inventing a cookie.
+    let prepare_session_transaction = Arc::clone(&session_transaction);
+    let prepare_result = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        if is_paid {
+            if prepare_session_transaction
+                .load()
+                .map_err(|e| e.to_string())?
+                .is_some()
+            {
+                prepare_session_transaction
+                    .suppress_restore()
+                    .map_err(|e| e.to_string())?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            prepare_session_transaction
+                .remove()
+                .map(|_| false)
+                .map_err(|e| e.to_string())
+        }
+    })
+    .await;
+    let paid_session_needs_commit = match prepare_result {
+        Ok(Ok(needs_commit)) => needs_commit,
+        Ok(Err(e)) => {
+            fail_close_member_runtime(&state, &format!("prepare member session: {e}"));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("prepare member session: {e}"),
+                    "code": "cloud-session-cleanup-failed",
+                    "paid_applied": false,
+                })),
+            ));
+        }
+        Err(e) => {
+            fail_close_member_runtime(&state, &format!("prepare member session task: {e}"));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("prepare member session task: {e}"),
+                    "code": "cloud-session-cleanup-failed",
+                    "paid_applied": false,
+                })),
+            ));
+        }
+    };
+
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+    if let Err(e) = clear_member_credentials_preserving_unowned_llm(&state, None) {
+        // Cleanup may already have removed some old credentials, so publishing
+        // a Paid session now could rebuild a mixed account. Keep the marker as
+        // an explicit fail-closed state until a fresh credentialed login.
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("clear previous member state: {e}"),
+                "code": "member-switch-cleanup-failed",
+                "session_restore_suppressed": !is_paid || paid_session_needs_commit,
+            })),
+        ));
+    }
+
+    if paid_session_needs_commit {
+        commit_staged_cloud_session_restore(Arc::clone(&session_transaction))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": e,
+                        "code": "cloud-session-commit-failed",
+                        "paid_applied": false,
+                        "session_restore_suppressed": true,
+                    })),
+                )
+            })?;
+    }
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
+    if let Err(e) = bind_member_session_epoch(&state, session_transaction.as_ref()) {
+        fail_close_member_runtime(&state, &e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": e,
+                "code": "cloud-session-epoch-failed",
+                "paid_applied": false,
+            })),
+        ));
+    }
 
     // B5 (2026-06-06): mirror login_password — a paid member-login must auto-install
     // entitled pro plugins. This endpoint carries no credentials (the desktop client
@@ -215,12 +373,16 @@ pub async fn login_token(
     // is logged and never fails the login (§4.5); signature verification inside
     // sync is NOT bypassed.
     let plugin_sync = if is_paid {
-        tokio::task::spawn_blocking(member_session_sync_plugins)
-            .await
-            .unwrap_or(None)
+        let plugin_session_transaction = Arc::clone(&session_transaction);
+        tokio::task::spawn_blocking(move || {
+            member_session_sync_plugins(plugin_session_transaction.as_ref())
+        })
+        .await
+        .unwrap_or(None)
     } else {
         None
     };
+
     let plugins_json = plugin_sync.as_ref().map(sync_report_to_json);
 
     Ok(Json(serde_json::json!({
@@ -240,9 +402,12 @@ fn paid_verification_error(
     use attune_core::member_verifier::MemberVerifyError as E;
     let status = match e {
         E::MissingLicenseId => StatusCode::BAD_REQUEST,
-        E::NoCloudSession | E::Unavailable(_) | E::LicenseNotOnAccount | E::LicenseRevoked => {
-            StatusCode::FORBIDDEN
-        }
+        E::NoCloudSession
+        | E::Unavailable(_)
+        | E::LicenseNotOnAccount
+        | E::AccountMismatch
+        | E::LicenseRevoked
+        | E::LicenseNotPaid => StatusCode::FORBIDDEN,
     };
     (
         status,
@@ -257,9 +422,355 @@ fn paid_verification_error(
 /// cloud-session.json`) and run best-effort plugin sync. Returns `None` when no
 /// session is available (so the `login_token` paid path simply skips). Used only
 /// by `login_token`, which carries no live credentials of its own.
-fn member_session_sync_plugins() -> Option<attune_core::plugin_sync::SyncReport> {
-    let client = cloud_client_from_session()?;
+fn member_session_sync_plugins(
+    session_transaction: &CloudSessionTransaction,
+) -> Option<attune_core::plugin_sync::SyncReport> {
+    let client = cloud_client_from_transaction(session_transaction)?;
     Some(attune_core::plugin_sync::best_effort_sync_plugins(&client))
+}
+
+fn vault_is_unlocked(state: &SharedState) -> bool {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    matches!(vault.state(), attune_core::vault::VaultState::Unlocked)
+}
+
+fn bind_member_session_epoch(
+    state: &SharedState,
+    session_transaction: &CloudSessionTransaction,
+) -> Result<(), String> {
+    let epoch = session_transaction
+        .epoch()
+        .map_err(|e| format!("read committed cloud session epoch: {e}"))?;
+    *state
+        .member_session_epoch
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(epoch);
+    let paid = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_paid();
+    *state
+        .member_verified_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = paid.then(Instant::now);
+    Ok(())
+}
+
+fn fail_close_member_runtime(state: &SharedState, reason: &str) {
+    tracing::warn!("member runtime fail-closed: {reason}");
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+    *state
+        .member_session_epoch
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    *state
+        .member_verified_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    if let Err(e) = clear_member_credentials(state, None) {
+        tracing::warn!("member runtime fail-closed persistence cleanup failed: {e}");
+    }
+}
+
+enum PaidReverifyOutcome {
+    Verified,
+    AuthoritativeDeny(String),
+    Unavailable(String),
+}
+
+fn cloud_verify_error(context: &str, error: attune_core::error::VaultError) -> PaidReverifyOutcome {
+    let detail = error.to_string();
+    let server_error = (500..600).any(|status| detail.contains(&status.to_string()));
+    if matches!(error, attune_core::error::VaultError::Io(_)) || server_error {
+        PaidReverifyOutcome::Unavailable(format!("{context}: {detail}"))
+    } else {
+        PaidReverifyOutcome::AuthoritativeDeny(format!("{context}: {detail}"))
+    }
+}
+
+fn device_verify_error(
+    context: &str,
+    error: attune_core::cloud_client::DeviceActivateError,
+) -> PaidReverifyOutcome {
+    match error {
+        attune_core::cloud_client::DeviceActivateError::Unavailable(detail) => {
+            PaidReverifyOutcome::Unavailable(format!("{context}: {detail}"))
+        }
+        other => PaidReverifyOutcome::AuthoritativeDeny(format!("{context}: {other}")),
+    }
+}
+
+fn reverify_current_paid_membership(
+    state: &SharedState,
+    session_transaction: &CloudSessionTransaction,
+) -> PaidReverifyOutcome {
+    let current = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let MemberState::Paid {
+        account_id,
+        license_id,
+        ..
+    } = current
+    else {
+        return PaidReverifyOutcome::Verified;
+    };
+
+    match session_transaction.load() {
+        Ok(Some(session)) => {
+            let client = CloudClient::with_session(session.cloud_url, session.session);
+            let me = match client.me() {
+                Ok(me) => me,
+                Err(error) => return cloud_verify_error("member /me reverify", error),
+            };
+            if me.id.to_string() != account_id
+                || !current_plan_grants_paid(&me.plan, me.plan_expires.as_deref())
+            {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "member account/plan no longer grants Paid".to_string(),
+                );
+            }
+            let licenses = match client.list_licenses() {
+                Ok(licenses) => licenses,
+                Err(error) => return cloud_verify_error("member license reverify", error),
+            };
+            let Some(license) = licenses.into_iter().find(|license| {
+                license.canonical_id() == license_id
+                    || license.id.to_string() == license_id
+                    || license.license_key == license_id
+            }) else {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "paid license is no longer owned by the account".to_string(),
+                );
+            };
+            if license.revoked_at.is_some() || !plan_grants_paid(&license.plan) {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "paid license was revoked or downgraded".to_string(),
+                );
+            }
+            let fingerprint = attune_core::device_fingerprint::device_fingerprint();
+            let device = match client.device_activate(&license.license_key, &fingerprint) {
+                Ok(device) => device,
+                Err(error) => return device_verify_error("member device reverify", error),
+            };
+            let device_plan = if device.plan.trim().is_empty() {
+                license.plan.as_str()
+            } else {
+                device.plan.as_str()
+            };
+            if !current_plan_grants_paid(device_plan, device.expires_at.as_deref()) {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "member device proof expired or downgraded".to_string(),
+                );
+            }
+            PaidReverifyOutcome::Verified
+        }
+        Ok(None) => {
+            let (license_key, persisted_device) = match load_activation_receipt(state) {
+                Ok(Some(receipt)) => receipt,
+                Ok(None) => {
+                    return PaidReverifyOutcome::AuthoritativeDeny(
+                        "paid runtime has neither cloud session nor activation receipt".to_string(),
+                    )
+                }
+                Err(error) => {
+                    return PaidReverifyOutcome::AuthoritativeDeny(format!(
+                        "activation receipt is unreadable: {error}"
+                    ))
+                }
+            };
+            let client = CloudClient::new(resolve_accounts_url(state));
+            let activation = match client.activate_license(&license_key) {
+                Ok(activation) => activation,
+                Err(error) => return cloud_verify_error("activation license reverify", error),
+            };
+            if !current_plan_grants_paid(&activation.plan, activation.expires_at.as_deref()) {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "activation license expired or downgraded".to_string(),
+                );
+            }
+            let fingerprint = attune_core::device_fingerprint::device_fingerprint();
+            let device = match client.device_activate(&license_key, &fingerprint) {
+                Ok(device) => device,
+                Err(error) => return device_verify_error("activation device reverify", error),
+            };
+            if !persisted_device.device_id.trim().is_empty()
+                && !device.device_id.trim().is_empty()
+                && persisted_device.device_id != device.device_id
+            {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "activation device identity changed".to_string(),
+                );
+            }
+            let device_plan = if device.plan.trim().is_empty() {
+                activation.plan.as_str()
+            } else {
+                device.plan.as_str()
+            };
+            if !current_plan_grants_paid(device_plan, device.expires_at.as_deref()) {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "activation device proof expired or downgraded".to_string(),
+                );
+            }
+            let identity = redact_license_key(&license_key);
+            if account_id != identity || license_id != identity {
+                return PaidReverifyOutcome::AuthoritativeDeny(
+                    "activation receipt does not match the current Paid state".to_string(),
+                );
+            }
+            PaidReverifyOutcome::Verified
+        }
+        Err(error) => {
+            PaidReverifyOutcome::AuthoritativeDeny(format!("cloud session is unreadable: {error}"))
+        }
+    }
+}
+
+/// Blocking reconciliation body. The caller owns `member_transition` and the
+/// path transaction, so the epoch and authoritative proof refer to one stable
+/// cookie throughout the check.
+fn reconcile_member_session_locked(
+    state: &SharedState,
+    transaction: &CloudSessionTransaction,
+) -> bool {
+    if !vault_is_unlocked(state) {
+        return false;
+    }
+    let logged_in = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_logged_in();
+    if !logged_in {
+        *state
+            .member_session_epoch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .member_verified_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        return true;
+    }
+    let expected = state
+        .member_session_epoch
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(expected) = expected else {
+        fail_close_member_runtime(state, "logged-in member runtime has no bound session epoch");
+        return false;
+    };
+    let current = match transaction.epoch() {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            fail_close_member_runtime(state, &format!("read cloud session epoch: {error}"));
+            return false;
+        }
+    };
+    if current != expected {
+        fail_close_member_runtime(state, "persisted cloud session changed in another process");
+        return false;
+    }
+
+    let is_paid = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_paid();
+    if !is_paid {
+        return true;
+    }
+    let last_verified = *state
+        .member_verified_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if last_verified.is_some_and(|verified| verified.elapsed() < MEMBER_REVERIFY_INTERVAL) {
+        return true;
+    }
+    if !crate::routes::privacy::outbound_enabled(state, "cloud_saas") {
+        if last_verified.is_some_and(|verified| verified.elapsed() < MEMBER_NETWORK_GRACE) {
+            tracing::warn!(
+                "member reverify deferred because cloud SaaS is disabled; retaining bounded grace"
+            );
+            return true;
+        }
+        fail_close_member_runtime(
+            state,
+            "member reverify grace expired while cloud SaaS was disabled",
+        );
+        return false;
+    }
+    match reverify_current_paid_membership(state, transaction) {
+        PaidReverifyOutcome::Verified => {
+            *state
+                .member_verified_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            true
+        }
+        PaidReverifyOutcome::AuthoritativeDeny(reason) => {
+            fail_close_member_runtime(state, &reason);
+            false
+        }
+        PaidReverifyOutcome::Unavailable(reason) => {
+            if last_verified.is_some_and(|verified| verified.elapsed() < MEMBER_NETWORK_GRACE) {
+                tracing::warn!("member reverify unavailable; retaining bounded grace: {reason}");
+                true
+            } else {
+                fail_close_member_runtime(
+                    state,
+                    &format!("member reverify grace expired: {reason}"),
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Ensure a logged-in runtime is still paired with the exact cloud-session
+/// state from which it was published. A sequential `attune login` in another
+/// process changes the durable epoch; the next API request then tears down the
+/// stale account before its handler can use the old gateway/entitlements.
+pub(crate) async fn reconcile_member_session_epoch(state: &SharedState) -> bool {
+    let runtime_is_logged_in = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_logged_in();
+    let has_bound_epoch = state
+        .member_session_epoch
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    if !runtime_is_logged_in && !has_bound_epoch {
+        return true;
+    }
+
+    let _transition = state.member_transition.lock().await;
+    let transaction = match acquire_cloud_session_transition(&state.cloud_session_store).await {
+        Ok(transaction) => transaction,
+        Err(e) => {
+            fail_close_member_runtime(state, &e);
+            return false;
+        }
+    };
+    let state_for_check = state.clone();
+    let transaction_for_check = Arc::clone(&transaction);
+    match tokio::task::spawn_blocking(move || {
+        reconcile_member_session_locked(&state_for_check, &transaction_for_check)
+    })
+    .await
+    {
+        Ok(coherent) => coherent,
+        Err(error) => {
+            fail_close_member_runtime(state, &format!("member reconcile task failed: {error}"));
+            false
+        }
+    }
 }
 
 /// Restore the in-memory member state from the persisted cloud session.
@@ -269,8 +780,57 @@ fn member_session_sync_plugins() -> Option<attune_core::plugin_sync::SyncReport>
 /// lazy `/member/state` read, this function replays the authoritative cloud
 /// session into `MemberState`, gateway/pluginhub settings, entitlement rows, and
 /// best-effort plugin sync. It never turns a failed cloud check into Paid.
-pub(crate) fn restore_member_state_from_cloud_session(state: &SharedState) -> Option<MemberState> {
-    let client = cloud_client_from_session()?;
+pub(crate) async fn restore_member_state_from_cloud_session(
+    state: &SharedState,
+) -> Option<MemberState> {
+    let _transition = state.member_transition.lock().await;
+    let session_transaction =
+        match acquire_cloud_session_transition(&state.cloud_session_store).await {
+            Ok(transaction) => transaction,
+            Err(e) => {
+                tracing::warn!("member restore: cannot fence cloud session: {e}");
+                return None;
+            }
+        };
+    let state_for_restore = state.clone();
+    let transaction_for_restore = Arc::clone(&session_transaction);
+    match tokio::task::spawn_blocking(move || {
+        restore_member_state_from_cloud_session_locked(&state_for_restore, &transaction_for_restore)
+    })
+    .await
+    {
+        Ok(restored) => restored,
+        Err(e) => {
+            tracing::warn!("member restore task failed: {e}");
+            None
+        }
+    }
+}
+
+/// Blocking half of [`restore_member_state_from_cloud_session`]. The caller
+/// owns `member_transition` for this function's complete lifetime.
+fn restore_member_state_from_cloud_session_locked(
+    state: &SharedState,
+    session_transaction: &CloudSessionTransaction,
+) -> Option<MemberState> {
+    // Lock means all vault-derived/member runtime must stay absent. In
+    // particular, a require_auth=false deployment must not let a lazy
+    // `/member/state` read immediately rebuild account state after the user
+    // explicitly locked the vault.
+    if !vault_is_unlocked(state) {
+        return None;
+    }
+    if !crate::routes::privacy::outbound_enabled(state, "cloud_saas") {
+        return None;
+    }
+    let Some(client) = cloud_client_from_transaction(session_transaction) else {
+        let restored = restore_member_state_from_activation_receipt_locked(state);
+        if restored.is_some() && bind_member_session_epoch(state, session_transaction).is_err() {
+            fail_close_member_runtime(state, "bind activation session epoch");
+            return None;
+        }
+        return restored;
+    };
     let me = match client.me() {
         Ok(me) => me,
         Err(e) => {
@@ -278,15 +838,21 @@ pub(crate) fn restore_member_state_from_cloud_session(state: &SharedState) -> Op
             return None;
         }
     };
-    let is_paid = matches!(me.plan.as_str(), "pro" | "pro_plus" | "enterprise");
+    let is_paid = current_plan_grants_paid(&me.plan, me.plan_expires.as_deref());
+    let llm_quota_remaining = if is_paid {
+        client
+            .me_quota_json()
+            .ok()
+            .and_then(|value| quota_remaining_from_json(&value))
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let restored = if is_paid {
         let selected = match client.list_licenses() {
             Ok(licenses) => licenses
                 .into_iter()
-                .find(|lic| {
-                    lic.revoked_at.is_none()
-                        && matches!(lic.plan.as_str(), "pro" | "pro_plus" | "enterprise")
-                })
+                .find(|lic| lic.revoked_at.is_none() && plan_grants_paid(&lic.plan))
                 .or_else(|| {
                     tracing::warn!("member restore: paid account has no active paid license");
                     None
@@ -297,15 +863,40 @@ pub(crate) fn restore_member_state_from_cloud_session(state: &SharedState) -> Op
             }
         };
         let fp = attune_core::device_fingerprint::device_fingerprint();
-        match client.device_activate(&selected.license_key, &fp) {
-            Ok(dev) => store_device_binding(state, &dev),
+        let device = match client.device_activate(&selected.license_key, &fp) {
+            Ok(dev) => dev,
             Err(e) => {
                 tracing::warn!(
                     "member restore: device binding failed; paid state not restored: {e}"
                 );
                 return None;
             }
+        };
+        let device_plan = if device.plan.trim().is_empty() {
+            selected.plan.as_str()
+        } else {
+            device.plan.as_str()
+        };
+        if !current_plan_grants_paid(device_plan, device.expires_at.as_deref()) {
+            tracing::warn!("member restore: device binding no longer reports a paid plan");
+            return None;
         }
+        let restored = MemberState::Paid {
+            account_id: me.id.to_string(),
+            license_id: selected.canonical_id(),
+            llm_quota_remaining,
+        };
+        if !vault_is_unlocked(state) {
+            return None;
+        }
+        // The persisted rows belong to the previous locally cached account
+        // until proven otherwise.  Clear them before activating this verified
+        // account so entitlements can never accumulate across switches.
+        if let Err(e) = clear_member_credentials(state, None) {
+            tracing::warn!("member restore: failed to clear previous account state: {e}");
+            return None;
+        }
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = restored.clone();
         wire_cloud_gateway(
             state,
             me.gateway_url.as_deref(),
@@ -315,6 +906,7 @@ pub(crate) fn restore_member_state_from_cloud_session(state: &SharedState) -> Op
         );
         wire_pluginhub_provider(state, &selected.license_key, &me.email);
         store_login_entitlements(state, &selected);
+        store_device_binding(state, &device);
         let sync = attune_core::plugin_sync::best_effort_sync_plugins(&client);
         if !sync.installed.is_empty() || !sync.updated.is_empty() || !sync.failed.is_empty() {
             tracing::info!(
@@ -324,21 +916,159 @@ pub(crate) fn restore_member_state_from_cloud_session(state: &SharedState) -> Op
                 sync.failed.len()
             );
         }
-        MemberState::Paid {
-            account_id: me.id.to_string(),
-            license_id: selected
-                .license_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| selected.id.to_string()),
-            llm_quota_remaining: 0,
-        }
+        restored
     } else {
-        MemberState::Free {
+        let restored = MemberState::Free {
             account_id: me.id.to_string(),
+        };
+        if !vault_is_unlocked(state) {
+            return None;
         }
+        // A successful authoritative downgrade/login must immediately remove
+        // cached paid credentials and entitlement rows.  Runtime teardown is
+        // unconditional inside clear_member_credentials even if disk cleanup
+        // later reports an error.
+        if let Err(e) = clear_member_credentials(state, None) {
+            tracing::warn!("member restore: failed to persist free-tier cleanup: {e}");
+        }
+        restored
     };
 
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = restored.clone();
+    if !vault_is_unlocked(state) {
+        // Close the race where a lock lands after the pre-install check but
+        // before the verified cloud response is applied. Whichever operation
+        // finishes last observes Locked and leaves no member credential alive.
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+        *state
+            .member_session_epoch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        state.entitlement_cache.hydrate_from_rows(Vec::new());
+        state.reload_llm();
+        state.reload_plugin_hub(None, None);
+        return None;
+    }
+    if let Err(e) = bind_member_session_epoch(state, session_transaction) {
+        fail_close_member_runtime(state, &e);
+        return None;
+    }
+    Some(restored)
+}
+
+/// Restore a license-code activation when no account cookie exists. The raw
+/// activation code is stored only inside the vault-encrypted device receipt;
+/// every restart replays both cloud authorization and device binding before
+/// publishing Paid state, so revoked/expired/non-paid licenses fail closed.
+fn restore_member_state_from_activation_receipt_locked(state: &SharedState) -> Option<MemberState> {
+    let (license_key, persisted_device) = match load_activation_receipt(state) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!("activation restore: unreadable encrypted receipt: {e}");
+            return None;
+        }
+    };
+    let cloud_url = resolve_accounts_url(state);
+    let pluginhub_url = resolve_pluginhub_url(state);
+    let client = CloudClient::new(cloud_url);
+    let activation = match client.activate_license(&license_key) {
+        Ok(result) if current_plan_grants_paid(&result.plan, result.expires_at.as_deref()) => {
+            result
+        }
+        Ok(_) => {
+            tracing::warn!("activation restore: license no longer grants a paid plan");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("activation restore: online authorization failed: {e}");
+            return None;
+        }
+    };
+    let fp = attune_core::device_fingerprint::device_fingerprint();
+    let device = match client.device_activate(&license_key, &fp) {
+        Ok(device) => device,
+        Err(e) => {
+            tracing::warn!("activation restore: online device proof failed: {e}");
+            return None;
+        }
+    };
+    let device_plan = if device.plan.trim().is_empty() {
+        activation.plan.as_str()
+    } else {
+        device.plan.as_str()
+    };
+    if !current_plan_grants_paid(device_plan, device.expires_at.as_deref()) {
+        tracing::warn!("activation restore: device proof no longer grants a paid plan");
+        return None;
+    }
+    if !persisted_device.device_id.trim().is_empty()
+        && !device.device_id.trim().is_empty()
+        && persisted_device.device_id != device.device_id
+    {
+        tracing::warn!("activation restore: cloud returned a different device identity");
+        return None;
+    }
+
+    let plugin_sync = sync_activation_plugins_detailed(
+        &pluginhub_url,
+        &license_key,
+        &activation.allowed_plugins,
+        Some(fp.fingerprint_sig.as_str()),
+    );
+    if !vault_is_unlocked(state) {
+        return None;
+    }
+    if let Err(e) = clear_member_credentials(state, None) {
+        tracing::warn!("activation restore: failed to clear stale member runtime: {e}");
+        return None;
+    }
+    // This write is the durable commit barrier. If it fails, remain LoggedOut
+    // and do not rebuild any membership-owned provider or entitlement.
+    if let Err(e) = persist_activation_receipt(state, &device, &license_key) {
+        tracing::warn!("activation restore: failed to renew encrypted receipt: {e}");
+        return None;
+    }
+
+    let license_identity = redact_license_key(&license_key);
+    let restored = MemberState::Paid {
+        account_id: license_identity.clone(),
+        license_id: license_identity.clone(),
+        llm_quota_remaining: 0,
+    };
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = restored.clone();
+    wire_cloud_gateway(
+        state,
+        activation.gateway_url.as_deref(),
+        activation.gateway_token.as_deref(),
+        activation.gateway_default_model.as_deref(),
+        &license_identity,
+    );
+    wire_pluginhub_provider(state, &license_key, &license_identity);
+    store_activation_entitlements(
+        state,
+        &license_identity,
+        &activation.allowed_plugins,
+        &plugin_sync.entitlements,
+    );
+    if !plugin_sync.report.installed.is_empty()
+        || !plugin_sync.report.updated.is_empty()
+        || !plugin_sync.report.failed.is_empty()
+    {
+        tracing::info!(
+            "activation restore: plugin sync installed={}, updated={}, failed={}",
+            plugin_sync.report.installed.len(),
+            plugin_sync.report.updated.len(),
+            plugin_sync.report.failed.len()
+        );
+    }
+    if !vault_is_unlocked(state) {
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+        state.entitlement_cache.hydrate_from_rows(Vec::new());
+        state.reload_llm();
+        state.reload_plugin_hub(None, None);
+        return None;
+    }
     Some(restored)
 }
 
@@ -454,21 +1184,89 @@ fn attach_local_usage(mut value: serde_json::Value, state: &SharedState) -> serd
     value
 }
 
+fn quota_remaining_from_json(value: &serde_json::Value) -> Option<u64> {
+    [
+        "/quota/remaining",
+        "/quota/llm_tokens_remaining",
+        "/llm_quota_remaining",
+        "/remaining",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        let value = value.pointer(pointer)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
+    })
+}
+
 /// GET /api/v1/users/me/quota — 本地配额视图代理。
 ///
 /// 有持久化 cloud session 时透传 accounts 的真实 quota；否则返回可渲染的零数据,
 /// 让免费/自配 token 用户也能看到说明和升级入口,而不是空白页。
 pub async fn get_quota(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let _transition = state.member_transition.lock().await;
+    let session_transaction =
+        match acquire_cloud_session_transition(&state.cloud_session_store).await {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                fail_close_member_runtime(&state, &error);
+                let member = state
+                    .member_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                return Json(fallback_quota_json(&state, &member, Some(error)));
+            }
+        };
+    let state_for_check = state.clone();
+    let transaction_for_check = Arc::clone(&session_transaction);
+    let coherent = match tokio::task::spawn_blocking(move || {
+        reconcile_member_session_locked(&state_for_check, &transaction_for_check)
+    })
+    .await
+    {
+        Ok(coherent) => coherent,
+        Err(error) => {
+            fail_close_member_runtime(
+                &state,
+                &format!("member quota reconcile task failed: {error}"),
+            );
+            false
+        }
+    };
     let member = state
         .member_state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let Some(client) = cloud_client_from_session() else {
+    if !coherent {
+        return Json(fallback_quota_json(
+            &state,
+            &member,
+            Some("member session changed or could not be verified".to_string()),
+        ));
+    }
+    if !member.is_logged_in() {
+        return Json(fallback_quota_json(&state, &member, None));
+    }
+    if !crate::routes::privacy::outbound_enabled(&state, "cloud_saas") {
+        return Json(fallback_quota_json(
+            &state,
+            &member,
+            Some("cloud SaaS is disabled by privacy settings".to_string()),
+        ));
+    }
+    let Some(client) = cloud_client_from_transaction(&session_transaction) else {
         return Json(fallback_quota_json(&state, &member, None));
     };
     let fallback_member = member.clone();
-    match tokio::task::spawn_blocking(move || client.me_quota_json()).await {
+    match tokio::task::spawn_blocking(move || {
+        let _session_fence = session_transaction;
+        client.me_quota_json()
+    })
+    .await
+    {
         Ok(Ok(v)) => Json(attach_local_usage(v, &state)),
         Ok(Err(e)) => Json(fallback_quota_json(
             &state,
@@ -508,6 +1306,10 @@ pub async fn login_password(
             Json(serde_json::json!({"error": "email/password required"})),
         ));
     }
+    // Preserve request order across slow cloud authentication: once a valid
+    // account transition starts, logout/activation/another login must observe
+    // its final disk + runtime state rather than overtaking its commit.
+    let _transition = state.member_transition.lock().await;
 
     let cloud_url = resolve_accounts_url(&state);
 
@@ -525,18 +1327,30 @@ pub async fn login_password(
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CloudLoginData, (StatusCode, String)> {
             let mut client = CloudClient::new(cloud_url_for_blocking.clone());
-            let user = client
+            let login_response = client
                 .login(&email, &password)
                 .map_err(|e| (StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
             let session_token = client.session_token().map(str::to_string);
-            let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
+            // `/me` is bound to the newly issued session cookie and is therefore
+            // authoritative for identity and plan.  Never combine licenses or a
+            // gateway from that session with an account id taken only from the
+            // login response.
+            let me = client.me().map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("verify authenticated account failed: {e}"),
+                )
+            })?;
+            validate_login_identity(&login_response, &me)?;
+            let user = me.clone();
+            let is_paid = current_plan_grants_paid(&user.plan, user.plan_expires.as_deref());
             if !is_paid {
                 return Ok(CloudLoginData {
                     user,
                     license: None,
-                    me: None,
                     cloud_url: cloud_url_for_blocking,
                     session_token,
+                    llm_quota_remaining: 0,
                     device: None,
                     plugin_sync: None,
                 });
@@ -547,26 +1361,47 @@ pub async fn login_password(
                     format!("list licenses failed: {e}"),
                 )
             })?;
+            let eligible = licenses
+                .into_iter()
+                .filter(|lic| lic.revoked_at.is_none() && plan_grants_paid(&lic.plan));
             let selected = if let Some(code) = license_code.as_deref() {
                 let code = code.trim();
                 if code.is_empty() {
-                    licenses.into_iter().next()
+                    eligible.into_iter().next()
                 } else {
-                    licenses
-                        .into_iter()
-                        .find(|lic| lic.license_key == code || lic.id.to_string() == code)
+                    eligible.into_iter().find(|lic| {
+                        lic.license_key == code
+                            || lic.id.to_string() == code
+                            || lic.license_id.map(|id| id.to_string()).as_deref() == Some(code)
+                    })
                 }
             } else {
-                licenses.into_iter().next()
+                eligible.into_iter().next()
             }
             .ok_or((
                 StatusCode::BAD_REQUEST,
-                "paid user has no matching license".to_string(),
+                "paid user has no matching active paid license".to_string(),
             ))?;
-            // best-effort gateway token fetch — a failure here must not block login.
-            let me = client.me().ok();
+            let llm_quota_remaining = client
+                .me_quota_json()
+                .ok()
+                .and_then(|value| quota_remaining_from_json(&value))
+                .unwrap_or(0);
             let fp = attune_core::device_fingerprint::device_fingerprint();
             let device = client.device_activate(&selected.license_key, &fp);
+            if device.as_ref().is_ok_and(|device| {
+                let plan = if device.plan.trim().is_empty() {
+                    selected.plan.as_str()
+                } else {
+                    device.plan.as_str()
+                };
+                !current_plan_grants_paid(plan, device.expires_at.as_deref())
+            }) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "device binding returned a non-paid license plan".to_string(),
+                ));
+            }
             // B5 (2026-06-06): auto-install entitled pro plugins (e.g. law-pro) so
             // domain-specific agents work right after login, no manual `attune
             // sync-plugins`. Runs on THIS blocking thread (reusing the authenticated
@@ -582,9 +1417,9 @@ pub async fn login_password(
             Ok(CloudLoginData {
                 user,
                 license: Some(selected),
-                me,
                 cloud_url: cloud_url_for_blocking,
                 session_token,
+                llm_quota_remaining,
                 device: Some(device),
                 plugin_sync,
             })
@@ -592,9 +1427,9 @@ pub async fn login_password(
     let CloudLoginData {
         user,
         license,
-        me,
         cloud_url,
         session_token,
+        llm_quota_remaining,
         device,
         plugin_sync,
     } = blocking
@@ -607,20 +1442,17 @@ pub async fn login_password(
         })?
         .map_err(|(code, msg)| (code, Json(serde_json::json!({"error": msg}))))?;
 
-    // GAP-B (spec 2026-06-20): capture the cloud-issued membership `vertical` (场景)
-    // BEFORE `me` is consumed by the gateway match below. Prefer the /me snapshot
-    // (freshest), fall back to the login UserInfo. SECURITY (§11 R2): vertical is
-    // UI-copy ONLY — it never gates which plugins install (the signed snapshot's
-    // allowed_plugins is authoritative); and we only RELAY the cloud value, the
-    // client never self-reports a vertical.
-    let vertical = me
-        .as_ref()
-        .and_then(|m| m.vertical.clone())
-        .or_else(|| user.vertical.clone());
+    // SECURITY (§11 R2): vertical is UI copy only and comes from the
+    // session-authenticated `/me` snapshot; signed entitlements remain the gate.
+    let vertical = user.vertical.clone();
 
-    let (new_state, device_json) = if let Some(selected) = license {
-        let dev = match device {
-            Some(Ok(dev)) => dev,
+    // Validate the paid device result before touching the previous account's
+    // runtime or persisted session. A failed account switch must leave the
+    // already-active account intact rather than logging it out and then
+    // resurrecting it only after restart.
+    let validated_device = if license.is_some() {
+        match device {
+            Some(Ok(dev)) => Some(dev),
             Some(Err(e)) => return Err(device_binding_error(&e)),
             None => {
                 return Err((
@@ -632,40 +1464,170 @@ pub async fn login_password(
                     })),
                 ));
             }
-        };
-        if let Some(token) = session_token.as_deref() {
-            if let Err(e) = persist_cloud_session(&cloud_url, token) {
-                tracing::warn!("member login: failed to persist cloud session: {e}");
-            }
         }
-        // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
-        // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
-        match me {
-            Some(me) => {
-                wire_cloud_gateway(
-                    &state,
-                    me.gateway_url.as_deref(),
-                    me.gateway_token.as_deref(),
-                    me.gateway_default_model.as_deref(),
-                    &user.email,
+    } else {
+        None
+    };
+
+    // Cloud authentication has no local side effects. Fence the shared
+    // CLI/server cookie before consent or account cleanup and retain the same
+    // lock through final runtime publication.
+    let session_transaction = acquire_cloud_session_transition(&state.cloud_session_store)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": e,
+                    "code": "cloud-session-lock-failed",
+                    "paid_applied": false,
+                })),
+            )
+        })?;
+
+    // Consent durability is the local commit barrier.  Keep the previous
+    // account/session/runtime untouched if the explicit Cloud SaaS opt-in
+    // cannot be persisted.
+    crate::routes::privacy::set_outbound_enabled(&state, "cloud_saas", true).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("persist cloud consent: {e}")})),
+        )
+    })?;
+
+    // Stage the newly authenticated cookie behind a durable restore-suppression
+    // marker before replacing the old runtime. If the cloud did not issue a
+    // cookie, retire the previous one; removal itself installs the same marker.
+    // Nothing can lazy-restore the new/old account until cleanup commits below.
+    let cloud_url_for_session = cloud_url.clone();
+    let session_for_disk = session_token.clone();
+    let has_staged_session = session_for_disk
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    let staged_session_transaction = Arc::clone(&session_transaction);
+    let stage_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        match session_for_disk.filter(|token| !token.trim().is_empty()) {
+            Some(token) => staged_session_transaction
+                .stage(&cloud_url_for_session, &token)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            None => staged_session_transaction
+                .remove()
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        }
+    })
+    .await;
+    match stage_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            fail_close_member_runtime(&state, &format!("persist cloud session: {e}"));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("persist cloud session: {e}"),
+                    "code": "cloud-session-stage-failed",
+                    "paid_applied": false,
+                })),
+            ));
+        }
+        Err(e) => {
+            fail_close_member_runtime(&state, &format!("persist cloud session task: {e}"));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("persist cloud session task: {e}"),
+                    "code": "cloud-session-stage-failed",
+                    "paid_applied": false,
+                })),
+            ));
+        }
+    }
+
+    // Authentication has succeeded.  From this point the new account replaces
+    // the old local membership atomically from the runtime's perspective: drop
+    // the old provider/entitlements before wiring any credential returned for
+    // the new account.
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+    if let Err(e) = clear_member_credentials(&state, None) {
+        // The staged session is already restore-suppressed. Try to remove its
+        // raw cookie as hygiene, but retain/report a rollback error rather than
+        // relying on deletion for safety.
+        let rollback_error = rollback_staged_cloud_session(Arc::clone(&session_transaction))
+            .await
+            .err();
+        if let Some(rollback_error) = rollback_error.as_deref() {
+            tracing::warn!(
+                "member login: staged session rollback file cleanup failed; restore remains suppressed: {rollback_error}"
+            );
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("clear previous member state: {e}"),
+                "code": "member-switch-cleanup-failed",
+                "session_restore_suppressed": true,
+                "session_file_removed": rollback_error.is_none(),
+            })),
+        ));
+    }
+
+    // Publish the staged cookie only after old membership credentials and
+    // entitlements have been durably cleared. A commit failure leaves the
+    // marker in place; best-effort raw-file removal cannot weaken that fence.
+    if has_staged_session {
+        if let Err(e) = commit_staged_cloud_session_restore(Arc::clone(&session_transaction)).await
+        {
+            let rollback_error = rollback_staged_cloud_session(Arc::clone(&session_transaction))
+                .await
+                .err();
+            if let Some(rollback_error) = rollback_error.as_deref() {
+                tracing::warn!(
+                    "member login: failed session commit cleanup; restore remains suppressed: {rollback_error}"
                 );
             }
-            None => {
-                tracing::warn!("member login: fetch /me failed — user keeps current LLM settings")
-            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": e,
+                    "code": "cloud-session-commit-failed",
+                    "paid_applied": false,
+                    "session_restore_suppressed": true,
+                    "session_file_removed": rollback_error.is_none(),
+                })),
+            ));
         }
+    }
+
+    let (new_state, device_json) = if let Some(selected) = license {
+        let dev = validated_device.expect("paid device was validated before account switch");
+        let paid_state = MemberState::Paid {
+            account_id: user.id.to_string(),
+            license_id: selected.canonical_id(),
+            // The accounts quota snapshot feeds ACP scheduling; the gateway
+            // remains authoritative and will still reject stale overspend.
+            llm_quota_remaining,
+        };
+        // Runtime membership credential suppression is fail-closed.  Mark the
+        // already verified account Paid immediately before its providers are
+        // rebuilt, never before device binding succeeds.
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = paid_state.clone();
+        // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
+        // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
+        wire_cloud_gateway(
+            &state,
+            user.gateway_url.as_deref(),
+            user.gateway_token.as_deref(),
+            user.gateway_default_model.as_deref(),
+            &user.email,
+        );
 
         wire_pluginhub_provider(&state, &selected.license_key, &user.email);
         store_login_entitlements(&state, &selected);
         store_device_binding(&state, &dev);
 
         (
-            MemberState::Paid {
-                account_id: user.id.to_string(),
-                license_id: selected.id.to_string(),
-                // 新 License 不再携带 per-license LLM 配额 —— 配额由 cloud gateway 侧统计。
-                llm_quota_remaining: 0,
-            },
+            paid_state,
             Some(serde_json::json!({
                 "device_id": dev.device_id,
                 "max_activations": dev.max_activations,
@@ -673,11 +1635,6 @@ pub async fn login_password(
             })),
         )
     } else {
-        if let Some(token) = session_token.as_deref() {
-            if let Err(e) = persist_cloud_session(&cloud_url, token) {
-                tracing::warn!("member login: failed to persist cloud session: {e}");
-            }
-        }
         (
             MemberState::Free {
                 account_id: user.id.to_string(),
@@ -687,6 +1644,17 @@ pub async fn login_password(
     };
 
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
+    if let Err(e) = bind_member_session_epoch(&state, session_transaction.as_ref()) {
+        fail_close_member_runtime(&state, &e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": e,
+                "code": "cloud-session-epoch-failed",
+                "paid_applied": false,
+            })),
+        ));
+    }
     // B5: surface the best-effort plugin auto-install outcome to the UI (non-fatal;
     // the login already succeeded regardless of plugin sync).
     let plugins_json = plugin_sync.as_ref().map(sync_report_to_json);
@@ -714,12 +1682,22 @@ pub async fn login_password(
 pub async fn refresh_entitlements(
     State(state): State<SharedState>,
 ) -> AppResult<Json<serde_json::Value>> {
+    let _transition = state.member_transition.lock().await;
     // R1.1: 必须已登录(free 或 paid 都可手动 refresh;未登录拒)。
     {
         let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner());
         if !m.is_logged_in() {
             return Err(AppError::Unauthorized("member login required".into()));
         }
+    }
+    if !crate::routes::privacy::outbound_enabled(&state, "cloud_saas") {
+        return Err(AppError::detailed(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "cloud SaaS is disabled by privacy settings",
+                "code": "cloud-saas-disabled",
+            }),
+        ));
     }
 
     // 网络 I/O 是 blocking(CloudClient = reqwest::blocking)→ spawn_blocking(B4 约束)。
@@ -728,7 +1706,7 @@ pub async fn refresh_entitlements(
     let cache = state.entitlement_cache.clone();
     let state_for_writeback = state.clone();
     let summary = tokio::task::spawn_blocking(move || -> RefreshSummary {
-        run_refresh_round(&state_for_writeback, &cache)
+        run_refresh_round_locked(&state_for_writeback, &cache)
     })
     .await
     .map_err(|e| AppError::Internal(format!("refresh task join error: {e}")))?;
@@ -759,6 +1737,33 @@ pub async fn refresh_entitlements(
 pub async fn sync_plugins_now(
     State(state): State<SharedState>,
 ) -> AppResult<Json<serde_json::Value>> {
+    let _transition = state.member_transition.lock().await;
+    let session_transaction = acquire_cloud_session_transition(&state.cloud_session_store)
+        .await
+        .map_err(|error| {
+            fail_close_member_runtime(&state, &error);
+            AppError::Internal(error)
+        })?;
+    let state_for_check = state.clone();
+    let transaction_for_check = Arc::clone(&session_transaction);
+    let coherent = tokio::task::spawn_blocking(move || {
+        reconcile_member_session_locked(&state_for_check, &transaction_for_check)
+    })
+    .await
+    .map_err(|error| {
+        let detail = format!("member reconcile task failed: {error}");
+        fail_close_member_runtime(&state, &detail);
+        AppError::Internal(detail)
+    })?;
+    if !coherent {
+        return Err(AppError::detailed(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "member session changed or could not be verified",
+                "code": "member-session-invalid",
+            }),
+        ));
+    }
     {
         let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner());
         if !m.is_paid() {
@@ -771,11 +1776,21 @@ pub async fn sync_plugins_now(
             ));
         }
     }
+    if !crate::routes::privacy::outbound_enabled(&state, "cloud_saas") {
+        return Err(AppError::detailed(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "cloud SaaS is disabled by privacy settings",
+                "code": "cloud-saas-disabled",
+            }),
+        ));
+    }
 
     let state_for_sync = state.clone();
+    let transaction_for_sync = Arc::clone(&session_transaction);
     let report = tokio::task::spawn_blocking(
         move || -> Result<attune_core::plugin_sync::SyncReport, String> {
-            if let Some(client) = cloud_client_from_session() {
+            if let Some(client) = cloud_client_from_transaction(&transaction_for_sync) {
                 return Ok(attune_core::plugin_sync::best_effort_sync_plugins(&client));
             }
 
@@ -825,12 +1840,48 @@ pub async fn sync_plugins_now(
 /// 复用为 worker 的单轮逻辑(worker 周期调用本函数)。无可达 cloud session →
 /// 返回空 summary(`all_network_error=false`、`refreshed=0` —— 不误判 502)。
 pub fn run_refresh_round(state: &SharedState, cache: &EntitlementCache) -> RefreshSummary {
+    // The periodic worker is a native thread, while the HTTP refresh path
+    // already holds the async transition guard and calls the locked helper.
+    // Serializing here prevents an old account's verification round from
+    // repopulating entitlements after logout/account switch.
+    let _transition = state.member_transition.blocking_lock();
+    run_refresh_round_locked(state, cache)
+}
+
+fn run_refresh_round_locked(state: &SharedState, cache: &EntitlementCache) -> RefreshSummary {
+    if !vault_is_unlocked(state) {
+        return RefreshSummary::default();
+    }
+    let session_transaction = match state.cloud_session_store.transaction() {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            fail_close_member_runtime(
+                state,
+                &format!("acquire entitlement refresh session fence: {error}"),
+            );
+            return RefreshSummary::default();
+        }
+    };
+    if !reconcile_member_session_locked(state, &session_transaction) {
+        return RefreshSummary::default();
+    }
+    if !state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_logged_in()
+    {
+        return RefreshSummary::default();
+    }
+    if !crate::routes::privacy::outbound_enabled(state, "cloud_saas") {
+        return RefreshSummary::default();
+    }
     let now = Utc::now();
     let mode = resolve_trust_mode(state);
 
     // 构建 CloudClient(从持久化 cloud session)。无 session → 不算"网络错"
     // (没有可 verify 的入口),返回空 summary。
-    let Some(client) = cloud_client_from_session() else {
+    let Some(client) = cloud_client_from_transaction(&session_transaction) else {
         return RefreshSummary::default();
     };
 
@@ -899,48 +1950,54 @@ fn writeback_accepted(state: &SharedState, rounds: &[(String, ReverifyOutcome, O
     }
 }
 
-/// 从持久化 cloud session(`config_dir/cloud-session.json`)构建 CloudClient。
-/// 与 [`member_session_sync_plugins`] 同源(login 后写入)。无 session → None。
-fn cloud_client_from_session() -> Option<CloudClient> {
-    let path = attune_core::platform::config_dir().join("cloud-session.json");
-    let json = std::fs::read_to_string(&path).ok()?;
-    let sess: serde_json::Value = serde_json::from_str(&json).ok()?;
-    let cloud_url = sess.get("cloud_url").and_then(|v| v.as_str())?;
-    let session = sess
-        .get("session")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())?;
-    Some(CloudClient::with_session(cloud_url, session))
+fn cloud_client_from_transaction(
+    session_transaction: &CloudSessionTransaction,
+) -> Option<CloudClient> {
+    let session = session_transaction.load().ok().flatten()?;
+    Some(CloudClient::with_session(
+        session.cloud_url,
+        session.session,
+    ))
 }
 
-fn persist_cloud_session(cloud_url: &str, session_token: &str) -> Result<(), String> {
-    let path = attune_core::platform::config_dir().join("cloud-session.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create session dir: {e}"))?;
-    }
-    let data = serde_json::json!({
-        "cloud_url": cloud_url,
-        "session": session_token,
-    });
-    let json =
-        serde_json::to_string_pretty(&data).map_err(|e| format!("session serialize: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write session: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+async fn acquire_cloud_session_transition(
+    store: &CloudSessionStore,
+) -> Result<Arc<CloudSessionTransaction>, String> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.transaction().map(Arc::new))
+        .await
+        .map_err(|e| format!("acquire cloud session transition task: {e}"))?
+        .map_err(|e| format!("acquire cloud session transition: {e}"))
+}
+
+async fn rollback_staged_cloud_session(
+    transaction: Arc<CloudSessionTransaction>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || transaction.remove())
+        .await
+        .map_err(|e| format!("rollback cloud session task: {e}"))?
+        .map(|_| ())
+        .map_err(|e| format!("rollback cloud session file: {e}"))
+}
+
+async fn commit_staged_cloud_session_restore(
+    transaction: Arc<CloudSessionTransaction>,
+) -> Result<(), String> {
+    let removed_marker = tokio::task::spawn_blocking(move || transaction.commit())
+        .await
+        .map_err(|e| format!("commit cloud session task: {e}"))?
+        .map_err(|e| format!("commit cloud session marker: {e}"))?;
+    if !removed_marker {
+        return Err(
+            "commit cloud session marker: staged transaction is no longer current".to_string(),
+        );
     }
     Ok(())
 }
 
 fn resolve_pluginhub_config(state: &SharedState) -> (String, Option<String>) {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let parsed = vault
-        .store()
-        .get_meta(SETTINGS_META_KEY)
-        .ok()
-        .flatten()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let parsed = crate::settings_store::load_settings(&vault).ok().flatten();
     let url = parsed
         .as_ref()
         .and_then(|v| {
@@ -969,27 +2026,27 @@ fn wire_pluginhub_provider(state: &SharedState, license_key: &str, who: &str) {
     }
     let hub_url = resolve_pluginhub_url(state);
     match apply_pluginhub_to_vault_settings(state, &hub_url, license_key) {
-        Ok(()) => tracing::info!("member pluginhub: configured PluginHub for {who}"),
+        Ok(true) => {
+            tracing::info!("member pluginhub: configured PluginHub for {who}");
+            state.reload_plugin_hub_from_settings();
+        }
+        Ok(false) => tracing::info!(
+            "member pluginhub: user has a BYOK PluginHub credential; membership value not applied"
+        ),
         Err(e) => tracing::warn!("member pluginhub: settings not written for {who}: {e}"),
     }
-    // Hot switch even if vault persistence failed; the current paid session can install
-    // marketplace plugins immediately.
-    state.reload_plugin_hub(Some(&hub_url), Some(license_key));
 }
 
 fn apply_pluginhub_to_vault_settings(
     state: &SharedState,
     hub_url: &str,
     license_key: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = vault.dek_db().map_err(|e| format!("vault locked: {e}"))?;
-    let existing = vault
-        .store()
-        .get_meta(SETTINGS_META_KEY)
-        .map_err(|e| format!("get_meta failed: {e}"))?;
+    let existing = crate::settings_store::load_settings(&vault)
+        .map_err(|e| format!("load settings failed: {e}"))?;
     let mut current: serde_json::Value = match existing {
-        Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| serde_json::json!({})),
+        Some(settings) => settings,
         None => serde_json::json!({}),
     };
     if !current.is_object() {
@@ -1001,17 +2058,29 @@ fn apply_pluginhub_to_vault_settings(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| "settings.pluginhub must be an object".to_string())?;
+    let membership_owned = pluginhub
+        .get("managed_by")
+        .and_then(serde_json::Value::as_str)
+        == Some(attune_core::llm_settings::MEMBER_GATEWAY_OWNER);
+    let has_user_key = pluginhub
+        .get("license_key")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|key| !key.trim().is_empty());
+    if has_user_key && !membership_owned {
+        return Ok(false);
+    }
     pluginhub.insert("url".into(), serde_json::Value::String(hub_url.to_string()));
     pluginhub.insert(
         "license_key".into(),
         serde_json::Value::String(license_key.to_string()),
     );
-    let data = serde_json::to_vec(&current).map_err(|e| format!("settings ser: {e}"))?;
-    vault
-        .store()
-        .set_meta(SETTINGS_META_KEY, &data)
-        .map_err(|e| format!("set_meta failed: {e}"))?;
-    Ok(())
+    pluginhub.insert(
+        "managed_by".into(),
+        serde_json::Value::String(attune_core::llm_settings::MEMBER_GATEWAY_OWNER.to_string()),
+    );
+    crate::settings_store::persist_settings(&vault, current)
+        .map_err(|e| format!("persist settings failed: {e}"))?;
+    Ok(true)
 }
 
 fn entitled_plugin_ids_for_retry(state: &SharedState) -> Vec<String> {
@@ -1074,6 +2143,11 @@ struct ActivationOutcome {
     plugin_entitlements: Vec<PluginHubInstallEntitlement>,
 }
 
+enum ActivationTaskError {
+    Cloud(String),
+    LicensePlanNotPaid,
+}
+
 /// POST /api/v1/member/activate-license — 授权码 (license_key) 激活全链。
 ///
 /// 授权激活 = ① **绑定设备**(本机指纹 → license,颁 device_token + 限设备数)
@@ -1105,6 +2179,7 @@ pub async fn activate_license(
             ),
         ));
     }
+    let _transition = state.member_transition.lock().await;
     // SECURITY: accounts URL 来自服务端 settings(不接受请求体覆盖)—— 见
     // resolve_accounts_url(SSRF / 付费墙绕过)。
     let cloud_url = resolve_accounts_url(&state);
@@ -1116,13 +2191,28 @@ pub async fn activate_license(
     // 的文件 I/O,非异步上下文)。
     let key_for_blocking = license_key.clone();
     let outcome = tokio::task::spawn_blocking(
-        move || -> Result<ActivationOutcome, String> {
+        move || -> Result<ActivationOutcome, ActivationTaskError> {
             let client = CloudClient::new(cloud_url);
             // 阶段一:授权(失败即整体失败,fail-closed)。
-            let activate = client.activate_license(&key_for_blocking).map_err(|e| e.to_string())?;
+            let activate = client
+                .activate_license(&key_for_blocking)
+                .map_err(|e| ActivationTaskError::Cloud(e.to_string()))?;
+            if !current_plan_grants_paid(&activate.plan, activate.expires_at.as_deref()) {
+                return Err(ActivationTaskError::LicensePlanNotPaid);
+            }
             // 阶段二:绑定本机设备(授权已成功;绑定结果按分类错误带回,不在此抛)。
             let fp = attune_core::device_fingerprint::device_fingerprint();
             let device = client.device_activate(&key_for_blocking, &fp);
+            if device.as_ref().is_ok_and(|device| {
+                let plan = if device.plan.trim().is_empty() {
+                    activate.plan.as_str()
+                } else {
+                    device.plan.as_str()
+                };
+                !current_plan_grants_paid(plan, device.expires_at.as_deref())
+            }) {
+                return Err(ActivationTaskError::LicensePlanNotPaid);
+            }
             let (plugin_sync, plugin_entitlements) = if device.is_ok() {
                 let sync = sync_activation_plugins_detailed(
                     &pluginhub_url,
@@ -1157,12 +2247,21 @@ pub async fn activate_license(
             Json(serde_json::json!({"error": format!("activate task join error: {e}")})),
         )
     })?
-    .map_err(|msg| {
-        // 授权阶段失败:无效授权码 / cloud 不可达 → 502。绝不在错误路径置 Paid。
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("activate failed: {msg}"), "code": "activate-failed"})),
-        )
+    .map_err(|error| match error {
+        ActivationTaskError::Cloud(message) => {
+            // 授权阶段失败:无效授权码 / cloud 不可达 → 502。绝不在错误路径置 Paid。
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("activate failed: {message}"), "code": "activate-failed"})),
+            )
+        }
+        ActivationTaskError::LicensePlanNotPaid => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "license plan does not grant paid membership",
+                "code": "license-plan-not-paid",
+            })),
+        ),
     })?;
 
     let ActivationOutcome {
@@ -1175,6 +2274,96 @@ pub async fn activate_license(
         Ok(dev) => dev,
         Err(e) => return Err(device_binding_error(&e)),
     };
+
+    let session_transaction = acquire_cloud_session_transition(&state.cloud_session_store)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": e,
+                    "code": "cloud-session-lock-failed",
+                    "paid_applied": false,
+                })),
+            )
+        })?;
+
+    // Consent is the first local commit barrier. A persistence failure must
+    // leave the previous session and active member runtime untouched.
+    crate::routes::privacy::set_outbound_enabled(&state, "cloud_saas", true).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("persist cloud consent: {e}")})),
+        )
+    })?;
+
+    // License-code activation has no account cookie of its own. Retire the
+    // previous cookie under the same cross-process fence retained through
+    // receipt, provider, entitlement, and Paid-state publication.
+    let activation_session_transaction = Arc::clone(&session_transaction);
+    let remove_result =
+        tokio::task::spawn_blocking(move || activation_session_transaction.remove()).await;
+    match remove_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            fail_close_member_runtime(&state, &format!("remove old cloud session: {e}"));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("remove old cloud session: {e}"),
+                    "code": "cloud-session-cleanup-failed",
+                    "paid_applied": false,
+                })),
+            ));
+        }
+        Err(e) => {
+            fail_close_member_runtime(&state, &format!("remove old cloud session task: {e}"));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("remove old cloud session task: {e}"),
+                    "code": "cloud-session-cleanup-failed",
+                    "paid_applied": false,
+                })),
+            ));
+        }
+    }
+
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+    clear_member_credentials(&state, None).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("clear previous member state: {e}"),
+                "code": "member-switch-cleanup-failed",
+            })),
+        )
+    })?;
+
+    // 置 Paid。授权码是凭据，绝不能进入状态 API 或 access log；仅使用稳定摘要
+    // 作为本地关联标识，原始 key 只保留在受控的 provider/entitlement sinks。
+    let license_identity = redact_license_key(&license_key);
+    let new_state = MemberState::Paid {
+        account_id: license_identity.clone(),
+        license_id: license_identity.clone(),
+        llm_quota_remaining: 0,
+    };
+    // A license-code activation has no account cookie. Its encrypted receipt
+    // must be durable before Paid/runtime publication so a 200 response can be
+    // restored after restart by fresh online authorization + device proof.
+    persist_activation_receipt(&state, &dev, &license_key).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("persist activation receipt: {e}"),
+                "code": "activation-receipt-persist-failed",
+                "paid_applied": false,
+            })),
+        )
+    })?;
+    // Set only after authorization + device binding + old-account cleanup, but
+    // before rebuilding membership-owned runtime providers.
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
 
     // ── 授权成功:配 gateway LLM + 落 entitlement + 置 Paid(与 login_password 同逻辑)──
     // best-effort:写失败不阻断激活(用户仍是 Paid,只是 chat 需手填 key,§4.5)。
@@ -1191,21 +2380,21 @@ pub async fn activate_license(
     // 周期 re-verify 基准。best-effort,失败仅 warn。
     store_activation_entitlements(
         &state,
-        &license_key,
+        &license_identity,
         &result.allowed_plugins,
         &plugin_entitlements,
     );
-
-    // 置 Paid。授权码激活无独立 account_id,用 license_key 作 account 标识。
-    let new_state = MemberState::Paid {
-        account_id: license_key.clone(),
-        license_id: license_key.clone(),
-        llm_quota_remaining: 0,
-    };
-    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
-
-    // 把 device_token + device_id + 配额落 vault(后续 heartbeat / cert 用)。
-    store_device_binding(&state, &dev);
+    if let Err(e) = bind_member_session_epoch(&state, session_transaction.as_ref()) {
+        fail_close_member_runtime(&state, &e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": e,
+                "code": "cloud-session-epoch-failed",
+                "paid_applied": false,
+            })),
+        ));
+    }
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": new_state,
@@ -1437,39 +2626,99 @@ fn device_binding_error(
     )
 }
 
-/// best-effort 把 cloud 颁发的 device binding(device_token + device_id + 配额)落 vault
-/// meta(`DEVICE_BINDING_META_KEY`)。后续 heartbeat / cert 签发读它。vault 锁短取,
-/// 不嵌套 fulltext/vectors(lock-ordering)。失败仅 warn,不阻断激活。
+/// Best-effort persistence for account/session logins. Those logins can be
+/// restored by their cloud session even if this auxiliary device credential
+/// cannot be written.
 fn store_device_binding(
     state: &SharedState,
     dev: &attune_core::cloud_client::DeviceActivateResult,
 ) {
+    if let Err(e) = persist_device_binding(state, dev, None) {
+        tracing::warn!("member login: device binding not persisted: {e}");
+    }
+}
+
+/// License-code activation has no account session, so its encrypted receipt is
+/// the only durable proof available after restart. Unlike the account-login
+/// helper above, callers must propagate any error and fail the activation.
+fn persist_activation_receipt(
+    state: &SharedState,
+    dev: &attune_core::cloud_client::DeviceActivateResult,
+    license_key: &str,
+) -> Result<(), String> {
+    persist_device_binding(state, dev, Some(license_key))
+}
+
+fn persist_device_binding(
+    state: &SharedState,
+    dev: &attune_core::cloud_client::DeviceActivateResult,
+    activation_license_key: Option<&str>,
+) -> Result<(), String> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let dek = vault
+        .dek_db()
+        .map_err(|e| format!("vault is not unlocked: {e}"))?;
+    let data = encrypted_device_binding_payload(&dek, dev, activation_license_key)
+        .map_err(|e| format!("encrypt device binding: {e}"))?;
+    vault
+        .store()
+        .set_meta(DEVICE_BINDING_META_KEY, &data)
+        .map_err(|e| format!("persist device binding: {e}"))
+}
+
+fn encrypted_device_binding_payload(
+    dek: &attune_core::crypto::Key32,
+    dev: &attune_core::cloud_client::DeviceActivateResult,
+    activation_license_key: Option<&str>,
+) -> attune_core::error::Result<Vec<u8>> {
     let payload = serde_json::json!({
+        "schema": 2,
         "device_token": dev.device_token,
         "device_id": dev.device_id,
+        // Present only for the license-code path and protected by the vault
+        // DEK. It is never returned by settings/member APIs or written to logs.
+        "activation_license_key": activation_license_key,
         "max_activations": dev.max_activations,
         "current_activations": dev.current_activations,
         "issued_at": dev.issued_at,
         "expires_at": dev.expires_at,
     });
-    let data = match serde_json::to_vec(&payload) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("activate: device binding serialize failed: {e}");
-            return;
-        }
-    };
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    if vault.dek_db().is_err() {
-        tracing::warn!("activate: vault locked — device_token not persisted");
-        return;
-    }
-    if let Err(e) = vault.store().set_meta(DEVICE_BINDING_META_KEY, &data) {
-        tracing::warn!("activate: failed to persist device binding: {e}");
-    }
+    attune_core::crypto::encrypt(dek, &serde_json::to_vec(&payload)?)
 }
 
-/// vault meta key:授权码激活后 cloud 颁发的设备绑定凭据(device_token 等)。
+fn load_activation_receipt(
+    state: &SharedState,
+) -> Result<Option<(String, attune_core::cloud_client::DeviceActivateResult)>, String> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let dek = vault
+        .dek_db()
+        .map_err(|e| format!("vault is not unlocked: {e}"))?;
+    let Some(encrypted) = vault
+        .store()
+        .get_meta(DEVICE_BINDING_META_KEY)
+        .map_err(|e| format!("read activation receipt: {e}"))?
+    else {
+        return Ok(None);
+    };
+    let plaintext = attune_core::crypto::decrypt(&dek, &encrypted)
+        .map_err(|e| format!("decrypt activation receipt: {e}"))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&plaintext).map_err(|e| format!("parse activation receipt: {e}"))?;
+    let Some(license_key) = payload
+        .get("activation_license_key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let device = serde_json::from_value(payload)
+        .map_err(|e| format!("parse activation device binding: {e}"))?;
+    Ok(Some((license_key, device)))
+}
+
+/// Vault meta key for the encrypted device binding credential.
 pub const DEVICE_BINDING_META_KEY: &str = "device_binding";
 
 /// 共享:把 cloud 下发的 gateway endpoint+token(+默认 model)配进 vault settings
@@ -1598,10 +2847,235 @@ fn store_login_entitlements(state: &SharedState, license: &attune_core::cloud_cl
     }
 }
 
-/// POST /api/v1/member/logout — 重置会员状态为 LoggedOut
-pub async fn logout(State(state): State<SharedState>) -> Json<serde_json::Value> {
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct LogoutOutcome {
+    pub removed_local_session: bool,
+    pub remote_logout_succeeded: bool,
+    pub cleared_member_credentials: bool,
+}
+
+fn clear_member_credentials(
+    state: &SharedState,
+    legacy_gateway: Option<&(String, String)>,
+) -> Result<bool, String> {
+    clear_member_credentials_inner(state, legacy_gateway, true)
+}
+
+/// Token-login may run after a caller has injected an independently governed
+/// provider (for example a desktop-owned local runtime). Preserve that handle
+/// when persisted settings prove no membership-owned LLM was removed. Account
+/// logout/activation/password-switch paths still force a settings reload.
+fn clear_member_credentials_preserving_unowned_llm(
+    state: &SharedState,
+    legacy_gateway: Option<&(String, String)>,
+) -> Result<bool, String> {
+    clear_member_credentials_inner(state, legacy_gateway, false)
+}
+
+fn clear_member_credentials_inner(
+    state: &SharedState,
+    legacy_gateway: Option<&(String, String)>,
+    force_llm_reload: bool,
+) -> Result<bool, String> {
+    // Stop every provider candidate built from the outgoing account before
+    // touching its durable settings. Per-provider reload epochs then ensure a
+    // candidate built in this transition window cannot overwrite the later
+    // replacement account's provider.
+    state.invalidate_credential_generation();
+    let persistence_result = (|| -> Result<(bool, bool), String> {
+        let mut changed = false;
+        let mut removed_membership_llm = false;
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let vault_unlocked = vault.dek_db().is_ok();
+        let existing = crate::settings_store::load_settings(&vault)
+            .map_err(|e| format!("read settings during logout: {e}"))?;
+        if let Some(current) = existing {
+            let (mut current, mut llm_changed) =
+                attune_core::llm_settings::remove_membership_gateway_from_settings(current);
+            if !llm_changed {
+                if let Some((endpoint, token)) = legacy_gateway {
+                    (current, llm_changed) =
+                        attune_core::llm_settings::remove_legacy_membership_gateway_match(
+                            current, endpoint, token,
+                        );
+                }
+            }
+            removed_membership_llm = llm_changed;
+            changed |= llm_changed;
+            if llm_changed {
+                changed |= crate::settings_store::delete_secret(
+                    &vault,
+                    crate::settings_store::LLM_API_KEY_SECRET,
+                )
+                .map_err(|e| format!("remove member gateway secret during logout: {e}"))?;
+            }
+            let mut pluginhub_changed = false;
+            if let Some(pluginhub) = current
+                .get_mut("pluginhub")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                let membership_owned = pluginhub
+                    .get("managed_by")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(attune_core::llm_settings::MEMBER_GATEWAY_OWNER);
+                if membership_owned {
+                    // Clear only the credential installed by member login. A
+                    // user-entered PluginHub BYOK has no ownership marker.
+                    pluginhub_changed |= pluginhub.remove("license_key").is_some();
+                    pluginhub_changed |= pluginhub.remove("managed_by").is_some();
+                }
+            }
+            if pluginhub_changed {
+                changed |= crate::settings_store::delete_secret(
+                    &vault,
+                    crate::settings_store::PLUGINHUB_LICENSE_KEY_SECRET,
+                )
+                .map_err(|e| format!("remove PluginHub secret during logout: {e}"))?;
+            }
+            changed |= pluginhub_changed;
+            if changed {
+                if vault_unlocked {
+                    crate::settings_store::persist_settings(&vault, current)
+                        .map_err(|e| format!("persist settings during logout: {e}"))?;
+                } else {
+                    // A sealed vault cannot migrate unrelated legacy BYOK
+                    // plaintext.  Teardown must nevertheless remove the
+                    // membership-owned fields, so preserve the remaining raw
+                    // settings verbatim until the next unlocked migration.
+                    let raw = serde_json::to_vec(&current)
+                        .map_err(|e| format!("serialize settings during logout: {e}"))?;
+                    vault
+                        .store()
+                        .set_meta(attune_core::llm_settings::SETTINGS_META_KEY, &raw)
+                        .map_err(|e| format!("persist sealed settings during logout: {e}"))?;
+                }
+            }
+        }
+        changed |= vault
+            .store()
+            .delete_meta(DEVICE_BINDING_META_KEY)
+            .map_err(|e| format!("remove device binding during logout: {e}"))?;
+        changed |= vault
+            .store()
+            .clear_entitlements()
+            .map_err(|e| format!("remove entitlements during logout: {e}"))?
+            > 0;
+        Ok((changed, removed_membership_llm))
+    })();
+
+    // Entitlements and membership-owned integrations are torn down even when
+    // disk cleanup fails. Token-only compatibility login preserves an unrelated,
+    // independently configured LLM; explicit logout/switch paths force a reload.
+    state.entitlement_cache.hydrate_from_rows(Vec::new());
+    if force_llm_reload
+        || persistence_result
+            .as_ref()
+            .map(|(_, removed_membership_llm)| *removed_membership_llm)
+            .unwrap_or(true)
+    {
+        state.reload_llm();
+    }
+    // Membership teardown must not disable a user-owned PluginHub BYOK. The
+    // settings-aware reload suppresses a still-persisted membership credential
+    // while restoring an unrelated user credential when the vault is unlocked.
+    state.reload_plugin_hub_from_settings();
+    persistence_result.map(|(changed, _)| changed)
+}
+
+/// Shared teardown for member logout and the privacy "wipe cloud session"
+/// action. Local removal is authoritative; remote revocation is best-effort.
+pub(crate) async fn perform_logout(state: &SharedState) -> Result<LogoutOutcome, String> {
+    let _transition = state.member_transition.lock().await;
+    let session_transaction = acquire_cloud_session_transition(&state.cloud_session_store).await?;
+    let session_for_cleanup = Arc::clone(&session_transaction);
+    let (persisted, removed_result) = tokio::task::spawn_blocking(move || {
+        // A corrupt session must still be removable. It cannot be used for a
+        // remote call, but it must never make logout self-recover on restart.
+        let persisted = session_for_cleanup
+            .load()
+            .map_err(|e| {
+                tracing::warn!("member logout: ignoring unreadable persisted session: {e}");
+                e
+            })
+            .ok()
+            .flatten();
+        let removed = session_for_cleanup
+            .remove()
+            .map_err(|e| format!("remove cloud session: {e}"));
+        (persisted, removed)
+    })
+    .await
+    .map_err(|e| format!("local logout task join failed: {e}"))?;
+
+    // Local logout is authoritative and must take effect before a potentially
+    // slow/unreachable remote revocation call. This closes the window where a
+    // user had clicked logout but the old gateway and entitlement cache stayed
+    // live for up to the HTTP timeout.
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
-    Json(serde_json::json!({"status": "ok", "state": "logged_out"}))
+    *state
+        .member_session_epoch
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    *state
+        .member_verified_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    let mut credential_cleanup = clear_member_credentials(state, None);
+    let privacy_cleanup = crate::routes::privacy::set_outbound_enabled(state, "cloud_saas", false);
+
+    let remote_result = match persisted {
+        Some(session) => tokio::task::spawn_blocking(move || {
+            let mut client = CloudClient::with_session(session.cloud_url, session.session);
+            let legacy_gateway = client.me().ok().and_then(|me| {
+                me.gateway_url
+                    .zip(me.gateway_token)
+                    .filter(|(url, token)| !url.trim().is_empty() && !token.trim().is_empty())
+            });
+            (client.logout().is_ok(), legacy_gateway)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("member logout: remote task failed: {e}");
+            (false, None)
+        }),
+        None => (false, None),
+    };
+
+    // Upgrade compatibility: settings written before provenance markers can be
+    // removed only after the authenticated account reports an exact endpoint +
+    // token match. Runtime was already torn down above; this is a second,
+    // idempotent persistence pass.
+    if let Some(legacy_gateway) = remote_result.1.as_ref() {
+        match clear_member_credentials(state, Some(legacy_gateway)) {
+            Ok(legacy_changed) => {
+                if let Ok(changed) = credential_cleanup.as_mut() {
+                    *changed |= legacy_changed;
+                }
+            }
+            Err(e) if credential_cleanup.is_ok() => credential_cleanup = Err(e),
+            Err(e) => tracing::warn!("member logout: legacy cleanup also failed: {e}"),
+        }
+    }
+
+    let removed_local_session = removed_result?;
+    let cleared_member_credentials = credential_cleanup?;
+    privacy_cleanup?;
+    Ok(LogoutOutcome {
+        removed_local_session,
+        remote_logout_succeeded: remote_result.0,
+        cleared_member_credentials,
+    })
+}
+
+/// POST /api/v1/member/logout — revoke and remove the persisted session and all
+/// credentials managed by that membership before exposing LoggedOut.
+pub async fn logout(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
+    let outcome = perform_logout(&state).await.map_err(AppError::Internal)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": "logged_out",
+        "session": outcome,
+    })))
 }
 
 /// 把 cloud gateway endpoint + token 合并写入 vault `app_settings` meta.
@@ -1619,14 +3093,10 @@ fn apply_gateway_to_vault_settings(
     default_model: Option<&str>,
 ) -> Result<bool, String> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    // Parity with settings.rs: surface a clear "vault locked" error before touching meta.
-    let _ = vault.dek_db().map_err(|e| format!("vault locked: {e}"))?;
-    let existing = vault
-        .store()
-        .get_meta(SETTINGS_META_KEY)
-        .map_err(|e| format!("get_meta failed: {e}"))?;
+    let existing = crate::settings_store::load_settings(&vault)
+        .map_err(|e| format!("load settings failed: {e}"))?;
     let current: serde_json::Value = match existing {
-        Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| serde_json::json!({})),
+        Some(settings) => settings,
         None => serde_json::json!({}),
     };
 
@@ -1640,11 +3110,8 @@ fn apply_gateway_to_vault_settings(
         token,
         default_model,
     );
-    let data = serde_json::to_vec(&merged).map_err(|e| format!("settings ser: {e}"))?;
-    vault
-        .store()
-        .set_meta(SETTINGS_META_KEY, &data)
-        .map_err(|e| format!("set_meta failed: {e}"))?;
+    crate::settings_store::persist_settings(&vault, merged)
+        .map_err(|e| format!("persist settings failed: {e}"))?;
     Ok(true)
 }
 
@@ -1654,6 +3121,7 @@ mod tests {
     use attune_core::entitlement::{EntStatus, EntitlementCache};
     use attune_core::entitlement_reverify::{apply_refresh_rounds, ReverifyOutcome};
     use attune_core::llm_settings::{gateway_should_apply, merge_gateway_into_settings};
+    use attune_core::member_session::MemberState;
     use attune_core::plugin_hub::{InstallResponse, PluginHubProvider, PluginListingResponse};
     use attune_core::store::plugin_entitlements::EntitlementRow;
     use chrono::{DateTime, Utc};
@@ -1689,6 +3157,284 @@ mod tests {
         assert_eq!(
             v.get("billing_url").and_then(|u| u.as_str()),
             Some("https://accounts.example.com/billing")
+        );
+    }
+
+    #[tokio::test]
+    async fn login_token_consent_failure_preserves_existing_member_state() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let _dir = crate::test_support::override_data_dir(tmp.path().join("attune"));
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-consent-order").expect("setup");
+        vault
+            .store()
+            .set_meta(attune_core::llm_settings::SETTINGS_META_KEY, b"[]")
+            .expect("install malformed settings root");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        let existing = MemberState::Paid {
+            account_id: "existing-account".into(),
+            license_id: "existing-license".into(),
+            llm_quota_remaining: 9,
+        };
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = existing.clone();
+
+        let error = super::login_token(
+            axum::extract::State(Arc::clone(&state)),
+            axum::Json(super::LoginTokenReq {
+                account_id: "new-account".into(),
+                tier: "free".into(),
+                license_id: None,
+                llm_quota_remaining: 0,
+            }),
+        )
+        .await
+        .expect_err("consent persistence must fail before switching accounts");
+
+        assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            *state.member_state.lock().unwrap_or_else(|e| e.into_inner()),
+            existing,
+            "no member teardown may run until cloud consent is durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn free_login_token_retires_old_paid_session_before_state_switch() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir);
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-free-token-switch").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::Paid {
+            account_id: "old-paid-account".into(),
+            license_id: "old-paid-license".into(),
+            llm_quota_remaining: 10,
+        };
+        attune_core::cloud_session::persist_cloud_session(
+            "https://old-account.example.test",
+            "session=old-paid-session",
+        )
+        .expect("persist old session precondition");
+
+        let response = super::login_token(
+            axum::extract::State(Arc::clone(&state)),
+            axum::Json(super::LoginTokenReq {
+                account_id: "new-free-account".into(),
+                tier: "free".into(),
+                license_id: None,
+                llm_quota_remaining: 0,
+            }),
+        )
+        .await
+        .expect("free token login");
+
+        assert_eq!(response.0["state"]["kind"], "free");
+        assert_eq!(response.0["state"]["account_id"], "new-free-account");
+        assert!(
+            attune_core::cloud_session::load_cloud_session()
+                .expect("load after free switch")
+                .is_none(),
+            "free login must retire the previous paid account session"
+        );
+
+        // Model process restart/lazy restore by dropping only in-memory member
+        // state. The old Paid account must stay unavailable.
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
+        assert!(super::restore_member_state_from_cloud_session(&state)
+            .await
+            .is_none());
+        assert!(matches!(
+            *state.member_state.lock().unwrap_or_else(|e| e.into_inner()),
+            MemberState::LoggedOut
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn member_transition_serializes_session_and_runtime_publication() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-member-transaction").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        let store = attune_core::cloud_session::CloudSessionStore::new(
+            tmp.path().join("cloud-session.json"),
+        );
+
+        let (a_staged_tx, a_staged_rx) = tokio::sync::oneshot::channel();
+        let (release_a_tx, release_a_rx) = tokio::sync::oneshot::channel();
+        let state_a = Arc::clone(&state);
+        let store_a = store.clone();
+        let transition_a = tokio::spawn(async move {
+            let _guard = state_a.member_transition.lock().await;
+            let session_transaction = Arc::new(store_a.transaction().expect("lock A session"));
+            session_transaction
+                .stage("https://accounts-a.example.test", "session=account-a")
+                .expect("stage A");
+            a_staged_tx.send(()).expect("signal A staged");
+            release_a_rx.await.expect("release A");
+            super::commit_staged_cloud_session_restore(session_transaction)
+                .await
+                .expect("commit A");
+            *state_a
+                .member_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = MemberState::Paid {
+                account_id: "account-a".into(),
+                license_id: "license-a".into(),
+                llm_quota_remaining: 1,
+            };
+        });
+        a_staged_rx.await.expect("A reached staged barrier");
+
+        let (b_started_tx, b_started_rx) = tokio::sync::oneshot::channel();
+        let (b_entered_tx, mut b_entered_rx) = tokio::sync::oneshot::channel();
+        let state_b = Arc::clone(&state);
+        let store_b = store.clone();
+        let transition_b = tokio::spawn(async move {
+            b_started_tx.send(()).expect("signal B attempt");
+            let _guard = state_b.member_transition.lock().await;
+            b_entered_tx.send(()).expect("signal B entered");
+            let session_transaction = Arc::new(store_b.transaction().expect("lock B session"));
+            session_transaction
+                .stage("https://accounts-b.example.test", "session=account-b")
+                .expect("stage B");
+            super::commit_staged_cloud_session_restore(session_transaction)
+                .await
+                .expect("commit B");
+            *state_b
+                .member_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = MemberState::Paid {
+                account_id: "account-b".into(),
+                license_id: "license-b".into(),
+                llm_quota_remaining: 2,
+            };
+        });
+        b_started_rx.await.expect("B attempted transition");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut b_entered_rx)
+                .await
+                .is_err(),
+            "B must not overwrite A's staged session before A publishes"
+        );
+
+        release_a_tx.send(()).expect("release A transaction");
+        transition_a.await.expect("join A");
+        b_entered_rx.await.expect("B enters after A");
+        transition_b.await.expect("join B");
+
+        assert_eq!(
+            store.load().expect("load final session"),
+            Some(attune_core::cloud_session::PersistedCloudSession {
+                cloud_url: "https://accounts-b.example.test".into(),
+                session: "session=account-b".into(),
+            })
+        );
+        assert!(matches!(
+            &*state.member_state.lock().unwrap_or_else(|e| e.into_inner()),
+            MemberState::Paid { account_id, license_id, .. }
+                if account_id == "account-b" && license_id == "license-b"
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_session_commit_fails_closed() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let store = attune_core::cloud_session::CloudSessionStore::new(
+            tmp.path().join("cloud-session.json"),
+        );
+        store
+            .persist("https://accounts.example.test", "session=already-published")
+            .expect("published session precondition");
+
+        let transaction = Arc::new(store.transaction().expect("lock session"));
+        let error = super::commit_staged_cloud_session_restore(transaction)
+            .await
+            .expect_err("a missing transaction marker must not count as a commit");
+        assert!(error.contains("no longer current"));
+    }
+
+    #[tokio::test]
+    async fn external_account_switch_invalidates_bound_member_runtime() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir);
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-session-epoch").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+
+        state
+            .cloud_session_store
+            .persist("https://accounts-a.example.test", "session=account-a")
+            .expect("persist account A");
+        let account_a_epoch = state
+            .cloud_session_store
+            .epoch()
+            .expect("read account A epoch");
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::Paid {
+            account_id: "account-a".into(),
+            license_id: "license-a".into(),
+            llm_quota_remaining: 1,
+        };
+        *state
+            .member_session_epoch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(account_a_epoch);
+        *state
+            .member_verified_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+
+        let independent_cli = attune_core::cloud_session::CloudSessionStore::new(
+            state.cloud_session_store.path().to_path_buf(),
+        );
+        independent_cli
+            .persist("https://accounts-b.example.test", "session=account-b")
+            .expect("CLI switches to account B");
+
+        assert!(
+            !super::reconcile_member_session_epoch(&state).await,
+            "the server must fail closed instead of combining account A runtime with account B cookie"
+        );
+        assert!(matches!(
+            *state.member_state.lock().unwrap_or_else(|e| e.into_inner()),
+            MemberState::LoggedOut
+        ));
+        assert!(state
+            .member_session_epoch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none());
+        assert_eq!(
+            independent_cli.load().expect("load account B"),
+            Some(attune_core::cloud_session::PersistedCloudSession {
+                cloud_url: "https://accounts-b.example.test".into(),
+                session: "session=account-b".into(),
+            }),
+            "server teardown must not delete the newer CLI session"
+        );
+    }
+
+    #[test]
+    fn quota_remaining_accepts_current_and_legacy_cloud_shapes() {
+        for value in [
+            serde_json::json!({"quota": {"remaining": 42}}),
+            serde_json::json!({"quota": {"llm_tokens_remaining": "43"}}),
+            serde_json::json!({"llm_quota_remaining": 44}),
+            serde_json::json!({"remaining": "45"}),
+        ] {
+            assert!(
+                super::quota_remaining_from_json(&value).is_some(),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            super::quota_remaining_from_json(&serde_json::json!({"quota": {"remaining": 0}})),
+            Some(0)
+        );
+        assert_eq!(
+            super::quota_remaining_from_json(&serde_json::json!({"quota": {"remaining": -1}})),
+            None
         );
     }
 
@@ -1748,6 +3494,200 @@ mod tests {
             row.signing_pubkey_hex,
             "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4"
         );
+    }
+
+    #[test]
+    fn managed_member_secrets_are_encrypted_and_clear_while_vault_is_sealed() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir);
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-member-secret-lifecycle").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+
+        assert!(super::apply_gateway_to_vault_settings(
+            &state,
+            "https://gateway.example.test/v1",
+            "member-gateway-secret",
+            Some("member-model"),
+        )
+        .expect("gateway settings"));
+        super::apply_pluginhub_to_vault_settings(
+            &state,
+            "https://hub.example.test",
+            "member-plugin-secret",
+        )
+        .expect("pluginhub settings");
+
+        {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let raw = vault
+                .store()
+                .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+                .unwrap()
+                .unwrap();
+            let raw_text = String::from_utf8_lossy(&raw);
+            assert!(!raw_text.contains("member-gateway-secret"));
+            assert!(!raw_text.contains("member-plugin-secret"));
+            assert!(vault
+                .store()
+                .get_meta(crate::settings_store::LLM_API_KEY_SECRET)
+                .unwrap()
+                .is_some());
+            assert!(vault
+                .store()
+                .get_meta(crate::settings_store::PLUGINHUB_LICENSE_KEY_SECRET)
+                .unwrap()
+                .is_some());
+            vault.lock().expect("seal vault");
+        }
+
+        assert!(super::clear_member_credentials(&state, None).expect("clear credentials"));
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let raw = vault
+            .store()
+            .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+            .unwrap()
+            .unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert!(settings["llm"].get("endpoint").is_none());
+        assert!(settings["llm"].get("managed_by").is_none());
+        assert!(settings["pluginhub"].get("managed_by").is_none());
+        assert!(vault
+            .store()
+            .get_meta(crate::settings_store::LLM_API_KEY_SECRET)
+            .unwrap()
+            .is_none());
+        assert!(vault
+            .store()
+            .get_meta(crate::settings_store::PLUGINHUB_LICENSE_KEY_SECRET)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn member_pluginhub_does_not_override_user_byok() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-member-pluginhub-byok").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            crate::settings_store::persist_settings(
+                &vault,
+                serde_json::json!({
+                    "pluginhub": {
+                        "url": "https://user-hub.example.test",
+                        "license_key": "user-owned-key"
+                    }
+                }),
+            )
+            .expect("persist BYOK");
+        }
+        state.reload_plugin_hub_from_settings();
+        assert_ne!(
+            state
+                .plugin_hub
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .name(),
+            "mock",
+            "precondition: the user BYOK provider is active"
+        );
+
+        assert!(!super::apply_pluginhub_to_vault_settings(
+            &state,
+            "https://member-hub.example.test",
+            "membership-key",
+        )
+        .expect("membership apply decision"));
+
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let settings = crate::settings_store::load_settings(&vault)
+            .expect("load settings")
+            .expect("settings present");
+        assert_eq!(
+            settings.pointer("/pluginhub/url").and_then(|v| v.as_str()),
+            Some("https://user-hub.example.test")
+        );
+        assert_eq!(
+            settings
+                .pointer("/pluginhub/license_key")
+                .and_then(|v| v.as_str()),
+            Some("user-owned-key")
+        );
+        assert!(settings.pointer("/pluginhub/managed_by").is_none());
+        drop(vault);
+
+        super::clear_member_credentials(&state, None).expect("member cleanup");
+        assert_ne!(
+            state
+                .plugin_hub
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .name(),
+            "mock",
+            "member cleanup must restore, not disable, an unrelated BYOK provider"
+        );
+    }
+
+    #[test]
+    fn vault_lock_evicts_member_pluginhub_and_entitlement_runtime() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir);
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-member-lock-runtime").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::Paid {
+            account_id: "account-sensitive".into(),
+            license_id: "license-sensitive".into(),
+            llm_quota_remaining: 42,
+        };
+        state
+            .entitlement_cache
+            .upsert(attune_core::store::plugin_entitlements::EntitlementRow {
+                plugin_id: "paid-plugin".into(),
+                license_id: "license-sensitive".into(),
+                decrypt_key: Some("decrypt-sensitive".into()),
+                tier: "paid".into(),
+                status: "active".into(),
+                trial_expires: None,
+                signing_pubkey_hex: String::new(),
+                last_verified_at: Utc::now().to_rfc3339(),
+                grace_started_at: None,
+                updated_at: Utc::now().to_rfc3339(),
+            });
+        state.reload_plugin_hub(
+            Some("https://member-hub.example.test"),
+            Some("member-license-secret"),
+        );
+
+        state
+            .lock_vault_and_clear_runtime()
+            .expect("lock and clear runtime");
+
+        assert!(matches!(
+            *state.member_state.lock().unwrap_or_else(|e| e.into_inner()),
+            MemberState::LoggedOut
+        ));
+        assert!(state.entitlement_cache.snapshot().is_empty());
+        assert_eq!(
+            state
+                .plugin_hub
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .name(),
+            "mock"
+        );
+        assert!(matches!(
+            state
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state(),
+            attune_core::vault::VaultState::Locked
+        ));
     }
 
     struct CountingHub {
@@ -2124,7 +4064,7 @@ mod tests {
 
     #[test]
     fn login_response_passes_through_vertical() {
-        // login_password prefers me.vertical, falls back to user.vertical.
+        // login_password uses the authoritative /me snapshot.
         let me: UserInfo = serde_json::from_value(serde_json::json!({
             "id": 9, "email": "lawyer@x.com", "plan": "pro", "vertical": "law",
         }))
@@ -2135,18 +4075,20 @@ mod tests {
     }
 
     #[test]
-    fn login_response_vertical_falls_back_to_user_when_me_absent() {
-        // /me fetch failed (None) → use the login UserInfo's vertical.
-        let user: UserInfo = serde_json::from_value(serde_json::json!({
-            "id": 9, "email": "x@y.com", "plan": "pro", "vertical": "tech",
+    fn login_rejects_identity_mismatch_between_login_and_authenticated_me() {
+        let login_response: UserInfo = serde_json::from_value(serde_json::json!({
+            "id": 9, "email": "first@x.com", "plan": "pro",
         }))
         .unwrap();
-        let me: Option<UserInfo> = None;
-        let vertical = me
-            .as_ref()
-            .and_then(|m| m.vertical.clone())
-            .or_else(|| user.vertical.clone());
-        assert_eq!(vertical.as_deref(), Some("tech"));
+        let authenticated_me: UserInfo = serde_json::from_value(serde_json::json!({
+            "id": 10, "email": "second@x.com", "plan": "pro",
+        }))
+        .unwrap();
+
+        let error = super::validate_login_identity(&login_response, &authenticated_me)
+            .expect_err("cross-account response must fail closed");
+        assert_eq!(error.0, axum::http::StatusCode::FORBIDDEN);
+        assert!(super::validate_login_identity(&authenticated_me, &authenticated_me).is_ok());
     }
 
     #[test]
@@ -2338,10 +4280,10 @@ mod tests {
         assert_eq!(body.0["code"], "device-activate-unavailable");
     }
 
-    /// store_device_binding 写出的 vault meta payload 形态(device_token + 配额)。
-    /// 钉死键名,后续 heartbeat / cert 读同一形态。用纯 JSON 形态断言(不起 vault)。
+    /// Device binding metadata is encrypted at rest and decrypts to the stable
+    /// payload shape consumed by heartbeat/certificate flows.
     #[test]
-    fn device_binding_meta_payload_shape() {
+    fn device_binding_meta_payload_is_encrypted() {
         let dev = DeviceActivateResult {
             device_token: "dt-hmac".into(),
             device_id: "dev-1".into(),
@@ -2351,18 +4293,30 @@ mod tests {
             issued_at: Some("2026-06-17T00:00:00+00:00".into()),
             expires_at: Some("2026-07-17T00:00:00+00:00".into()),
         };
-        // 与 store_device_binding 内构造的 payload 同形态。
-        let payload = serde_json::json!({
-            "device_token": dev.device_token,
-            "device_id": dev.device_id,
-            "max_activations": dev.max_activations,
-            "current_activations": dev.current_activations,
-            "issued_at": dev.issued_at,
-            "expires_at": dev.expires_at,
-        });
+        let dek = attune_core::crypto::Key32::generate();
+        let encrypted = super::encrypted_device_binding_payload(&dek, &dev, None).unwrap();
+        assert!(!encrypted
+            .windows("dt-hmac".len())
+            .any(|window| window == b"dt-hmac"));
+        let plaintext = attune_core::crypto::decrypt(&dek, &encrypted).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
         assert_eq!(payload["device_token"], "dt-hmac");
         assert_eq!(payload["device_id"], "dev-1");
         assert_eq!(payload["max_activations"], 2);
+
+        let activation =
+            super::encrypted_device_binding_payload(&dek, &dev, Some("ATTUNE-ACTIVATION-SECRET"))
+                .unwrap();
+        assert!(!activation
+            .windows("ATTUNE-ACTIVATION-SECRET".len())
+            .any(|window| window == b"ATTUNE-ACTIVATION-SECRET"));
+        let activation_plaintext = attune_core::crypto::decrypt(&dek, &activation).unwrap();
+        let activation_payload: serde_json::Value =
+            serde_json::from_slice(&activation_plaintext).unwrap();
+        assert_eq!(
+            activation_payload["activation_license_key"],
+            "ATTUNE-ACTIVATION-SECRET"
+        );
         assert_eq!(DEVICE_BINDING_META_KEY, "device_binding");
     }
 }

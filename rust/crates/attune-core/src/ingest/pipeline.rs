@@ -39,6 +39,14 @@ pub enum IngestOutcome {
         item_id: String,
         old_item_id: String,
     },
+    /// Useful metadata or partial OCR text was indexed, but extraction was not
+    /// complete. Incremental scanners must retain this item as retryable rather
+    /// than recording the source hash as permanently complete.
+    Degraded {
+        item_id: String,
+        chunks_enqueued: usize,
+        reason: String,
+    },
     /// 解析后内容为空或 modified_marker 未变 —— 不入库。
     Skipped { reason: String },
 }
@@ -56,6 +64,10 @@ impl Default for IngestOptions {
             chunking: chunker::ChunkingOptions::default(),
         }
     }
+}
+
+pub fn retryable_degraded_marker(source_marker: &str) -> String {
+    format!("retryable-degraded:{source_marker}")
 }
 
 impl IngestOptions {
@@ -194,21 +206,38 @@ fn ingest_document_inner(
 ) -> Result<IngestOutcome> {
     // 1. parse — server 路径通过 scheduler 承接 OCR/ASR；纯文本/结构化解析仍在 core 内完成。
     let filename = raw.parse_filename();
-    let (parsed_title, content) =
-        match parser::parse_bytes_with_options(&raw.content, &filename, &options.parser) {
-            Ok((_parsed_title, content))
-                if content.trim().is_empty() && metadata_fallback_allowed(&filename) =>
+    let (parsed_title, content, degraded_reason) =
+        match parser::parse_bytes_with_options_detailed(&raw.content, &filename, &options.parser) {
+            Ok(parsed)
+                if parsed.content.trim().is_empty() && metadata_fallback_allowed(&filename) =>
             {
+                let (fallback_reason, degraded_reason) =
+                    empty_parse_fallback_quality(parsed.quality);
+                let confirmed_no_text = degraded_reason.is_none();
                 log::warn!(
-                    "ingest: parser returned empty content for {}; inserting metadata-only item",
-                    raw.source_ref
-                );
+                "ingest: parser returned empty content for {}; inserting metadata-only item: {}",
+                raw.source_ref,
+                fallback_reason
+            );
                 (
                     fallback_title_from_filename(&filename),
-                    metadata_only_content(raw, &filename, Some("empty content after parse")),
+                    metadata_only_content(
+                        raw,
+                        &filename,
+                        Some(&fallback_reason),
+                        confirmed_no_text,
+                    ),
+                    degraded_reason,
                 )
             }
-            Ok(parsed) => parsed,
+            Ok(parsed) => {
+                let degraded_reason = match parsed.quality {
+                    parser::ParseQuality::Complete
+                    | parser::ParseQuality::CompleteNoText { .. } => None,
+                    parser::ParseQuality::RetryableDegraded { reason } => Some(reason),
+                };
+                (parsed.title, parsed.content, degraded_reason)
+            }
             Err(e) if metadata_fallback_allowed(&filename) => {
                 let reason = e.to_string();
                 log::warn!(
@@ -217,7 +246,8 @@ fn ingest_document_inner(
                 );
                 (
                     fallback_title_from_filename(&filename),
-                    metadata_only_content(raw, &filename, Some(&reason)),
+                    metadata_only_content(raw, &filename, Some(&reason), false),
+                    Some(reason),
                 )
             }
             Err(e) => return Err(e),
@@ -243,6 +273,13 @@ fn ingest_document_inner(
     let content_hash = compute_content_hash(&content);
     if old_item_id.is_none() {
         if let Some(existing_id) = store.find_item_by_content_hash(&content_hash)? {
+            if let Some(reason) = degraded_reason {
+                return Ok(IngestOutcome::Degraded {
+                    item_id: existing_id,
+                    chunks_enqueued: 0,
+                    reason,
+                });
+            }
             return Ok(IngestOutcome::Duplicate {
                 item_id: existing_id,
             });
@@ -312,6 +349,14 @@ fn ingest_document_inner(
         &crate::linker::LinkThresholds::default(),
     ) {
         log::warn!("ingest: linker (entity+ref pass) failed for {item_id}: {e}");
+    }
+
+    if let Some(reason) = degraded_reason {
+        return Ok(IngestOutcome::Degraded {
+            item_id,
+            chunks_enqueued: chunk_counter,
+            reason,
+        });
     }
 
     match old_item_id {
@@ -395,6 +440,17 @@ fn metadata_fallback_enabled() -> bool {
     true
 }
 
+fn empty_parse_fallback_quality(quality: parser::ParseQuality) -> (String, Option<String>) {
+    match quality {
+        parser::ParseQuality::CompleteNoText { reason } => (reason, None),
+        parser::ParseQuality::RetryableDegraded { reason } => (reason.clone(), Some(reason)),
+        parser::ParseQuality::Complete => {
+            let reason = "empty content after parse".to_string();
+            (reason.clone(), Some(reason))
+        }
+    }
+}
+
 fn fallback_title_from_filename(filename: &str) -> String {
     Path::new(filename)
         .file_stem()
@@ -405,18 +461,30 @@ fn fallback_title_from_filename(filename: &str) -> String {
         .to_string()
 }
 
-fn metadata_only_content(raw: &RawDocument, filename: &str, reason: Option<&str>) -> String {
+fn metadata_only_content(
+    raw: &RawDocument,
+    filename: &str,
+    reason: Option<&str>,
+    confirmed_no_text: bool,
+) -> String {
     let title = fallback_title_from_filename(filename);
     let source_ref = truncate_chars(&raw.source_ref, 512);
     let uri = truncate_chars(&raw.uri, 512);
     let terms = source_terms(&raw.source_ref, filename);
     let reason = reason.unwrap_or("parser unavailable");
-    format!(
-        "# {title}\n\n\
-         Document parsing status: metadata-only fallback.\n\
+    let status = if confirmed_no_text {
+        "Document parsing status: complete metadata-only record.\n\
+         Text extraction and OCR completed, and no searchable text was present. \
+         This item can be used for source lookup and citation."
+    } else {
+        "Document parsing status: metadata-only fallback.\n\
          Full text extraction, OCR, or ASR did not produce usable content. \
          This item can be used for source lookup and citation, but detailed \
-         content answers require successful text extraction.\n\n\
+         content answers require successful text extraction."
+    };
+    format!(
+        "# {title}\n\n\
+         {status}\n\n\
          File name: {filename}\n\
          Source path: {source_ref}\n\
          URI: {uri}\n\
@@ -451,7 +519,12 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{title_with_source_ref, IngestOutcome};
+    use super::{
+        empty_parse_fallback_quality, metadata_only_content, title_with_source_ref, IngestOutcome,
+    };
+    use crate::ingest::{RawDocument, SourceKind};
+    use crate::parser::ParseQuality;
+    use std::collections::HashMap;
 
     // ── IngestOutcome derive trait tests ────────────────────────────────────
     // These verify the #[derive(Debug, Clone, PartialEq, Eq)] bounds that
@@ -470,6 +543,54 @@ mod tests {
             title_with_source_ref("A320-Hydraulic", "/kb/A320-Hydraulic.pdf"),
             "A320-Hydraulic"
         );
+    }
+
+    #[test]
+    fn confirmed_no_text_quality_does_not_request_a_retry_marker() {
+        let reason = "all detected PDF pages were visually blank".to_string();
+        let (fallback_reason, degraded_reason) =
+            empty_parse_fallback_quality(ParseQuality::CompleteNoText {
+                reason: reason.clone(),
+            });
+        assert_eq!(fallback_reason, reason);
+        assert_eq!(degraded_reason, None);
+
+        let (_, degraded_reason) = empty_parse_fallback_quality(ParseQuality::Complete);
+        assert_eq!(
+            degraded_reason.as_deref(),
+            Some("empty content after parse")
+        );
+    }
+
+    #[test]
+    fn confirmed_no_text_metadata_does_not_claim_extraction_failed() {
+        let raw = RawDocument {
+            uri: "file:///vault/blank.pdf".to_string(),
+            title: String::new(),
+            content: Vec::new(),
+            mime_hint: Some("application/pdf".to_string()),
+            source_kind: SourceKind::LocalFolder,
+            source_ref: "/vault/blank.pdf".to_string(),
+            modified_marker: Some("source-sha".to_string()),
+            domain: None,
+            tags: None,
+            corpus_domain: None,
+            metadata: HashMap::new(),
+        };
+        let complete = metadata_only_content(
+            &raw,
+            "blank.pdf",
+            Some("all pages were visually blank"),
+            true,
+        );
+        assert!(complete.contains("complete metadata-only record"));
+        assert!(complete.contains("no searchable text was present"));
+        assert!(!complete.contains("did not produce usable content"));
+
+        let degraded =
+            metadata_only_content(&raw, "blank.pdf", Some("OCR backend unavailable"), false);
+        assert!(degraded.contains("metadata-only fallback"));
+        assert!(degraded.contains("did not produce usable content"));
     }
 
     #[test]

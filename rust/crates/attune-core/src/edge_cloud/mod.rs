@@ -36,8 +36,9 @@ pub use runtime_profile::{
 pub use scheduler::{
     classify_scheduler_error, LocalSchedulerClient, SchedulerAsyncJobs, SchedulerBenchmarkContract,
     SchedulerCapacitySnapshot, SchedulerClusterCapacity, SchedulerContractModel,
-    SchedulerErrorKind, SchedulerJobStatus, SchedulerKbTaskResponse, SchedulerMemorySnapshot,
-    SchedulerModelStatus, SchedulerModels, SchedulerRuntimeTaskSpec, SchedulerServiceClassSpec,
+    SchedulerErrorKind, SchedulerJobState, SchedulerJobStatus, SchedulerKbTaskResponse,
+    SchedulerMemorySnapshot, SchedulerModelStatus, SchedulerModels, SchedulerRuntimeTaskSpec,
+    SchedulerServiceClassSpec,
 };
 
 use crate::platform::FormFactor;

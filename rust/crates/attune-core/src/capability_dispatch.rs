@@ -53,6 +53,10 @@ pub struct CapabilityInvocation {
     pub stdin: Option<String>,
     /// 环境变量 (常见: LLM_ENDPOINT / LLM_API_KEY)
     pub env: Vec<(String, String)>,
+    /// Whether to start the child with an empty environment before applying
+    /// [`Self::env`]. Plugin-agent dispatch enables this so credentials and
+    /// proxy variables inherited by the server process cannot reach a child.
+    pub clear_env: bool,
     /// 超时 (默认 60s)
     pub timeout: Duration,
 }
@@ -64,6 +68,7 @@ impl CapabilityInvocation {
             args: Vec::new(),
             stdin: None,
             env: Vec::new(),
+            clear_env: false,
             timeout: Duration::from_secs(60),
         }
     }
@@ -85,6 +90,12 @@ impl CapabilityInvocation {
     }
     pub fn env<K: Into<String>, V: Into<String>>(mut self, k: K, v: V) -> Self {
         self.env.push((k.into(), v.into()));
+        self
+    }
+    /// Start the child with no inherited environment. Callers must explicitly
+    /// inject every value the child is allowed to observe.
+    pub fn clear_env(mut self) -> Self {
+        self.clear_env = true;
         self
     }
     pub fn timeout(mut self, d: Duration) -> Self {
@@ -109,6 +120,9 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
 
     let mut cmd = command_no_window(&invocation.binary);
     cmd.args(&invocation.args);
+    if invocation.clear_env {
+        cmd.env_clear();
+    }
     for (k, v) in &invocation.env {
         cmd.env(k, v);
     }
@@ -336,6 +350,27 @@ mod tests {
         let r = dispatch(&inv).expect("dispatch");
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("test_stdin_payload"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatch_can_clear_the_parent_environment() {
+        const SECRET: &str = "ATTUNE_TEST_CAPABILITY_PARENT_SECRET";
+        std::env::set_var(SECRET, "must-not-reach-child");
+        let sh = which::which("sh").unwrap_or_else(|_| PathBuf::from("/bin/sh"));
+        if !sh.exists() {
+            std::env::remove_var(SECRET);
+            eprintln!("skip: sh not found");
+            return;
+        }
+
+        let inv = CapabilityInvocation::new(&sh)
+            .args(["-c", "test -z \"$ATTUNE_TEST_CAPABILITY_PARENT_SECRET\""])
+            .clear_env();
+        let result = dispatch(&inv).expect("dispatch isolated child");
+        std::env::remove_var(SECRET);
+
+        assert_eq!(result.exit_code, 0, "child inherited parent secret");
     }
 
     #[test]

@@ -15,7 +15,7 @@ S1-S5 core have been started in Attune:
 - Added static conservative local scheduler 32G fallback profiles for `embedding-int8`, `reranker-int8`, `llm-summary`, `llm-chat`, and `vlm`.
 - Added `context_admission`, a pure final-prompt admission module that returns sync, async, cloud-fallback, or reject decisions before any LLM call.
 - Product cap calibration is now separate from scheduler hard caps: `llm-chat` keeps scheduler sync hard cap 4096 but uses a 1024-token tested sync cap for interactive admission.
-- Added `edge_cloud::kb_task::SchedulerKbTaskAdapter`, which applies ContextAdmission before `/kb/tasks/{task}`, injects `context_tokens` / `max_output_tokens` hints, submits explicit async when required, and leaves cloud fallback to Attune policy.
+- Added `edge_cloud::kb_task::SchedulerKbTaskAdapter`, which applies ContextAdmission before `/kb/tasks/{task}`, records the context estimate locally, sends only the application-owned `max_output_tokens` limit, submits explicit async when required, and leaves cloud fallback to Attune policy. Scheduler-owned context/deadline/timeout/TTL fields are never injected by Attune.
 - Added `retrieval_plan`, a pure SRAS + index-partition planning layer for edge-native retrieval before BM25/vector/RRF. It caps local scheduler foreground rerank to 20 candidates, builds privacy/domain/language/embedding partition filters, and converts plans to existing `SearchParams`.
 - Added S6 pilot wiring: local scheduler form-factor chat search now uses `retrieval_plan` to build bounded `SearchParams`, then submits answer generation through scheduler-native `kb.query.ask`. Laptop/server chat keeps legacy defaults.
 - Added Attune server proxy routes for local scheduler async jobs: `GET /api/v1/chat/local-scheduler/jobs/{job_id}` and `DELETE /api/v1/chat/local-scheduler/jobs/{job_id}`.
@@ -67,7 +67,7 @@ Important correction for Attune:
 - Per-model `READY_FAST` / `QUEUED` / `READY_SLOW` / `UNAVAILABLE`, queue depth, and lifecycle come from `/models`.
 - Sync/async limits, `max_context_tokens_*`, `max_output_tokens_*`, service classes, and runtime tasks come from `/benchmark/contract`.
 - `/v1/embeddings`, `/v1/chat/completions`, `/v1/models`, and `/api/*` should not be treated as the first integration surface. In this repo they are still proposal/backend-profile references, not registered public scheduler routes.
-- There is no `/tokenize` or `/admit` endpoint today. Attune must do tokenizer-aware admission itself, then send `context_tokens` and `max_output_tokens` hints to scheduler.
+- There is no `/tokenize` or `/admit` endpoint today. Attune must do tokenizer-aware admission itself, retain that estimate in its local admission record, and send only application-owned task fields such as `max_output_tokens`. The scheduler derives context, deadline, timeout, and TTL from its task/runtime contract.
 
 ## 2. Target Architecture
 
@@ -235,12 +235,11 @@ For `kb.query.ask`, Attune sends a bounded cited packet:
   "contexts": [
     {"text": "...", "source_id": "...", "page": 3, "span": "..."}
   ],
-  "deadline_ms": 15000,
-  "context_tokens": 2048,
-  "max_output_tokens": 128,
-  "ttl_ms": 900000
+  "max_output_tokens": 128
 }
 ```
+
+`context_tokens`, `deadline_ms`, `timeout_ms`, and `ttl_ms` are scheduler-owned and must not be supplied by the application request.
 
 The scheduler may return:
 
@@ -294,7 +293,7 @@ Scheduler admission is necessary but not sufficient. Attune must still:
 - count or conservatively estimate final prompt tokens before calling local scheduler
 - build cited evidence windows instead of whole documents
 - reserve output tokens
-- send `context_tokens` and `max_output_tokens`
+- retain the estimated context-token count for Attune admission/telemetry, and send the bounded `max_output_tokens` application limit
 - route long text to async local jobs or cloud only after privacy policy allows it
 
 The scheduler will reject oversize sync work, but Attune should avoid sending doomed payloads in the first place.
@@ -381,7 +380,7 @@ Deliverables:
 - `attune-core::context_admission` module.
 - Inputs: final messages/evidence, task kind, runtime profile, privacy class.
 - Outputs: `AdmitSync`, `SubmitAsync`, `UseCloudIfAllowed`, `Reject`.
-- Set `context_tokens` and `max_output_tokens` in local scheduler task requests.
+- Record `context_tokens` in the Attune admission decision, but put only `max_output_tokens` in the scheduler task request; reject attempts to supply scheduler-owned deadline/context/timeout/TTL fields.
 
 Acceptance:
 

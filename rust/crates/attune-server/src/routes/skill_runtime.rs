@@ -12,9 +12,9 @@
 //! skill (the runtime also enforces it); the response carries the actual `token_bill` so the UI
 //! shows the post-run bill.
 //!
-//! **Privacy + member gate**: a skill with an LLM step is tier-3 — it reuses doc-intel's
-//! `cloud_llm_or_refuse` (I2 egress gate + I1 PII-redacting wrapper) and the paid member gate,
-//! so the same guarantees as `/documents/compare` apply (no raw content egress, paid-only).
+//! **Privacy + member gate**: a skill with an LLM step is tier-3 — it reuses the shared
+//! governed-LLM boundary and the paid member gate. Local providers stay local; cloud providers
+//! require explicit egress consent, reject L0 content, and receive a redacted prompt.
 //! The downloadable artifact is returned **inline** (base64) in the run response so no
 //! server-side artifact store / TTL subsystem is needed (spec §2.2 OUT: no cloud storage).
 
@@ -331,7 +331,14 @@ pub async fn dry_run_skill(
     if has_llm && !is_paid(&state) {
         blockers.push("member-required".into());
     }
-    if has_llm && !cloud_llm_egress_enabled(&state) {
+    let configured_llm = state.llm();
+    let cloud_llm_configured = configured_llm
+        .as_ref()
+        .is_some_and(|provider| !provider.is_local());
+    if has_llm && configured_llm.is_none() {
+        blockers.push("llm-unavailable".into());
+    }
+    if has_llm && cloud_llm_configured && !crate::routes::privacy::outbound_enabled(&state, "llm") {
         blockers.push("cloud-llm-disabled".into());
     }
     if resolved.pinned.is_some() && current_version != skill.version {
@@ -358,7 +365,7 @@ pub async fn dry_run_skill(
         can_run,
         has_llm,
         member_required: has_llm,
-        privacy_llm_required: has_llm,
+        privacy_llm_required: has_llm && cloud_llm_configured,
         referenced_items,
         steps,
         estimate,
@@ -573,14 +580,15 @@ pub async fn run_runtime_skill(
 
     // Pre-fetch the referenced item text into an in-memory resolver (so the runner never holds
     // the vault lock during the LLM call — lock-ordering safety). Item read is 🆓.
-    let resolver = build_resolver(&state, skill, &req.inputs)?;
+    let (resolver, contains_l0) = build_resolver(&state, skill, &req.inputs)?;
 
     // The LLM handle goes through the redacting + egress-gated wrapper for any LLM step.
     let llm: Arc<dyn LlmProvider> = if has_llm {
-        cloud_llm_or_refuse(&state)?
+        crate::routes::privacy::governed_llm(&state, contains_l0)?
     } else {
-        // A purely deterministic skill still needs *a* handle; the no-op never gets called.
-        state.llm().ok_or_else(llm_unavailable)?
+        // A purely deterministic skill never invokes the provider and must not
+        // depend on an unrelated LLM configuration.
+        attune_core::llm::noop_llm()
     };
     let model = model_name(&state);
 
@@ -880,19 +888,25 @@ fn build_resolver(
     state: &SharedState,
     skill: &skill_runtime::Skill,
     inputs: &Value,
-) -> AppResult<Box<dyn RagResolver>> {
+) -> AppResult<(Box<dyn RagResolver>, bool)> {
     let item_ids = collect_item_id_inputs(skill, inputs);
     let mut map = std::collections::BTreeMap::new();
+    let mut contains_l0 = false;
     if !item_ids.is_empty() {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault.dek_db().map_err(|_| vault_locked())?;
         for id in &item_ids {
             if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
                 map.insert(id.clone(), item.content);
+                contains_l0 |= vault
+                    .store()
+                    .get_item_privacy_tier(id)
+                    .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                    .unwrap_or(true);
             }
         }
     }
-    Ok(Box::new(MapResolver(map)))
+    Ok((Box::new(MapResolver(map)), contains_l0))
 }
 
 /// The set of item ids the skill's inputs resolve to in this run payload.
@@ -970,37 +984,6 @@ fn is_paid(state: &SharedState) -> bool {
         .unwrap_or(false)
 }
 
-/// I2 egress gate (default off) — has the user opted into cloud-LLM egress?
-fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
-    let bytes = match state.vault.lock() {
-        Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
-        Err(_) => None,
-    };
-    bytes
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|s| {
-            s.get("privacy")
-                .and_then(|p| p.get("llm"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
-}
-
-/// Resolve a tier-3 LLM handle, enforcing I2 egress gate + I1 PII-redaction (parity with
-/// `documents::cloud_llm_or_refuse`).
-fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
-    if !cloud_llm_egress_enabled(state) {
-        return Err(AppError::detailed(
-            axum::http::StatusCode::FORBIDDEN,
-            json!({ "error": "cloud LLM egress is disabled in Privacy settings", "code": "cloud-llm-disabled" }),
-        ));
-    }
-    let inner = state.llm().ok_or_else(llm_unavailable)?;
-    Ok(Arc::new(
-        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
-    ))
-}
-
 fn map_skill_err(e: SkillError) -> AppError {
     use axum::http::StatusCode;
     let status = match e {
@@ -1022,13 +1005,6 @@ fn membership_required() -> AppError {
     AppError::detailed(
         axum::http::StatusCode::PAYMENT_REQUIRED,
         json!({ "error": "this skill requires a paid membership", "code": "member-required" }),
-    )
-}
-
-fn llm_unavailable() -> AppError {
-    AppError::detailed(
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        json!({ "error": "no LLM provider configured", "code": "llm-unavailable" }),
     )
 }
 
@@ -1249,7 +1225,7 @@ steps:
         assert!(!resp.can_run, "logged-out + privacy-off should block run");
         assert!(resp.has_llm);
         assert!(resp.blockers.iter().any(|b| b == "member-required"));
-        assert!(resp.blockers.iter().any(|b| b == "cloud-llm-disabled"));
+        assert!(resp.blockers.iter().any(|b| b == "llm-unavailable"));
         assert!(resp.warnings.iter().any(|w| w.contains("missing-item")));
         assert_eq!(resp.referenced_items.len(), 2);
         assert!(resp

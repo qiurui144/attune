@@ -2,7 +2,7 @@
 
 use crate::edge_cloud::capacity::{DEFAULT_PROBE_TIMEOUT, DEFAULT_SCHEDULER_BASE};
 use crate::edge_cloud::scheduler::{
-    LocalSchedulerClient, SchedulerJobStatus, SchedulerKbTaskResponse,
+    LocalSchedulerClient, SchedulerJobState, SchedulerKbTaskResponse,
 };
 use crate::error::{Result, VaultError};
 use crate::infer::RerankProvider;
@@ -216,14 +216,29 @@ impl LocalSchedulerRerankProvider {
     }
 
     fn final_outputs(&self, response: SchedulerKbTaskResponse) -> Result<serde_json::Value> {
-        let is_async =
-            response.job_id.is_some() || response.scheduled_as.eq_ignore_ascii_case("async");
-        if !is_async {
-            return Ok(response.outputs);
+        response.validate_submission(false, "local scheduler rerank")?;
+        match response.normalized_state() {
+            SchedulerJobState::Succeeded => return Ok(response.outputs),
+            SchedulerJobState::Failed => {
+                return Err(VaultError::LlmUnavailable(format!(
+                    "local scheduler rerank task failed: {}",
+                    response
+                        .failure_detail()
+                        .or(response.status.as_deref())
+                        .unwrap_or("unknown error")
+                )));
+            }
+            SchedulerJobState::Waiting => {}
         }
-        let job_id = response.job_id.ok_or_else(|| {
-            VaultError::LlmUnavailable("local scheduler rerank missing job_id".into())
-        })?;
+        let Some(job_id) = response
+            .job_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|job_id| !job_id.is_empty())
+            .map(str::to_string)
+        else {
+            return Ok(response.outputs);
+        };
         let deadline = Instant::now() + self.poll_timeout;
         let mut last_poll_error: Option<String> = None;
         loop {
@@ -244,14 +259,15 @@ impl LocalSchedulerRerankProvider {
                     continue;
                 }
             };
-            if scheduler_job_done(&job) {
-                return Ok(job.outputs);
-            }
-            if scheduler_job_failed(&job) {
-                return Err(VaultError::LlmUnavailable(format!(
-                    "local scheduler rerank job failed: {}",
-                    job.error.or(job.detail).unwrap_or_else(|| job.status)
-                )));
+            match job.normalized_state() {
+                SchedulerJobState::Succeeded => return Ok(job.outputs),
+                SchedulerJobState::Failed => {
+                    return Err(VaultError::LlmUnavailable(format!(
+                        "local scheduler rerank job failed: {}",
+                        job.failure_detail().unwrap_or(&job.status)
+                    )));
+                }
+                SchedulerJobState::Waiting => {}
             }
         }
     }
@@ -349,20 +365,6 @@ fn score_from_value(item: &serde_json::Value) -> Option<f32> {
         .map(|n| n as f32)
 }
 
-fn scheduler_job_done(job: &SchedulerJobStatus) -> bool {
-    matches!(
-        job.status.to_ascii_lowercase().as_str(),
-        "done" | "completed" | "complete" | "success" | "succeeded"
-    )
-}
-
-fn scheduler_job_failed(job: &SchedulerJobStatus) -> bool {
-    matches!(
-        job.status.to_ascii_lowercase().as_str(),
-        "error" | "failed" | "failure" | "canceled" | "cancelled" | "expired"
-    )
-}
-
 fn env_usize_any(keys: &[&str], default: usize) -> usize {
     keys.iter()
         .find_map(|key| {
@@ -430,6 +432,63 @@ mod scheduler_rerank_tests {
             {"index": 0, "relevance_score": 0.5}
         ]);
         assert_eq!(scores_from_array(&value), None);
+    }
+
+    #[test]
+    fn synchronous_failure_does_not_fall_through_to_score_parsing() {
+        let provider =
+            LocalSchedulerRerankProvider::new("http://127.0.0.1:8090", "kb.query.rerank", 100);
+        let response = SchedulerKbTaskResponse {
+            status: Some("failed".to_string()),
+            detail: Some("reranker unavailable".to_string()),
+            outputs: serde_json::json!({}),
+            ..SchedulerKbTaskResponse::default()
+        };
+        let error = provider
+            .final_outputs(response)
+            .expect_err("terminal submit failure must not be treated as success");
+        assert!(error.to_string().contains("reranker unavailable"));
+    }
+
+    #[test]
+    fn reranker_rejects_200_waiting_or_unknown_without_job_id() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        for pending_status in ["queued", "running", "future_scheduler_state"] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let body = serde_json::json!({
+                    "status": pending_status,
+                    "outputs": {}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+
+            let provider = LocalSchedulerRerankProvider::new(
+                &format!("http://{addr}"),
+                "kb.query.rerank",
+                1_000,
+            );
+            let error = provider
+                .score("query", &["document"])
+                .expect_err("200 waiting/unknown response without job_id must fail closed");
+            assert!(
+                error.to_string().contains("without job_id"),
+                "status={pending_status}, error={error}"
+            );
+            handle.join().unwrap();
+        }
     }
 }
 

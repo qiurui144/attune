@@ -1523,33 +1523,9 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
     Ok(())
 }
 
-/// 云端 session 持久化文件格式
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CloudSession {
-    cloud_url: String,
-    /// accounts 服务返回的 session cookie 值 (完整 "session=<token>" 或裸 token)
-    session: String,
-}
-
-/// 把 session token 写到 config_dir/cloud-session.json (chmod 600 on Unix)
+/// 把 session token 原子写入共享的 cloud-session.json。
 fn persist_cloud_session(cloud_url: &str, session_token: &str) -> attune_core::error::Result<()> {
-    use attune_core::error::VaultError;
-    let path = attune_core::platform::config_dir().join("cloud-session.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(VaultError::Io)?;
-    }
-    let data = CloudSession {
-        cloud_url: cloud_url.to_string(),
-        session: session_token.to_string(),
-    };
-    let json = serde_json::to_string_pretty(&data)
-        .map_err(|e| VaultError::Crypto(format!("session ser: {e}")))?;
-    std::fs::write(&path, &json).map_err(VaultError::Io)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    let path = attune_core::cloud_session::persist_cloud_session(cloud_url, session_token)?;
     eprintln!("  ✓ session persisted to {}", path.display());
     Ok(())
 }
@@ -1559,15 +1535,9 @@ fn load_cloud_client_with_session(
     cloud_url: &str,
 ) -> attune_core::error::Result<attune_core::cloud_client::CloudClient> {
     use attune_core::error::VaultError;
-    let path = attune_core::platform::config_dir().join("cloud-session.json");
-    if !path.exists() {
-        return Err(VaultError::Crypto(
-            "no cloud session found — run `attune login` first".into(),
-        ));
-    }
-    let json = std::fs::read_to_string(&path).map_err(VaultError::Io)?;
-    let sess: CloudSession = serde_json::from_str(&json)
-        .map_err(|e| VaultError::Crypto(format!("cloud session parse: {e}")))?;
+    let sess = attune_core::cloud_session::load_cloud_session()?.ok_or_else(|| {
+        VaultError::Crypto("no cloud session found — run `attune login` first".into())
+    })?;
     // cloud_url 参数优先 (CLI flag); 文件里的 url 作为 fallback
     let effective_url = if !cloud_url.is_empty() {
         cloud_url
@@ -1576,7 +1546,7 @@ fn load_cloud_client_with_session(
     };
     Ok(attune_core::cloud_client::CloudClient::with_session(
         effective_url,
-        &sess.session,
+        sess.session,
     ))
 }
 

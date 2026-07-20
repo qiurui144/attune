@@ -47,6 +47,8 @@
 - `DocSource::from_path`（`vlm_extract.rs:25-39`）:有可用文本 → `Text`；否则按扩展名判图像 → `Image`。
 - `resolve_text`（`vlm_extract.rs:51-58`）:`Text` 源**原文返回，不碰 VLM**；`Image` 源走 `vlm.caption()` 抽文字。
 
+安全边界：`/api/v1/documents/*` 接收的本地图片路径目前只允许本地 VLM。该入口无法在上传前可靠地对图片像素做 PII/L0 脱敏，因此云 VLM 会以 `cloud-vlm-unsafe` 失败关闭；可改用本地 VLM，或先在本地 OCR/抽取文本。共享非文字视觉升级流水线若走云端，仍必须经过其独立的图像级 egress 决策与 L0 门控。
+
 **稳定性意义**:vision 是 cheap-VLM tier，**绝不在文本文档上运行**（避免无谓成本与不确定性）。
 测试断言:`test_image_doc_routes_to_vision`（`:62-70`，图像源 `total_calls ≥ 1`）+
 `test_text_doc_skips_vlm`（`:72-79`，文本源 `total_calls == 0`）。抽出的文字随后流入正常

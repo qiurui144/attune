@@ -73,7 +73,7 @@ async fn spawn_with_stale_vector(vec_model: &str) -> (String, reqwest::Client) {
     // require_auth=false: with the vault Unlocked, vault_guard lets routes through.
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
     // Active embedder: dim 4 → model_name "embed-dim4" (the dimension key).
-    state.set_embedding(Some(Arc::new(MockEmbeddingProvider::new(4))));
+    state.set_embedding_with_locality(Some(Arc::new(MockEmbeddingProvider::new(4))), true);
     let router = attune_server::build_router(Arc::clone(&state));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -191,7 +191,7 @@ async fn spawn_sealed_app() -> (String, reqwest::Client) {
     // Open but DO NOT setup → state() == Sealed.
     let vault = Vault::open_memory(tmp.path()).expect("open in-memory vault");
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
-    state.set_embedding(Some(Arc::new(MockEmbeddingProvider::new(4))));
+    state.set_embedding_with_locality(Some(Arc::new(MockEmbeddingProvider::new(4))), true);
     let router = attune_server::build_router(Arc::clone(&state));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -343,7 +343,7 @@ async fn empty_unlocked_app() -> (String, reqwest::Client) {
     vault.setup("test-password-not-real").expect("setup");
     vault.unlock("test-password-not-real").expect("unlock");
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
-    state.set_embedding(Some(Arc::new(MockEmbeddingProvider::new(4))));
+    state.set_embedding_with_locality(Some(Arc::new(MockEmbeddingProvider::new(4))), true);
     let router = attune_server::build_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

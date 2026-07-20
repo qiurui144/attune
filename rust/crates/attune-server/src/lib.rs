@@ -12,6 +12,7 @@ pub(crate) mod middleware;
 pub(crate) mod retrieval_policy;
 pub mod routes;
 pub(crate) mod scheduler_tasks;
+pub(crate) mod settings_store;
 pub mod state;
 
 // T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 9):
@@ -267,6 +268,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             axum::routing::post(routes::office::post_transcribe),
         )
         .route(
+            "/api/v1/tts/synthesize",
+            axum::routing::post(routes::tts::synthesize),
+        )
+        .route(
             "/api/v1/office/jobs/{job_id}",
             get(routes::office::get_job).delete(routes::office::delete_job),
         )
@@ -504,7 +509,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/web_search_cache",
             get(routes::web_search_cache::count).delete(routes::web_search_cache::delete),
         )
-        // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
+        // AI 底座状态 — Embedding / Rerank / OCR / ASR / TTS / LLM 可用性
         .route("/api/v1/ai-stack", get(routes::ai_stack::status))
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
         // 本地底座模型一键拉取（OCR + ASR）
@@ -703,6 +708,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .layer(axum_mw::from_fn_with_state(
             shared_state.clone(),
             middleware::vault_guard,
+        ))
+        .layer(axum_mw::from_fn_with_state(
+            shared_state.clone(),
+            middleware::member_session_coherence_guard,
         ))
         .layer(axum_mw::from_fn_with_state(
             shared_state.clone(),

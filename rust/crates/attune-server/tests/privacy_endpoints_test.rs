@@ -4,6 +4,8 @@
 //! (docs/superpowers/plans/2026-05-28-privacy-logic-implementation.md).
 //!
 //! Tested invariants:
+//! - `GET /api/v1/privacy/tier` advertises only implemented L0/L1 capabilities;
+//!   unimplemented L2/L3 remain fail-closed regardless of hardware tier.
 //! - `GET /api/v1/privacy/status` returns 5 outbound points, all `enabled=false`
 //!   by default, plus vault.state and redactor info.
 //! - `PATCH /api/v1/privacy/settings` persists toggles and returns applied diff.
@@ -38,7 +40,14 @@ async fn wait_for_server(base: &str) {
 /// Spin up the full Axum router + an in-memory vault for the duration of the
 /// test. Returns `(base_url, client, vault_password)`.
 #[allow(unsafe_code)] // env isolation (AppState uses data_dir() for tantivy/vectors)
-async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) {
+async fn spawn_privacy_test_server_with_auth(
+    require_auth: bool,
+) -> (
+    String,
+    reqwest::Client,
+    &'static str,
+    Arc<attune_server::state::AppState>,
+) {
     let tmp = tempfile::TempDir::new().expect("tmp");
     // Each test gets isolated $HOME so nothing leaks between runs.
     // SAFETY: tests are single-threaded per `cargo test --test`, so env mutation is fine here.
@@ -58,7 +67,7 @@ async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) 
     }
 
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
-    let state = Arc::new(attune_server::state::AppState::new(vault, false));
+    let state = Arc::new(attune_server::state::AppState::new(vault, require_auth));
     let router = attune_server::build_router(Arc::clone(&state));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -80,14 +89,66 @@ async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) 
         .await
         .expect("vault setup");
     assert_eq!(setup.status().as_u16(), 200, "vault setup failed");
+    let setup_body: serde_json::Value = setup.json().await.expect("vault setup JSON");
+    let token = setup_body
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .expect("vault setup bearer token");
+    let client = if require_auth {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .expect("authorization header"),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("authenticated client")
+    } else {
+        client
+    };
 
     // Leak tmp so the test continues to see the files (test runtime is short).
     Box::leak(Box::new(tmp));
 
+    (base, client, password, state)
+}
+
+async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) {
+    let (base, client, password, _state) = spawn_privacy_test_server_with_auth(false).await;
     (base, client, password)
 }
 
 // ── Task 2: GET /privacy/status ────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_privacy_tier_advertises_only_implemented_layers() {
+    let (base, client, _pw) = spawn_privacy_test_server().await;
+
+    let resp = client
+        .get(format!("{}/api/v1/privacy/tier", base))
+        .send()
+        .await
+        .expect("GET /privacy/tier");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["available_layers"], serde_json::json!(["L0", "L1"]));
+    assert_eq!(body["default_active_layers"], serde_json::json!(["L1"]));
+    assert_eq!(body["l1_regex_available"], serde_json::json!(true));
+    assert_eq!(body["l2_ner_available"], serde_json::json!(false));
+    assert_eq!(body["l3_llm_available"], serde_json::json!(false));
+    assert!(body["l3_model_suggestion"].is_null());
+    assert_eq!(
+        body["implementation_pending_layers"],
+        serde_json::json!(["L2", "L3"])
+    );
+    assert!(
+        body["hardware_tier"].is_string(),
+        "hardware tier remains diagnostic metadata"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_privacy_status_returns_5_outbound_points_all_disabled() {
@@ -254,6 +315,118 @@ async fn post_privacy_lock_inner() {
     );
 }
 
+/// Production-auth regression: vault lock invalidates normal session tokens,
+/// but the caller that authenticated the lock must retain a narrowly scoped
+/// capability for privacy status/wipe only. The same token remains rejected by
+/// ordinary routes. The privacy lock also performs `/vault/lock`'s full runtime
+/// cleanup instead of leaving decrypted model/index handles resident.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_locked_privacy_access_is_scoped_and_lock_clears_runtime_handles() {
+    let (base, client, _pw, state) = spawn_privacy_test_server_with_auth(true).await;
+
+    state.set_llm(Some(Arc::new(attune_core::llm::MockLlmProvider::new(
+        "lock-test",
+    ))));
+    state.set_summary_llm(Some(Arc::new(attune_core::llm::MockLlmProvider::new(
+        "summary-lock-test",
+    ))));
+    state.set_embedding(Some(Arc::new(
+        attune_core::embed::MockEmbeddingProvider::new(8),
+    )));
+    state.set_reranker(Some(Arc::new(attune_core::infer::MockRerankProvider::new(
+        vec![0.5],
+    ))));
+    *state.fulltext.lock().unwrap() =
+        Some(attune_core::index::FulltextIndex::open_memory().unwrap());
+    *state.vectors.lock().unwrap() = Some(attune_core::vectors::VectorIndex::new(8).unwrap());
+    *state.memory_index.lock().unwrap() =
+        Some(attune_core::memory::MemoryVectorIndex::new(8).unwrap());
+
+    let lock = client
+        .post(format!("{}/api/v1/privacy/lock", base))
+        .send()
+        .await
+        .expect("authenticated privacy lock");
+    assert_eq!(lock.status().as_u16(), 200);
+
+    // A post-unlock bootstrap may still be in flight when the caller locks.
+    // Give it time to finish so this also detects handles resurrected after the
+    // lock response.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    assert!(state.llm().is_none(), "primary LLM must be dropped on lock");
+    assert!(
+        state.summary_llm().is_none(),
+        "summary LLM must be dropped on lock"
+    );
+    assert!(
+        state.embedding().is_none(),
+        "embedding provider must be dropped on lock"
+    );
+    assert!(state.reranker.lock().unwrap().is_none());
+    assert!(state.fulltext.lock().unwrap().is_none());
+    assert!(state.vectors.lock().unwrap().is_none());
+    assert!(state.memory_index.lock().unwrap().is_none());
+
+    // No anonymous exception: both locked privacy endpoints still require the
+    // bearer that authenticated the lock operation.
+    let anonymous = reqwest::Client::new();
+    assert_eq!(
+        anonymous
+            .get(format!("{}/api/v1/privacy/status", base))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+    assert_eq!(
+        anonymous
+            .post(format!("{}/api/v1/privacy/wipe-cloud-session", base))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+
+    let status = client
+        .get(format!("{}/api/v1/privacy/status", base))
+        .send()
+        .await
+        .expect("authenticated locked privacy status");
+    assert_eq!(status.status().as_u16(), 200);
+    let status_body: serde_json::Value = status.json().await.unwrap();
+    assert_eq!(
+        status_body.pointer("/vault/state"),
+        Some(&serde_json::json!("locked"))
+    );
+
+    // The retained proof is not a general post-lock session.
+    assert_eq!(
+        client
+            .get(format!("{}/api/v1/member/state", base))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+
+    let wipe = client
+        .post(format!("{}/api/v1/privacy/wipe-cloud-session", base))
+        .send()
+        .await
+        .expect("authenticated locked privacy wipe");
+    assert_eq!(wipe.status().as_u16(), 200);
+    let wipe_body: serde_json::Value = wipe.json().await.unwrap();
+    assert_eq!(wipe_body.get("ok"), Some(&serde_json::json!(true)));
+    assert_eq!(wipe_body.get("cloud_saas"), Some(&serde_json::json!(false)));
+}
+
 // ── Task 2: POST /privacy/wipe-cloud-session ───────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -269,7 +442,9 @@ async fn post_privacy_wipe_cloud_session_returns_ok() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body.get("ok"), Some(&serde_json::json!(true)));
     assert!(body.get("cleared_local_token").is_some());
-    assert!(body.get("remote_logout").is_some());
+    assert!(body.get("cleared_member_credentials").is_some());
+    assert!(body.get("remote_logout_succeeded").is_some());
+    assert_eq!(body.get("cloud_saas"), Some(&serde_json::json!(false)));
 }
 
 // ── Task 6: Audit-log integration ──────────────────────────────────────────

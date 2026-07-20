@@ -32,6 +32,13 @@ use attune_core::member_verifier::WhitelistMemberVerifier;
 /// plugin dirs / settings. Acquire this before touching those vars in any test.
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Integration tests in one test binary run concurrently by default. Each eval
+/// server temporarily points HOME/XDG at its own temp directory, so keep that
+/// process-global environment stable for the server's entire lifetime. An
+/// owned Tokio guard is Send and can safely live across the async health probe.
+static EVAL_SERVER_ENV_LOCK: std::sync::OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    std::sync::OnceLock::new();
+
 /// Acquire [`ENV_LOCK`], tolerating a poisoned mutex (a prior test panic must not
 /// cascade into unrelated test failures).
 pub fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
@@ -73,6 +80,7 @@ pub struct EvalServer {
     addr: std::net::SocketAddr,
     handle: tokio::task::JoinHandle<()>,
     _tmp: tempfile::TempDir,
+    _env_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl EvalServer {
@@ -98,24 +106,46 @@ impl Drop for EvalServer {
 /// determinism level is `Exact` by default. The `with_provider("anthropic")`
 /// client variant flips it to `Temp0` per-request via the label header.
 pub async fn spawn_eval_server() -> EvalServer {
-    // Per ai_stack_web_search_test.rs pattern: isolate vault to a tempdir.
+    spawn_eval_server_inner(false).await
+}
+
+/// Eval server with an unlocked vault and cloud-LLM consent enabled through the
+/// product privacy endpoint. The mock provider is installed after vault setup,
+/// so setup-time provider reload cannot replace it.
+pub async fn spawn_eval_server_with_cloud_llm() -> EvalServer {
+    spawn_eval_server_inner(true).await
+}
+
+async fn isolated_eval_environment() -> (tempfile::TempDir, tokio::sync::OwnedMutexGuard<()>) {
+    let env_guard = EVAL_SERVER_ENV_LOCK
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await;
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    // SAFETY: integration tests share a process — std::env::set_var is unsound
-    // when called concurrently with another thread reading env vars. We accept
-    // the residual race because:
-    //   (1) test setup happens before any tokio worker is spawned for this test;
-    //   (2) integration tests run with --test-threads=1 by default for this binary
-    //       (eval_determinism_test has 4 small tests, no concurrency benefit);
-    //   (3) the production server boots from the same env path under same constraint.
-    // Mirrors the precedent in attune-core/src/backup.rs::with_temp_home.
+    // SAFETY: every test in an eval integration binary enters through this
+    // harness. `EVAL_SERVER_ENV_LOCK` serializes those callers for the entire
+    // server lifetime, and the variables are set before that server spawns any
+    // worker. Separate integration-test files are separate OS processes.
     #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
         std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
     }
+    (tmp, env_guard)
+}
+
+async fn spawn_eval_server_inner(enable_llm: bool) -> EvalServer {
+    // Per ai_stack_web_search_test.rs pattern: isolate vault to a tempdir.
+    let (tmp, env_guard) = isolated_eval_environment().await;
 
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    if enable_llm {
+        vault
+            .setup("P@ss-eval-cloud-llm-not-real")
+            .expect("set up eval vault before installing mock provider");
+    }
     let state = Arc::new(crate::state::AppState::new(
         vault, false, /* require_auth */
     ));
@@ -153,11 +183,16 @@ pub async fn spawn_eval_server() -> EvalServer {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    EvalServer {
+    let server = EvalServer {
         addr,
         handle,
         _tmp: tmp,
+        _env_guard: env_guard,
+    };
+    if enable_llm {
+        enable_cloud_llm(&server.url()).await;
     }
+    server
 }
 
 /// Like [`spawn_eval_server`] but installs a [`RecordingMockLlm`] as the LLM provider and returns
@@ -165,13 +200,7 @@ pub async fn spawn_eval_server() -> EvalServer {
 /// prove I1 (doc-intel cloud egress is PII-redacted) at the route level. The recording mock echoes
 /// a fixed response, so doc-intel ops complete fast (no retry storm).
 pub async fn spawn_eval_server_with_recording_llm() -> (EvalServer, Arc<RecordingMockLlm>) {
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
-        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
-    }
+    let (tmp, env_guard) = isolated_eval_environment().await;
 
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
     // Set up + unlock the vault now so the later `enable_cloud_llm` PATCH (behind vault_guard) is
@@ -216,6 +245,7 @@ pub async fn spawn_eval_server_with_recording_llm() -> (EvalServer, Arc<Recordin
             addr,
             handle,
             _tmp: tmp,
+            _env_guard: env_guard,
         },
         rec,
     )

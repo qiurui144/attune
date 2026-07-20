@@ -46,6 +46,13 @@ pub trait VlmProvider: Send + Sync {
     fn vlm_model_name(&self) -> &str {
         "vlm"
     }
+
+    /// Whether this provider's payload remains on a local/private destination.
+    /// The conservative default is cloud so third-party implementations cannot
+    /// bypass egress consent by omission.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// 基于 `LlmProvider` 的 VLM 薄适配器。
@@ -104,6 +111,10 @@ impl VlmProvider for LlmVlmProvider {
                 &[attachment],
             )
             .map(|(s, _u)| s)
+    }
+
+    fn is_local(&self) -> bool {
+        self.llm.is_local()
     }
 }
 

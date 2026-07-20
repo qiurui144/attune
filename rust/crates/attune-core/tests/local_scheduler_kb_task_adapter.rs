@@ -89,7 +89,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 #[test]
-fn async_only_task_submits_explicit_async_with_admission_hints() {
+fn async_only_task_submits_only_application_owned_output_limit() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let (base, recorded) = spawn_one_request_scheduler(
         "HTTP/1.1 202 Accepted",
@@ -120,16 +120,72 @@ fn async_only_task_submits_explicit_async_with_admission_hints() {
     let req = recorded.lock().unwrap().clone().expect("request recorded");
     assert_eq!(req.path, "/kb/tasks/kb.query.ask:async");
     assert_eq!(req.body["max_output_tokens"], 128);
-    assert!(req.body["context_tokens"].as_u64().unwrap() > 0);
-    assert_eq!(req.body["timeout_ms"], 120000);
-    assert_eq!(req.body["deadline_ms"], 15000);
-    assert_eq!(req.body["ttl_ms"], 900000);
-    assert!(req.body.get("service_class").is_none());
-    assert!(req.body.get("model").is_none());
+    for scheduler_owned in [
+        "context_tokens",
+        "timeout_ms",
+        "deadline_ms",
+        "ttl_ms",
+        "service_class",
+        "model",
+    ] {
+        assert!(
+            req.body.get(scheduler_owned).is_none(),
+            "scheduler-owned field {scheduler_owned} leaked into {}",
+            req.body
+        );
+    }
 }
 
 #[test]
-fn sync_capable_task_uses_primary_endpoint_with_hints() {
+fn explicit_async_request_rejects_legacy_200_without_job_id() {
+    let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
+    let (base, recorded) =
+        spawn_one_request_scheduler("HTTP/1.1 200 OK", r#"{"outputs":{"text":"untrackable"}}"#);
+    let client = LocalSchedulerClient::with_base(&base, Duration::from_secs(2));
+    let adapter = SchedulerKbTaskAdapter::new(&client, &profiles);
+    let messages = vec![ChatMessage::user("question with compact evidence")];
+
+    let error = adapter
+        .submit(SchedulerKbTaskSubmitRequest::interactive(
+            "kb.query.ask",
+            json!({"query":"q","contexts":["evidence"]}),
+            &messages,
+        ))
+        .expect_err(":async response without job id must fail closed");
+    assert!(error.to_string().contains("without job_id"));
+    assert_eq!(
+        recorded.lock().unwrap().as_ref().map(|r| r.path.as_str()),
+        Some("/kb/tasks/kb.query.ask:async")
+    );
+}
+
+#[test]
+fn sync_capable_task_rejects_202_without_job_id() {
+    let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
+    let (base, recorded) = spawn_one_request_scheduler(
+        "HTTP/1.1 202 Accepted",
+        r#"{"status":"done","outputs":{"text":"untrackable accepted work"}}"#,
+    );
+    let client = LocalSchedulerClient::with_base(&base, Duration::from_secs(2));
+    let adapter = SchedulerKbTaskAdapter::new(&client, &profiles);
+    let messages = vec![ChatMessage::user("extract this short image")];
+
+    let error = adapter
+        .submit(SchedulerKbTaskSubmitRequest::interactive(
+            "kb.query.vlm_extract",
+            json!({"image_base64":"dGVzdA=="}),
+            &messages,
+        ))
+        .expect_err("HTTP 202 is async regardless of a misleading done body");
+    assert!(error.to_string().contains("without job_id"));
+    assert_eq!(
+        recorded.lock().unwrap().as_ref().map(|r| r.path.as_str()),
+        Some("/kb/tasks/kb.query.vlm_extract")
+    );
+}
+
+#[test]
+fn sync_capable_task_uses_primary_endpoint_without_scheduler_owned_hints() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let (base, recorded) = spawn_one_request_scheduler(
         "HTTP/1.1 200 OK",
@@ -161,9 +217,9 @@ fn sync_capable_task_uses_primary_endpoint_with_hints() {
     let req = recorded.lock().unwrap().clone().expect("request recorded");
     assert_eq!(req.path, "/kb/tasks/kb.query.vlm_extract");
     assert_eq!(req.body["max_output_tokens"], 256);
-    assert!(req.body["context_tokens"].as_u64().unwrap() > 0);
-    assert_eq!(req.body["timeout_ms"], 120000);
-    assert_eq!(req.body["deadline_ms"], 20000);
+    for scheduler_owned in ["context_tokens", "timeout_ms", "deadline_ms", "ttl_ms"] {
+        assert!(req.body.get(scheduler_owned).is_none());
+    }
 }
 
 #[test]

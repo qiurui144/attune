@@ -84,8 +84,6 @@ impl JobHandler for AsrJobHandler {
                 "language": v["language"].as_str().unwrap_or("auto"),
                 "model": v["model"].as_str().unwrap_or("small"),
                 "diarization": diarization,
-                "timeout_ms": 60 * 60 * 1000u64,
-                "ttl_ms": 60 * 60 * 1000u64,
             }),
             true,
             Duration::from_secs(60 * 60),

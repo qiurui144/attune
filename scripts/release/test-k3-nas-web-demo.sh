@@ -23,7 +23,7 @@ LONGTEXT_REMOTE_RUNNER="${ATTUNE_K3_LONGTEXT_REMOTE_RUNNER:-}"
 LONGTEXT_REMOTE_MANIFEST="${ATTUNE_K3_LONGTEXT_REMOTE_MANIFEST:-}"
 LONGTEXT_REMOTE_RESULTS="${ATTUNE_K3_LONGTEXT_REMOTE_RESULTS:-}"
 LONGTEXT_REQUIRE_SCHEDULER_GENERATION="${ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION:-0}"
-LONGTEXT_PDF_OCR="${ATTUNE_K3_LONGTEXT_PDF_OCR:-0}"
+LONGTEXT_PDF_OCR="${ATTUNE_K3_LONGTEXT_PDF_OCR:-1}"
 AIRPLANE_LONGTEXT_REPO_URL="https://github.com/shiroinekotfs/airplane-manual-collection.git"
 SERVER_SCHEDULER_BASE="${ATTUNE_K3_SERVER_SCHEDULER_BASE:-http://127.0.0.1:8090}"
 SCHEDULER_CHAT_MODEL="${ATTUNE_K3_SCHEDULER_CHAT_MODEL:-llm-summary}"
@@ -128,9 +128,9 @@ Environment:
                                 Require every non-safety long-text chat row to use
                                 scheduler answer generation. Defaults to 0; scheduler
                                 generation coverage is reported but does not block Attune.
-  ATTUNE_K3_LONGTEXT_PDF_OCR=1  Keep server-side PDF OCR enabled for the airplane long-text
-                                bind. Defaults to 0 so scanned manuals degrade to metadata
-                                instead of blocking vector/search/chat validation.
+  ATTUNE_K3_LONGTEXT_PDF_OCR=0  Disable server-side PDF OCR for the airplane long-text
+                                bind. Defaults to 1; Attune's bounded PDF OCR path
+                                is part of this gate.
   ATTUNE_K3_LONGTEXT_MANIFEST   Local JSON manifest for the optional long-text UI gate.
                                 The corpus must already be materialized and indexed
                                 on the NAS host before the UI-only gate runs.
@@ -368,7 +368,7 @@ configure_longtext_pdf_ocr_guard() {
     return
   fi
 
-  append_report "Server-side PDF OCR disabled for airplane long-text bind (ATTUNE_K3_LONGTEXT_PDF_OCR=0). This keeps the Attune vector/search/chat gate focused on indexing and retrieval; OCR-specific coverage belongs to scheduler/attune OCR gates."
+  append_report "Server-side PDF OCR disabled for airplane long-text bind (ATTUNE_K3_LONGTEXT_PDF_OCR=0). This is an explicit operator override; the default gate keeps Attune's bounded PDF OCR path enabled."
   remote "mkdir -p /etc/systemd/system/attune-server.service.d && printf '%s\n' '[Service]' 'Environment=ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_LOCAL_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_PDF_OCR_ENABLED=0' > /etc/systemd/system/attune-server.service.d/90-attune-k3-longtext-pdf-ocr.conf && systemctl daemon-reload && systemctl restart attune-server.service && systemctl is-active attune-server.service"
 }
 
@@ -383,7 +383,7 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
   append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, and chat scheduler metadata."
-  append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=0 restarts attune-server with PDF OCR disabled before airplane bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=1 only for OCR-specific validation."
+  append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=1 clears any OCR-disabling systemd drop-in before airplane bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=0 only to isolate retrieval/vector behavior."
   append_report "- Airplane GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1, run tests/e2e/airplane_manual_longtext_e2e.py on the NAS host with source repo $AIRPLANE_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized corpus under $LONGTEXT_CORPUS_DIR, then copy the generated manifest back for the optional UI gate; scheduler generation coverage is reported and only blocks when ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1."
   append_report "- Use K3/NAS-local bind path for knowledge-base import."
   append_report "- Require local scheduler chat metadata and poll async answer jobs when scheduler chat is required."

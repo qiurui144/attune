@@ -274,6 +274,56 @@ produces = "Y"
         assert_eq!(out.final_type, "Award");
     }
 
+    #[test]
+    fn cloud_flow_redacts_seed_before_the_wire() {
+        let reg = defamation_registry();
+        let flows = defamation_flow();
+        flows.validate_against(&reg).unwrap();
+
+        // A cloud provider returned by routes::privacy::governed_llm has this
+        // decorator. Assert the actual flow-runner payload seen by its inner
+        // (wire-facing) provider contains placeholders, never the raw PII from
+        // the seed passed to run_chat_flow.
+        let inner = Arc::new(MockLlmProvider::new("cloud-model"));
+        inner.push_response(r#"{"victim":"A"}"#);
+        let provider =
+            attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner.clone());
+        let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
+            Ok(serde_json::json!({"award": 5000}))
+        };
+
+        let out = run_chat_flow(
+            "名誉权纠纷，联系 13800138000 或 zhangsan@example.com",
+            &flows,
+            &reg,
+            &provider,
+            None,
+            None,
+            Entitlement::paid_with_quota(1000),
+            &HashSet::new(),
+            &mut dispatch,
+        )
+        .expect("declared flow must run");
+        assert_eq!(out.status, "complete");
+
+        let sent = inner
+            .call_log()
+            .into_iter()
+            .flatten()
+            .map(|message| message.content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!sent.contains("13800138000"), "phone reached wire: {sent}");
+        assert!(
+            !sent.contains("zhangsan@example.com"),
+            "email reached wire: {sent}"
+        );
+        assert!(
+            sent.contains("PHONE_") || sent.contains("EMAIL_"),
+            "redaction placeholder missing from wire payload: {sent}"
+        );
+    }
+
     // ①-telemetry: a usage aggregator records the LLM extractor step.
     #[test]
     fn declared_flow_records_telemetry_for_llm_step() {

@@ -55,14 +55,7 @@ impl<'a> SchedulerKbTaskAdapter<'a> {
         let admission = admit_context(admission_req);
         match admission {
             ContextAdmissionDecision::AdmitSync(ctx) => {
-                apply_admission_hints(
-                    &mut body,
-                    task.timeout_ms,
-                    task.deadline_ms,
-                    None,
-                    ctx.context_tokens,
-                    ctx.max_output_tokens,
-                );
+                apply_output_limit(&mut body, ctx.max_output_tokens);
                 submit_local_task(
                     self.client,
                     req.task_name,
@@ -79,14 +72,7 @@ impl<'a> SchedulerKbTaskAdapter<'a> {
                 )
             }
             ContextAdmissionDecision::SubmitAsync(ctx) => {
-                apply_admission_hints(
-                    &mut body,
-                    task.timeout_ms,
-                    task.deadline_ms,
-                    ctx.ttl_ms,
-                    ctx.context_tokens,
-                    ctx.max_output_tokens,
-                );
+                apply_output_limit(&mut body, ctx.max_output_tokens);
                 submit_local_task(
                     self.client,
                     req.task_name,
@@ -185,9 +171,11 @@ fn reject_forbidden_scheduler_fields(task_name: &str, body: &Map<String, Value>)
         "resource_key",
         "preferred_device",
         "service_class",
+        "timeout_ms",
         "context_tokens",
         "deadline_ms",
         "prompt_tokens",
+        "ttl_ms",
     ] {
         if body.contains_key(key) {
             return Err(VaultError::InvalidInput(format!(
@@ -198,29 +186,11 @@ fn reject_forbidden_scheduler_fields(task_name: &str, body: &Map<String, Value>)
     Ok(())
 }
 
-fn apply_admission_hints(
-    body: &mut Map<String, Value>,
-    timeout_ms: u32,
-    _deadline_ms: u32,
-    ttl_ms: Option<u32>,
-    _context_tokens: u32,
-    max_output_tokens: u32,
-) {
-    if timeout_ms > 0 {
-        insert_if_absent(body, "timeout_ms", timeout_ms);
-    }
-    if let Some(ttl_ms) = ttl_ms {
-        insert_if_absent(body, "ttl_ms", ttl_ms);
-    }
+fn apply_output_limit(body: &mut Map<String, Value>, max_output_tokens: u32) {
     body.insert(
         "max_output_tokens".to_string(),
         Value::from(max_output_tokens),
     );
-}
-
-fn insert_if_absent(body: &mut Map<String, Value>, key: &str, value: u32) {
-    body.entry(key.to_string())
-        .or_insert_with(|| Value::from(value));
 }
 
 fn submit_local_task(
@@ -231,6 +201,7 @@ fn submit_local_task(
     admission: SchedulerKbTaskAdmission,
 ) -> Result<SchedulerKbTaskSubmitOutcome> {
     let response = client.submit_kb_task(task_name, body, explicit_async)?;
+    response.validate_submission(explicit_async, &format!("scheduler KB task {task_name}"))?;
     Ok(SchedulerKbTaskSubmitOutcome::Local(
         SchedulerKbTaskLocalOutcome {
             response,
@@ -301,6 +272,7 @@ mod tests {
             tx.send(body).unwrap();
             let payload = serde_json::json!({
                 "scheduled_as": "async",
+                "job_id": "job-inline-1",
                 "status": "done",
                 "task": "kb.query.ask",
                 "model": "llm-summary",
@@ -347,11 +319,67 @@ mod tests {
         let sent: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
         assert!(sent.get("context_tokens").is_none(), "sent={sent}");
         assert!(sent.get("deadline_ms").is_none(), "sent={sent}");
+        assert!(sent.get("timeout_ms").is_none(), "sent={sent}");
+        assert!(sent.get("ttl_ms").is_none(), "sent={sent}");
         assert_eq!(
             sent.get("max_output_tokens").and_then(Value::as_u64),
             Some(24)
         );
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn adapter_rejects_malformed_or_failed_200_submission() {
+        for (scheduled_as, response_status, response_error, expected) in [
+            ("sync", "queued", None, "without job_id"),
+            ("sync", "running", None, "without job_id"),
+            ("sync", "future_scheduler_state", None, "without job_id"),
+            ("deferred", "done", None, "without job_id"),
+            ("sync", "error", Some("OOM"), "OOM"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let payload = serde_json::json!({
+                    "scheduled_as": scheduled_as,
+                    "status": response_status,
+                    "error": response_error,
+                    "task": "kb.query.ask",
+                    "outputs": {}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+
+            let base = format!("http://{addr}");
+            let client = LocalSchedulerClient::with_base(&base, Duration::from_secs(5));
+            let profiles = RuntimeProfileResolver::static_local_scheduler_profile(&base);
+            let adapter = SchedulerKbTaskAdapter::new(&client, &profiles);
+            let messages = vec![ChatMessage {
+                role: "user".to_string(),
+                content: "test".to_string(),
+            }];
+            let error = adapter
+                .submit(SchedulerKbTaskSubmitRequest::interactive(
+                    "kb.query.ask",
+                    serde_json::json!({"query": "test", "contexts": []}),
+                    &messages,
+                ))
+                .expect_err("malformed/failed 200 response must fail closed");
+            assert!(
+                error.to_string().contains(expected),
+                "scheduled_as={scheduled_as}, status={response_status}, error={error}"
+            );
+            handle.join().unwrap();
+        }
     }
 
     #[test]

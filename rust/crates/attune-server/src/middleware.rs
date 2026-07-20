@@ -6,6 +6,25 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+fn lock_vault_for_request<'a>(
+    state: &'a SharedState,
+    path: &str,
+) -> Result<std::sync::MutexGuard<'a, attune_core::vault::Vault>, Response> {
+    if path == crate::routes::tts::TTS_ROUTE {
+        return match state.vault.try_lock() {
+            Ok(vault) => Ok(vault),
+            Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                Err(crate::routes::tts::settings_busy_error().into_response())
+            }
+        };
+    }
+    Ok(state
+        .vault
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()))
+}
+
 /// Redact the value of a specific query-string key so it does not appear in access logs.
 ///
 /// Splits the raw query string on `&`, replaces `<key>=<anything>` with `<key>=<redacted>`,
@@ -46,6 +65,26 @@ fn request_has_any_eval_header(request: &Request<axum::body::Body>) -> bool {
     ];
     let headers = request.headers();
     EVAL_HEADERS.iter().any(|h| headers.contains_key(*h))
+}
+
+/// Reconcile server member runtime with the CLI/server shared session file
+/// before an API handler can consume account-bound providers or entitlements.
+pub async fn member_session_coherence_guard(
+    State(state): State<SharedState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    // Scheduler-backed TTS consumes neither member entitlements nor a cloud
+    // account provider. Skipping this reconciliation also prevents its
+    // blocking vault read from sitting ahead of the TTS-specific fail-fast
+    // lock path while a slow OCR scan owns the vault mutex.
+    if path != crate::routes::tts::TTS_ROUTE
+        && (path.starts_with("/api/v1/") || path == "/mcp" || path.starts_with("/mcp/"))
+    {
+        let _ = crate::routes::member::reconcile_member_session_epoch(&state).await;
+    }
+    next.run(request).await
 }
 
 /// Vault guard: 未 UNLOCKED 时返回 403
@@ -154,11 +193,10 @@ pub async fn vault_guard(
         return next.run(request).await;
     }
 
-    let vault_state = state
-        .vault
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .state();
+    let vault_state = match lock_vault_for_request(&state, path) {
+        Ok(vault) => vault.state(),
+        Err(response) => return response,
+    };
     match vault_state {
         VaultState::Unlocked => next.run(request).await,
         VaultState::Locked => (
@@ -270,6 +308,16 @@ pub async fn bearer_auth_guard(
     ];
     let is_always_auth = ALWAYS_AUTH_ENDPOINTS.iter().any(|ep| path == *ep);
 
+    // Normal vault sessions are invalidated when the vault locks. A token that
+    // successfully authenticates the lock request is retained as a digest-only,
+    // expiry-bound capability, and is accepted after lock for exactly these two
+    // privacy endpoints. No member/data route receives this exception.
+    const LOCK_ARMING_ENDPOINTS: &[&str] = &["/api/v1/privacy/lock", "/api/v1/vault/lock"];
+    const LOCKED_PRIVACY_ENDPOINTS: &[&str] = &[
+        "/api/v1/privacy/status",
+        "/api/v1/privacy/wipe-cloud-session",
+    ];
+
     // If not a forced-auth endpoint and global auth is disabled, allow through
     if !state.require_auth && !is_always_auth {
         return next.run(request).await;
@@ -333,13 +381,34 @@ pub async fn bearer_auth_guard(
         }
     };
 
-    let verify_result = {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault.verify_session(&token).map_err(|e| e.to_string())
+    let (verify_result, vault_state) = {
+        let vault = match lock_vault_for_request(&state, &path) {
+            Ok(vault) => vault,
+            Err(response) => return response,
+        };
+        (
+            vault.verify_session(&token).map_err(|e| e.to_string()),
+            vault.state(),
+        )
     };
 
     match verify_result {
-        Ok(_) => next.run(request).await,
+        Ok(_) => {
+            if LOCK_ARMING_ENDPOINTS.contains(&path.as_str()) {
+                // `verify_session` already authenticated the signature, expiry,
+                // and current nonce. Failure to parse/cache is fail-closed for
+                // post-lock access but must not make the lock itself fail.
+                let _ = state.arm_locked_privacy_authorization(&token);
+            }
+            next.run(request).await
+        }
+        Err(_)
+            if matches!(vault_state, VaultState::Locked)
+                && LOCKED_PRIVACY_ENDPOINTS.contains(&path.as_str())
+                && state.verify_locked_privacy_authorization(&token) =>
+        {
+            next.run(request).await
+        }
         Err(e) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": e})),

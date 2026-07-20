@@ -73,6 +73,25 @@ struct LocalSchedulerAnswerBudget {
     explicit_output_override: bool,
 }
 
+fn tiered_memory_allowed_for_provider(provider_is_local: bool, enabled: bool) -> bool {
+    provider_is_local && enabled
+}
+
+/// Drop any cloud-bound retrieval block whose source item cannot be proven,
+/// plus every known L0 item. Legacy L2/L3 summaries have an empty item id and
+/// are therefore denied until memory rows carry source/privacy provenance.
+fn retain_cloud_provenanced_results(
+    results: &mut Vec<attune_core::search::SearchResult>,
+    l0_ids: &std::collections::HashSet<String>,
+) -> usize {
+    let before = results.len();
+    results.retain(|r| {
+        let item_id = r.item_id.trim();
+        !item_id.is_empty() && !l0_ids.contains(item_id)
+    });
+    before - results.len()
+}
+
 /// POST /api/v1/chat/stream -- buffered SSE compatibility endpoint.
 ///
 /// The current web/E2E contract only requires an SSE-shaped response and the same
@@ -495,25 +514,6 @@ fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> 
         ChatMessage::system(LOCAL_SCHEDULER_KB_ASK_SYSTEM),
         ChatMessage::user(&user),
     ]
-}
-
-fn local_scheduler_output_text(outputs: &Value) -> Option<String> {
-    for key in ["answer", "text", "content", "response", "summary", "output"] {
-        if let Some(s) = outputs.get(key).and_then(|v| v.as_str()) {
-            if !s.trim().is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    outputs
-        .get("choices")
-        .and_then(|v| v.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .map(ToString::to_string)
 }
 
 fn local_scheduler_extractive_answer_enabled() -> bool {
@@ -996,32 +996,27 @@ where
     .map_err(local_scheduler_route_error)
 }
 
-/// F-17 G1 helper — read whether a given outbound point is enabled in
-/// `settings.privacy.<key>`. Defaults to `false` (fail-closed) when the block
-/// or key is absent — matching the privacy default (all 5 egress off until the
-/// user opts in, per `routes/privacy.rs` + `scripts/privacy-audit.sh` gate #4).
-/// The settings meta key is the same one `routes/privacy.rs` reads/writes.
-/// `pub(crate)`: shared with `routes/version.rs` (update-check egress) and
-/// `routes/llm.rs` (non-local probe candidates) — R1.1b outbound-gate sweep.
-pub(crate) fn read_privacy_outbound_enabled(state: &SharedState, key: &str) -> bool {
-    let vault = match state.vault.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    let meta = vault
-        .store()
-        .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
-        .ok()
-        .flatten();
-    let settings: serde_json::Value = match meta {
-        Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| serde_json::json!({})),
-        None => serde_json::json!({}),
-    };
-    settings
-        .get("privacy")
-        .and_then(|p| p.get(key))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+pub(crate) fn enforce_cloud_llm_outbound(
+    state: &SharedState,
+) -> Result<(), attune_core::outbound_gate::OutboundError> {
+    let enabled = crate::routes::privacy::outbound_enabled(state, "llm");
+    let vault_unlocked = matches!(
+        state
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .state(),
+        attune_core::vault::VaultState::Unlocked
+    );
+    let policy = attune_core::outbound_gate::OutboundPolicy::cloud(
+        attune_core::outbound_gate::OutboundKind::Llm,
+        enabled,
+        vault_unlocked,
+        None,
+    );
+    // Empty payload: this call is the consent/vault gate. The chat path applies
+    // one batch redactor to the actual segmented payload immediately afterward.
+    attune_core::outbound_gate::OutboundGate::enforce(&policy, "").map(|_| ())
 }
 
 pub async fn chat(
@@ -1187,6 +1182,10 @@ pub async fn chat(
         }
     };
 
+    if !llm.is_local() {
+        enforce_cloud_llm_outbound(&state).map_err(|e| AppError::Forbidden(e.to_string()))?;
+    }
+
     // ACP-5 (2026-05-29) — autonomous-flow wiring. When the user message resolves
     // to a *declared multi-step flow* (e.g. legal_defamation), run it end-to-end
     // through the production GovernedStepRunner (each step: ACP-7 schedule + ACP-4
@@ -1199,19 +1198,36 @@ pub async fn chat(
     //
     // Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3b
     let acp_flow: Option<serde_json::Value> = if let Some(flows_reg) = state.agent_flows.clone() {
+        // The flow seed currently contains only this request's user message; it
+        // does not include retrieved vault evidence, so there is no L0 source to
+        // report here. If vault content is ever added to the seed, its real L0 bit
+        // must be threaded into this boundary. Cloud providers are returned behind
+        // the shared redacting decorator; local providers bypass cloud consent and
+        // remain unwrapped.
+        let flow_llm = crate::routes::privacy::governed_llm(&state, false)?;
         let entitlement = {
-            let paid = state
+            let member = state
                 .member_state
                 .lock()
-                .map(|g| g.is_paid())
-                .unwrap_or(false);
-            if paid {
-                // Real per-call quota accounting lives in the cloud gateway; the
-                // scheduler only needs "has cloud budget" here, so seed a non-zero
-                // quota. Exhaustion is surfaced by the gateway, not this gate.
-                attune_core::agents::scheduler::Entitlement::paid_with_quota(1_000_000)
-            } else {
-                attune_core::agents::scheduler::Entitlement::free_local()
+                .map(|g| g.clone())
+                .unwrap_or(attune_core::member_session::MemberState::LoggedOut);
+            let local_available = flow_llm.is_local();
+            match member {
+                attune_core::member_session::MemberState::Paid {
+                    llm_quota_remaining,
+                    ..
+                } => attune_core::agents::scheduler::Entitlement {
+                    paid: true,
+                    cloud_quota_remaining: llm_quota_remaining,
+                    // GovernedStepRunner currently has one concrete provider;
+                    // claim local fallback only when that provider is local.
+                    local_available,
+                },
+                _ => attune_core::agents::scheduler::Entitlement {
+                    paid: false,
+                    cloud_quota_remaining: 0,
+                    local_available,
+                },
             }
         };
         // ACP-3 soft-disabled agent ids (same source as the skills observer above).
@@ -1234,7 +1250,6 @@ pub async fn chat(
                 })
                 .unwrap_or_default()
         };
-        let flow_llm = llm.clone();
         let flow_cache = state.cache_backend();
         let flow_usage = state.usage();
         let flow_msg = body.message.clone();
@@ -1315,7 +1330,10 @@ pub async fn chat(
             // compact_history 持锁 + 可能调 LLM —— 走 spawn_blocking 不阻塞 async worker。
             let state_hc = state.clone();
             let dek_hc = dek.clone();
-            let llm_hc = llm.clone();
+            // History compaction is an independent LLM egress before the main
+            // chat redaction batch. It must therefore obtain its own governed
+            // provider rather than reusing the raw configured cloud handle.
+            let llm_hc = crate::routes::privacy::governed_llm(&state, false)?;
             let rolling = tokio::task::spawn_blocking(move || {
                 let vault = state_hc.vault.lock().unwrap_or_else(|e| e.into_inner());
                 attune_core::memory::compact_history(
@@ -1374,15 +1392,16 @@ pub async fn chat(
         // 改 debug 级 + 仅打长度与 domain，不打内容。
         tracing::debug!(domain = %d, query_len = body.message.len(), "F-Pro domain detected");
     }
-    let native_scheduler_kb =
+    let native_scheduler_kb_profile =
         crate::local_scheduler::native_kb_enabled(&app_settings, &state.hardware);
+    let native_scheduler_ask = crate::local_scheduler::native_kb_ask_enabled(&app_settings);
 
     // 1. Search knowledge base via three-stage pipeline. Local scheduler profiles
     // use the edge-native retrieval planner; other paths keep the existing chat
     // search defaults.
     let (search_params, retrieval_plan) = build_chat_search_params(
         state.hardware.form_factor,
-        native_scheduler_kb,
+        native_scheduler_kb_profile,
         &expanded_query,
         detected_domain.as_deref(),
         chat_kb_top_k(),
@@ -1554,22 +1573,28 @@ pub async fn chat(
                 .map(|v| v as f32)
                 .unwrap_or(0.70),
         };
-        if memory_cfg.tiered_assembler_enabled && !search_results.is_empty() {
+        // L2/L3 rows currently carry no source item/privacy provenance. Treat
+        // unknown provenance as L0: a cloud provider may only use the already
+        // item-filtered L0 retrieval results, while local models may still use
+        // compact tiered memory. This is deliberately fail-closed until memory
+        // rows persist a complete source/privacy lineage.
+        let (assembler_embedding, assembler_embedding_is_local) = state.embedding_with_locality();
+        if tiered_memory_allowed_for_provider(llm.is_local(), memory_cfg.tiered_assembler_enabled)
+            && assembler_embedding_is_local
+            && assembler_embedding.is_some()
+            && !search_results.is_empty()
+        {
             let state_asm = state.clone();
             let dek_asm = dek.clone();
             let query_asm = body.message.clone();
             let l0_in = search_results.clone();
+            let emb = assembler_embedding.expect("checked above");
             let assembled = tokio::task::spawn_blocking(move || {
                 let idx_guard = state_asm
                     .memory_index
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 let idx = idx_guard.as_ref()?;
-                let emb = state_asm
-                    .embedding
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()?;
                 let vault = state_asm.vault.lock().unwrap_or_else(|e| e.into_inner());
                 attune_core::memory::assemble_context(
                     vault.store(),
@@ -1609,11 +1634,10 @@ pub async fn chat(
         }
     }
 
-    // F-17 G3 (defense-in-depth): the tiered assembler may re-introduce an L0
-    // item's anchor chunk into the (memory-tagged) context AFTER the first L0
-    // filter. Re-filter on item_id for any cloud destination — memory blocks
-    // carrying a real L0 item_id are dropped here. Blocks with empty / web ids
-    // (pure summaries, no source item) are kept. Safe-default = deny L0.
+    // F-17 G3 (defense-in-depth): no cloud-bound context with unknown source
+    // provenance survives this point. In particular, legacy L2/L3 summaries
+    // use an empty item_id; their source may have been L0 and text redaction
+    // cannot prove otherwise. Known L0 anchors are removed as before.
     if !llm.is_local() && !search_results.is_empty() {
         let l0_ids: std::collections::HashSet<String> = {
             let vault = state
@@ -1627,17 +1651,13 @@ pub async fn chat(
                 .into_iter()
                 .collect()
         };
-        if !l0_ids.is_empty() {
-            let before = search_results.len();
-            search_results.retain(|r| !l0_ids.contains(&r.item_id));
-            let dropped = before - search_results.len();
-            if dropped > 0 {
-                tracing::info!(
-                    target: "outbound_audit",
-                    "F-17 G3: dropped {dropped} L0 anchor(s) re-introduced by memory assembler (model={})",
-                    llm.model_name()
-                );
-            }
+        let dropped = retain_cloud_provenanced_results(&mut search_results, &l0_ids);
+        if dropped > 0 {
+            tracing::info!(
+                target: "outbound_audit",
+                "F-17 G3: dropped {dropped} L0/unknown-provenance context block(s) before cloud LLM (model={})",
+                llm.model_name()
+            );
         }
     }
 
@@ -1663,7 +1683,7 @@ pub async fn chat(
         // — no raw query leaves the device. Provider-level enforcement
         // (BrowserSearchProvider::with_outbound_policy) is the defense-in-depth
         // backstop for direct/other callers.
-        let web_search_allowed = read_privacy_outbound_enabled(&state, "web_search");
+        let web_search_allowed = crate::routes::privacy::outbound_enabled(&state, "web_search");
         let ws = if web_search_allowed {
             state
                 .web_search
@@ -1755,7 +1775,7 @@ pub async fn chat(
     let knowledge: Vec<serde_json::Value> = if web_search_used {
         // 网络搜索结果已经是 snippet，不做二次压缩
         knowledge
-    } else if summary_mode == "off" || native_scheduler_kb {
+    } else if summary_mode == "off" || native_scheduler_ask {
         // summary=off：跳过上下文摘要，注入原文 (弱机/离线/省钱)。
         // scheduler-native KB 路径也跳过 summary_llm，避免本地答案生成前误触云端
         // 或 OpenAI-compatible 摘要器；后续 build_local_scheduler_kb_contexts 会按
@@ -1771,6 +1791,16 @@ pub async fn chat(
         if strategy == ContextStrategy::Raw || force_local_for_evidence {
             knowledge
         } else {
+            let summary_llm_for_compression = if summary_use_cloud {
+                // This is a distinct egress before the final chat batch, so it
+                // must obtain the shared consent/redaction wrapper itself.
+                crate::routes::privacy::governed_llm(&state, false).ok()
+            } else {
+                state
+                    .summary_llm()
+                    .filter(|provider| provider.is_local())
+                    .or_else(|| llm.is_local().then(|| llm.clone()))
+            };
             // 三阶段压缩，尽量缩短 vault lock 持有时间：
             //   Phase 1（锁）：查 cache，收集 miss 清单
             //   Phase 2（无锁）：对 misses 批量调 LLM 生成摘要
@@ -1816,23 +1846,9 @@ pub async fn chat(
             // 内部：phase 1 + 3 持锁；phase 2 释放锁后跑 LLM。
             let compressed_result: std::result::Result<Vec<CompressedChunk>, String> =
                 tokio::task::spawn_blocking(move || {
-                    let llm_arc = state_compress.llm.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .as_ref().cloned();
-                    // summary=cloud → 优先用主 chat LLM (远端 token)；否则用 summary_llm (本地)，
-                    // 两者均缺失时互相兜底，确保摘要尽量能跑 (graceful，永不 panic)。
-                    let summary_llm_arc = if summary_use_cloud {
-                        llm_arc.clone().or_else(|| {
-                            state_compress.summary_llm.lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .as_ref().cloned()
-                        })
-                    } else {
-                        state_compress.summary_llm.lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .as_ref().cloned()
-                            .or_else(|| llm_arc.clone())
-                    };
+                    // Cloud mode was already wrapped by the shared governed
+                    // boundary; local mode contains only proven-local handles.
+                    let summary_llm_arc = summary_llm_for_compression;
                     let target = strategy.target_chars();
                     let strategy_str = strategy.as_str();
 
@@ -2006,7 +2022,7 @@ pub async fn chat(
 
     // Local scheduler path: answer generation goes through scheduler-native `/kb/tasks`,
     // not through the legacy OpenAI-compatible `/v1/chat/completions` path.
-    if native_scheduler_kb && !web_search_used {
+    if native_scheduler_ask && !web_search_used {
         let answer_budget = local_scheduler_answer_budget(&body.message, &knowledge);
         let answer_budget_json = local_scheduler_answer_budget_json(answer_budget);
         let deterministic_local_answer =
@@ -2158,7 +2174,7 @@ pub async fn chat(
                 let content = if is_async {
                     local_scheduler_async_content(response.job_id.as_deref(), response.eta_ms)
                 } else {
-                    local_scheduler_output_text(&response.outputs).unwrap_or_else(|| {
+                    crate::scheduler_tasks::output_text(&response.outputs).unwrap_or_else(|| {
                         "本地 scheduler 知识库任务已完成，但未返回可展示文本。".to_string()
                     })
                 };
@@ -2910,7 +2926,7 @@ async fn eval_short_circuit_chat(
         )));
     }
 
-    let llm = state.llm().ok_or_else(|| {
+    state.llm().ok_or_else(|| {
         // rich error: 带 code, 走 Detailed 保完整 body
         AppError::detailed(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2920,9 +2936,11 @@ async fn eval_short_circuit_chat(
             }),
         )
     })?;
+    let llm = crate::routes::privacy::governed_llm(state, false)?;
 
     // Build messages — eval path stays minimal: system "You are attune"
-    // + history (as-is) + user message. Redaction/RAG omitted by design.
+    // + history + user message. Cloud providers are wrapped above so even this
+    // deterministic test surface cannot bypass the normal PII boundary.
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(body.history.len() + 2);
     messages.push(ChatMessage::system(
         "You are attune, a private AI knowledge partner. Answer concisely.",
@@ -3036,6 +3054,43 @@ mod tests {
             AppError::Detailed { status, .. } => status.as_u16(),
             other => panic!("expected Detailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cloud_context_rejects_unprovenanced_tiered_memory_and_l0_anchors() {
+        assert!(tiered_memory_allowed_for_provider(true, true));
+        assert!(
+            !tiered_memory_allowed_for_provider(false, true),
+            "cloud providers must not run the legacy provenance-free L2/L3 assembler"
+        );
+
+        let l0_secret = "L0 source summary that redaction cannot classify";
+        let mut results = vec![
+            attune_core::search::SearchResult {
+                item_id: String::new(),
+                title: "legacy L2 memory".into(),
+                content: l0_secret.into(),
+                source_type: "memory".into(),
+                ..Default::default()
+            },
+            attune_core::search::SearchResult {
+                item_id: "l0-item".into(),
+                title: "known L0 anchor".into(),
+                content: "known secret".into(),
+                ..Default::default()
+            },
+            attune_core::search::SearchResult {
+                item_id: "l1-item".into(),
+                title: "safe item".into(),
+                content: "shareable context".into(),
+                ..Default::default()
+            },
+        ];
+        let l0_ids = std::collections::HashSet::from(["l0-item".to_string()]);
+        assert_eq!(retain_cloud_provenanced_results(&mut results, &l0_ids), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, "l1-item");
+        assert!(!results.iter().any(|result| result.content == l0_secret));
     }
 
     fn code_of(e: VaultError) -> String {
@@ -3440,7 +3495,7 @@ mod tests {
     }
 
     #[test]
-    fn local_scheduler_native_kb_can_be_enabled_by_provider_settings() {
+    fn local_scheduler_native_kb_profile_and_ask_use_distinct_provider_settings() {
         let hardware = attune_core::platform::HardwareProfile::default();
         let settings = serde_json::json!({
             "embedding": { "provider": "local_scheduler" }
@@ -3448,6 +3503,7 @@ mod tests {
         assert!(crate::local_scheduler::native_kb_enabled(
             &settings, &hardware
         ));
+        assert!(!crate::local_scheduler::native_kb_ask_enabled(&settings));
 
         let settings = serde_json::json!({
             "llm": { "provider": "edge_scheduler" }
@@ -3455,6 +3511,7 @@ mod tests {
         assert!(crate::local_scheduler::native_kb_enabled(
             &settings, &hardware
         ));
+        assert!(crate::local_scheduler::native_kb_ask_enabled(&settings));
     }
 
     #[test]
@@ -3645,21 +3702,6 @@ mod tests {
         assert!(text.chars().count() <= 256);
         assert!(text.starts_with("manual-title-"));
         assert!(text.contains("\n...\n"));
-    }
-
-    #[test]
-    fn local_scheduler_output_text_accepts_direct_and_openai_chat_shapes() {
-        assert_eq!(
-            local_scheduler_output_text(&serde_json::json!({"answer": "直接答案"})).as_deref(),
-            Some("直接答案")
-        );
-        assert_eq!(
-            local_scheduler_output_text(&serde_json::json!({
-                "choices": [{"message": {"content": "chat answer"}}]
-            }))
-            .as_deref(),
-            Some("chat answer")
-        );
     }
 
     #[test]

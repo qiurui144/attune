@@ -12,6 +12,29 @@
 use crate::error::{Result, VaultError};
 use serde::{Deserialize, Serialize};
 
+/// Return whether an accounts/license plan is allowed to grant the local Paid
+/// member state. Keep this shared by login, restore, activation, and token
+/// verification so an unrecognised/free plan can never be accepted by only one
+/// entry point.
+pub fn plan_grants_paid(plan: &str) -> bool {
+    matches!(plan.trim(), "pro" | "pro_plus" | "enterprise")
+}
+
+/// Paid plan plus an authoritative RFC3339 expiry check. Missing/blank expiry
+/// keeps compatibility with permanent and older licenses; malformed or elapsed
+/// non-empty timestamps fail closed.
+pub fn current_plan_grants_paid(plan: &str, expires_at: Option<&str>) -> bool {
+    if !plan_grants_paid(plan) {
+        return false;
+    }
+    let Some(expires_at) = expires_at.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expiry| expiry.with_timezone(&chrono::Utc) > chrono::Utc::now())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone)]
 pub struct CloudClient {
     base_url: String,
@@ -22,10 +45,11 @@ pub struct CloudClient {
 
 impl CloudClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into();
         Self {
-            base_url: base_url.into(),
+            http: Self::build_http(&base_url),
+            base_url,
             session_cookie: None,
-            http: Self::build_http(),
         }
     }
 
@@ -35,16 +59,24 @@ impl CloudClient {
     /// leaf SPKI ∈ [`crate::cert_pin::ACCOUNTS_SPKI_PINS`]. When that pin set is
     /// empty (pin provisioned at release time, §10.3 fail-safe) the config is
     /// equivalent to standard webpki — no regression vs. an unpinned client.
-    fn build_http() -> reqwest::blocking::Client {
-        reqwest::blocking::Client::builder()
+    fn build_http(base_url: &str) -> reqwest::blocking::Client {
+        let mut builder = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
-            .cookie_store(true) // 自动管理 session cookie
+            // Account cookies, passwords, license keys, and device proofs must
+            // never be replayed to a redirect target.
+            .redirect(reqwest::redirect::Policy::none())
+            // Authentication is deliberately owned by `session_cookie` below.
+            // A reqwest cookie jar would retain a second copy after logout and
+            // silently re-authenticate later requests even though
+            // `session_cookie` had been cleared.
             // Pass the bare ClientConfig: reqwest wraps it in Option internally
             // and downcasts to Option<rustls::ClientConfig> (passing Some(..) here
             // would double-wrap → "Unknown TLS backend").
-            .use_preconfigured_tls(crate::cert_pin::pinned_client_config())
-            .build()
-            .expect("build http client")
+            .use_preconfigured_tls(crate::cert_pin::pinned_client_config());
+        if crate::net::destination::is_local_network_url(base_url) {
+            builder = builder.no_proxy();
+        }
+        builder.build().expect("build http client")
     }
 
     /// 用持久化 session token 构造客户端 (sync-plugins 等跨进程调用路径)
@@ -278,12 +310,24 @@ impl CloudClient {
     /// 登出：先无条件清空本地 session，再 best-effort 通知 server。
     /// 网络失败不影响本地 token 清除，保证用户视角的"已登出"语义。
     pub fn logout(&mut self) -> Result<()> {
-        // Clear local session unconditionally before any network call.
+        // Take the credential so the in-memory client is logged out even if the
+        // request fails, while still authenticating the remote revocation call.
+        let session = self.session_cookie.take();
         // A network failure must not leave the client carrying a valid token
         // the user believes they've revoked (I-1 from production deepdive audit).
-        self.session_cookie = None;
         let url = format!("{}/api/v1/logout", self.base_url);
-        let _ = self.http.post(&url).send().map_err(http_err)?;
+        let response = self
+            .http
+            .post(&url)
+            .header_opt_cookie(session.as_deref())
+            .send()
+            .map_err(http_err)?;
+        if !response.status().is_success() {
+            return Err(VaultError::Crypto(format!(
+                "logout failed: status={}",
+                response.status()
+            )));
+        }
         Ok(())
     }
 
@@ -323,9 +367,6 @@ impl CloudClient {
 
         // Best-effort remote logout: swallow errors so local clear always wins.
         let _ = self.logout();
-        // Re-enforce local clear (logout already cleared, but make contract
-        // explicit + self-documenting for future maintainers).
-        self.session_cookie = None;
         Ok(())
     }
 
@@ -471,6 +512,18 @@ pub struct License {
     /// pro 插件清单 (pluginhub 下发)
     #[serde(default)]
     pub entitled_plugins: Vec<EntitledPlugin>,
+}
+
+impl License {
+    /// Stable identifier used by member state and entitlement rows.  Some
+    /// accounts deployments expose the domain license id separately from the
+    /// database row id; prefer it everywhere so login and restart restoration
+    /// cannot report two different identities for the same license.
+    pub fn canonical_id(&self) -> String {
+        self.license_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| self.id.to_string())
+    }
 }
 
 /// `POST /api/v1/member/activate` 响应 — 授权码激活成功后 cloud 下发的会员配置.
@@ -754,6 +807,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paid_plan_allowlist_fails_closed_for_unknown_and_free_plans() {
+        for plan in ["pro", "pro_plus", "enterprise"] {
+            assert!(plan_grants_paid(plan), "{plan} should grant Paid");
+        }
+        for plan in ["", "individual", "free", "paid", "PRO", "team"] {
+            assert!(!plan_grants_paid(plan), "{plan:?} must fail closed");
+        }
+    }
+
+    #[test]
+    fn current_paid_plan_rejects_expired_or_malformed_proof() {
+        assert!(current_plan_grants_paid("pro", None));
+        assert!(current_plan_grants_paid("enterprise", Some("  ")));
+        assert!(current_plan_grants_paid(
+            "pro_plus",
+            Some("2999-01-01T00:00:00Z")
+        ));
+        assert!(!current_plan_grants_paid(
+            "pro",
+            Some("2000-01-01T00:00:00Z")
+        ));
+        assert!(!current_plan_grants_paid("pro", Some("not-a-date")));
+        assert!(!current_plan_grants_paid(
+            "free",
+            Some("2999-01-01T00:00:00Z")
+        ));
+    }
+
+    #[test]
     fn client_builds_with_url() {
         let c = CloudClient::new("https://accounts.engi-stack.com");
         assert_eq!(c.base_url, "https://accounts.engi-stack.com");
@@ -833,6 +915,7 @@ mod tests {
         let lic: License = serde_json::from_str(json).unwrap();
         assert_eq!(lic.plan, "pro");
         assert_eq!(lic.license_key, "key-abc123");
+        assert_eq!(lic.canonical_id(), "42");
         assert!(lic.entitled_plugins.is_empty());
     }
 
@@ -1091,6 +1174,159 @@ mod tests {
             c.session_token().is_none(),
             "local session cleared unconditionally"
         );
+    }
+
+    #[test]
+    fn logout_authenticates_remote_revocation_with_captured_cookie() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            tx.send(String::from_utf8_lossy(&request).to_string())
+                .unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let mut client = CloudClient::with_session(format!("http://{addr}"), "session=secret");
+        client.logout().unwrap();
+        assert!(client.session_token().is_none());
+        let request = rx.recv().unwrap();
+        assert!(request.starts_with("POST /api/v1/logout "), "{request}");
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("cookie: session=secret")),
+            "logout request must carry the session cookie: {request}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn logout_rejects_non_success_status_but_still_clears_local_session() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let mut client = CloudClient::with_session(format!("http://{addr}"), "secret-session");
+        let error = client
+            .logout()
+            .expect_err("500 must not count as revocation");
+        assert!(error.to_string().contains("status=500"));
+        assert!(client.session_token().is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn logout_clears_the_only_in_memory_cookie_copy() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for response in [
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Set-Cookie: session=jar-secret; Path=/; HttpOnly\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: 49\r\n",
+                    "Connection: close\r\n\r\n",
+                    r#"{"id":7,"email":"user@example.test","plan":"pro"}"#
+                ),
+                concat!(
+                    "HTTP/1.1 500 Internal Server Error\r\n",
+                    "Content-Length: 0\r\n",
+                    "Connection: close\r\n\r\n"
+                ),
+                concat!(
+                    "HTTP/1.1 401 Unauthorized\r\n",
+                    "Content-Length: 0\r\n",
+                    "Connection: close\r\n\r\n"
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                tx.send(String::from_utf8_lossy(&request).to_string())
+                    .unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let mut client = CloudClient::new(format!("http://{addr}"));
+        client
+            .login("user@example.test", "not-a-real-password")
+            .unwrap();
+        assert!(
+            client.logout().is_err(),
+            "mock revocation intentionally fails"
+        );
+        assert!(client.session_token().is_none());
+        assert!(client.me().is_err());
+
+        let login_request = rx.recv().unwrap();
+        let logout_request = rx.recv().unwrap();
+        let post_logout_request = rx.recv().unwrap();
+        assert!(!login_request.to_ascii_lowercase().contains("cookie:"));
+        assert!(
+            logout_request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("cookie: session=jar-secret")),
+            "logout must authenticate the revocation: {logout_request}"
+        );
+        assert!(
+            !post_logout_request.to_ascii_lowercase().contains("cookie:"),
+            "cleared client must not be re-authenticated by a hidden cookie jar: {post_logout_request}"
+        );
+        server.join().unwrap();
     }
 
     // Edge: empty email / password 也走 HTTP request (业务校验由 server 端)
@@ -1384,6 +1620,7 @@ mod tests {
         }"#;
         let lic: License = serde_json::from_str(json).unwrap();
         assert_eq!(lic.vertical.as_deref(), Some("academic"));
+        assert_eq!(lic.canonical_id(), "7");
     }
 
     #[test]

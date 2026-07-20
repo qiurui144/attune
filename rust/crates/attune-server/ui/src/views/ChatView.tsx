@@ -34,6 +34,7 @@ import {
 } from '../hooks/useChat';
 import { patchSettings } from '../hooks/useSettings';
 import type { Message } from '../store/signals';
+import { isLlmConfigLocal, modelCatalogKey } from '../llmConfig';
 
 // 各 provider 已知可选模型（与 SettingsView 的 LLM_PRESETS 对齐）。
 // chip 内切换只改 model（同 provider / endpoint / key），跨 provider 走 Settings。
@@ -43,7 +44,6 @@ const PROVIDER_MODELS: Record<string, string[]> = {
   deepseek: ['deepseek-chat', 'deepseek-reasoner'],
   qwen: ['qwen-plus', 'qwen-turbo', 'qwen-max'],
   gemini: ['gemini-1.5-flash', 'gemini-1.5-pro'],
-  anthropic: ['claude-3-5-haiku-latest', 'claude-3-5-sonnet-latest'],
   attune_pro: [],
 };
 
@@ -129,11 +129,8 @@ function getCurrentModel(): string {
 function isLlmLocal(): boolean | null {
   const s = settings.value;
   if (!s) return null;
-  const llm = s.llm as { provider?: string } | undefined;
-  if (!llm?.provider) return null;
-  // cloud providers: openai / anthropic / gemini / deepseek / qwen / attune_pro / custom
-  const cloudProviders = ['openai', 'anthropic', 'gemini', 'deepseek', 'qwen', 'attune_pro', 'custom'];
-  return !cloudProviders.includes(llm.provider);
+  const llm = s.llm as { provider?: string; endpoint?: string } | undefined;
+  return isLlmConfigLocal(llm?.provider, llm?.endpoint);
 }
 
 // ── Chat 顶栏 ────────────────────────────────────────────────
@@ -171,13 +168,13 @@ function ChatHeader({ title, model }: { title: string; model: string }): JSX.Ele
 function ModelChip({ model }: { model: string }): JSX.Element {
   const open = useSignal(false);
   const s = settings.value;
-  const llm = (s?.llm as { provider?: string; model?: string } | undefined) ?? {};
+  const llm = (s?.llm as { provider?: string; model?: string; endpoint?: string } | undefined) ?? {};
   const provider = llm.provider ?? '';
   const currentModel = llm.model?.trim() || '';
 
   // 当前 provider 的候选模型 + 当前已配置模型（去重）
   const candidates = (() => {
-    const list = PROVIDER_MODELS[provider] ?? [];
+    const list = PROVIDER_MODELS[modelCatalogKey(provider, llm.endpoint ?? '')] ?? [];
     const set = new Set<string>(list);
     if (currentModel) set.add(currentModel);
     return [...set];
@@ -186,7 +183,7 @@ function ModelChip({ model }: { model: string }): JSX.Element {
   async function pickModel(m: string): Promise<void> {
     open.value = false;
     if (m === currentModel) return;
-    const ok = await patchSettings({ llm: { ...llm, model: m } });
+    const ok = await patchSettings({ llm: { model: m } });
     toast(ok ? 'success' : 'error',
       ok ? t('chat.model.switched', { model: m }) : t('chat.model.switch_failed'));
   }

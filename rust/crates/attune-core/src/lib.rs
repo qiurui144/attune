@@ -145,6 +145,7 @@ pub mod ui_runtime;
 // 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
 // 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod cloud_client;
+pub mod cloud_session;
 pub mod member_session;
 pub mod member_verifier;
 // Cloud device fingerprint — 授权码激活时绑定本机到 license。指纹字段顺序逐字节
@@ -189,6 +190,7 @@ pub mod memory_consolidation;
 pub mod monitoring; // 信息监控闭环: watch / digest / triage / dedup / deep-research (spec 2026-06-19)
 pub mod net;
 pub mod ocr; // v0.6.0-rc.3: pub for ai_stack status API
+pub(crate) mod ocr_image_codec; // bounded, model-independent raster → Scheduler PNG adapter
 pub mod office_job_queue;
 pub mod ollama_setup;
 pub mod organizer;

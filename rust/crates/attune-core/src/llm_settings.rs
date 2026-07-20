@@ -11,6 +11,17 @@ use serde_json::{json, Value};
 /// vault meta 中 app_settings 的 key — 被 attune-server routes/settings.rs 和
 /// routes/member.rs 共享，集中在此避免两处硬编码漂移。
 pub const SETTINGS_META_KEY: &str = "app_settings";
+pub const MEMBER_GATEWAY_OWNER: &str = "attune_membership";
+const MANAGED_BY_KEY: &str = "managed_by";
+const MANAGED_MODEL_KEY: &str = "managed_default_model";
+
+pub fn membership_gateway_is_managed(settings: &Value) -> bool {
+    settings
+        .get("llm")
+        .and_then(|llm| llm.get(MANAGED_BY_KEY))
+        .and_then(Value::as_str)
+        == Some(MEMBER_GATEWAY_OWNER)
+}
 
 /// 判断 gateway 是否应该自动应用。
 ///
@@ -19,6 +30,11 @@ pub const SETTINGS_META_KEY: &str = "app_settings";
 ///
 /// "未配置"判定：`llm` 字段不存在，或其 `api_key` 与 `endpoint` 均为 null / 空字符串。
 pub fn gateway_should_apply(settings: &Value) -> bool {
+    // A membership-owned credential must be replaceable on token rotation and
+    // account switching. User-owned BYOK settings remain untouched.
+    if membership_gateway_is_managed(settings) {
+        return true;
+    }
     let llm = match settings.get("llm") {
         Some(v) if v.is_object() => v,
         // llm 字段缺失或不是对象 → 视为未配置
@@ -54,6 +70,11 @@ pub fn merge_gateway_into_settings(
     token: &str,
     default_model: Option<&str>,
 ) -> Value {
+    let replace_managed_model = membership_gateway_is_managed(&settings)
+        && settings
+            .pointer(&format!("/llm/{MANAGED_MODEL_KEY}"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if !settings.is_object() {
         settings = json!({});
     }
@@ -68,6 +89,7 @@ pub fn merge_gateway_into_settings(
             llm_obj.insert("provider".into(), json!("openai_compat"));
             llm_obj.insert("endpoint".into(), json!(endpoint));
             llm_obj.insert("api_key".into(), json!(token));
+            llm_obj.insert(MANAGED_BY_KEY.into(), json!(MEMBER_GATEWAY_OWNER));
             // Bug-1 fix: 只在用户未配置 model 时写入 cloud 默认 model。
             // "未配置" 判定与 gateway_should_apply 内的字段判定一致 — None / null / 空字符串。
             if let Some(dm) = default_model.filter(|s| !s.is_empty()) {
@@ -79,13 +101,72 @@ pub fn merge_gateway_into_settings(
                         _ => false,
                     })
                     .unwrap_or(true);
-                if model_empty {
+                if model_empty || replace_managed_model {
                     llm_obj.insert("model".into(), json!(dm));
+                    llm_obj.insert(MANAGED_MODEL_KEY.into(), json!(true));
                 }
+            } else if replace_managed_model {
+                llm_obj.remove("model");
+                llm_obj.insert(MANAGED_MODEL_KEY.into(), json!(false));
+            }
+            if !llm_obj.contains_key(MANAGED_MODEL_KEY) {
+                llm_obj.insert(MANAGED_MODEL_KEY.into(), json!(false));
             }
         }
     }
     settings
+}
+
+/// Remove only credentials installed by the membership gateway. BYOK settings
+/// have no ownership marker and are returned unchanged.
+pub fn remove_membership_gateway_from_settings(mut settings: Value) -> (Value, bool) {
+    if !membership_gateway_is_managed(&settings) {
+        return (settings, false);
+    }
+    if let Some(llm) = settings.get_mut("llm").and_then(Value::as_object_mut) {
+        let managed_model = llm
+            .get(MANAGED_MODEL_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        llm.remove("api_key");
+        llm.remove("endpoint");
+        llm.remove("provider");
+        llm.remove(MANAGED_BY_KEY);
+        llm.remove(MANAGED_MODEL_KEY);
+        if managed_model {
+            llm.remove("model");
+        }
+    }
+    (settings, true)
+}
+
+/// Compatibility cleanup for settings written before membership provenance was
+/// introduced. Only an exact endpoint + token match from the authenticated
+/// cloud account is accepted, so an unrelated BYOK credential is never erased.
+pub fn remove_legacy_membership_gateway_match(
+    mut settings: Value,
+    endpoint: &str,
+    token: &str,
+) -> (Value, bool) {
+    if membership_gateway_is_managed(&settings) || endpoint.is_empty() || token.is_empty() {
+        return (settings, false);
+    }
+    let matches = settings
+        .get("llm")
+        .and_then(Value::as_object)
+        .is_some_and(|llm| {
+            llm.get("endpoint").and_then(Value::as_str) == Some(endpoint)
+                && llm.get("api_key").and_then(Value::as_str) == Some(token)
+        });
+    if !matches {
+        return (settings, false);
+    }
+    if let Some(llm) = settings.get_mut("llm").and_then(Value::as_object_mut) {
+        llm.remove("api_key");
+        llm.remove("endpoint");
+        llm.remove("provider");
+    }
+    (settings, true)
 }
 
 #[cfg(test)]
@@ -100,6 +181,7 @@ mod tests {
         assert_eq!(out["llm"]["provider"], "openai_compat");
         assert_eq!(out["llm"]["endpoint"], "https://gw/v1");
         assert_eq!(out["llm"]["api_key"], "sk-abc");
+        assert_eq!(out["llm"]["managed_by"], MEMBER_GATEWAY_OWNER);
     }
 
     #[test]
@@ -194,6 +276,76 @@ mod tests {
             out["llm"].get("model").is_none(),
             "空串 default_model 不应被写入(防 model='' 触发 new-api 400)"
         );
+    }
+
+    #[test]
+    fn managed_gateway_is_replaced_on_account_switch() {
+        let first = merge_gateway_into_settings(
+            json!({}),
+            "https://gateway-a.example/v1",
+            "token-a",
+            Some("model-a"),
+        );
+        assert!(gateway_should_apply(&first));
+        let second = merge_gateway_into_settings(
+            first,
+            "https://gateway-b.example/v1",
+            "token-b",
+            Some("model-b"),
+        );
+        assert_eq!(second["llm"]["endpoint"], "https://gateway-b.example/v1");
+        assert_eq!(second["llm"]["api_key"], "token-b");
+        assert_eq!(second["llm"]["model"], "model-b");
+    }
+
+    #[test]
+    fn logout_removes_only_membership_owned_gateway() {
+        let managed = merge_gateway_into_settings(
+            json!({"theme": "dark"}),
+            "https://gateway.example/v1",
+            "member-token",
+            Some("managed-model"),
+        );
+        let (cleared, changed) = remove_membership_gateway_from_settings(managed);
+        assert!(changed);
+        assert!(cleared["llm"].get("api_key").is_none());
+        assert!(cleared["llm"].get("endpoint").is_none());
+        assert!(cleared["llm"].get("model").is_none());
+        assert_eq!(cleared["theme"], "dark");
+
+        let byok = json!({"llm": {"endpoint": "https://api.openai.com/v1", "api_key": "byok"}});
+        let (untouched, changed) = remove_membership_gateway_from_settings(byok.clone());
+        assert!(!changed);
+        assert_eq!(untouched, byok);
+    }
+
+    #[test]
+    fn logout_migrates_only_an_exact_legacy_gateway_match() {
+        let legacy = json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://gateway.example/v1",
+                "api_key": "member-token",
+                "model": "user-selected-model"
+            }
+        });
+        let (cleared, changed) = remove_legacy_membership_gateway_match(
+            legacy.clone(),
+            "https://gateway.example/v1",
+            "member-token",
+        );
+        assert!(changed);
+        assert!(cleared["llm"].get("api_key").is_none());
+        assert!(cleared["llm"].get("endpoint").is_none());
+        assert_eq!(cleared["llm"]["model"], "user-selected-model");
+
+        let (untouched, changed) = remove_legacy_membership_gateway_match(
+            legacy.clone(),
+            "https://gateway.example/v1",
+            "different-token",
+        );
+        assert!(!changed);
+        assert_eq!(untouched, legacy);
     }
 
     // ── gateway_should_apply ─────────────────────────────────────────────────

@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use attune_core::ingest::git::{GitConnector, GitSourceConfig};
 use attune_core::ingest::{
-    ingest_document_replacing_with_options, ingest_document_with_options, DocumentSink,
-    IngestOutcome, RawDocument, SourceConnector,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    retryable_degraded_marker, DocumentSink, IngestOutcome, RawDocument, SourceConnector,
 };
 use attune_core::net::url_guard;
 use attune_core::store::git_sources::GitSourceRow;
@@ -152,6 +152,15 @@ pub fn sync_git_source(
             Ok(IngestOutcome::Updated { item_id, .. }) => {
                 let _ = store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id);
                 updated_files += 1;
+            }
+            Ok(IngestOutcome::Degraded {
+                item_id, reason, ..
+            }) => {
+                let retry_marker = retryable_degraded_marker(&marker);
+                let _ = store.upsert_indexed_file(dir_id, &source_ref, &retry_marker, &item_id);
+                errors.push(format!(
+                    "{source_ref}: retryable degraded extraction: {reason}"
+                ));
             }
             Ok(IngestOutcome::Duplicate { .. }) | Ok(IngestOutcome::Skipped { .. }) => {
                 skipped_files += 1;

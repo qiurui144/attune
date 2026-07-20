@@ -29,10 +29,10 @@ Attune 的生产路径只有两类：
    - 月费会员，token 配额由 attune 计费追踪
    - Gateway 路由到 OpenAI / Anthropic / Gemini（对用户透明）
 2. **BYOK：用户已有的 API key**
-   - OpenAI（ChatGPT Plus/Team 用户）
-   - Anthropic（Claude Pro 用户）
-   - Gemini（Gemini Advanced / Google AI Studio）
+   - OpenAI API（需单独开通 API 计费并创建 API Key；ChatGPT 订阅不包含 API 用量）
+   - Gemini OpenAI-compatible API（Google AI Studio API Key）
    - DeepSeek / Qwen / 其他 OpenAI 兼容
+   - BYOK 端点必须提供 OpenAI-compatible 协议；当前不直连 Anthropic 原生 Messages API
 3. **Edge scheduler**（本机或局域网）
    - 示例：`http://127.0.0.1:8090`
    - Attune 使用 scheduler-native KB task 和 OpenAI-compatible chat 入口。

@@ -121,6 +121,7 @@ fn apply_connection_pragmas(conn: &Connection, on_disk: bool) -> Result<()> {
         "PRAGMA foreign_keys=ON;\
          PRAGMA busy_timeout={busy_timeout_ms};\
          PRAGMA synchronous={synchronous};\
+         PRAGMA secure_delete=ON;\
          PRAGMA temp_store=MEMORY;\
          PRAGMA cache_size=-{cache_kib};"
     );
@@ -1508,7 +1509,8 @@ impl Store {
 
     pub fn set_meta(&self, key: &str, value: &[u8]) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
+            "INSERT INTO vault_meta (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
         )?;
         Ok(())
@@ -1524,6 +1526,13 @@ impl Store {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub fn delete_meta(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM vault_meta WHERE key = ?1", params![key])?
+            > 0)
     }
 
     pub fn has_meta(&self, key: &str) -> Result<bool> {
@@ -1556,14 +1565,53 @@ impl Store {
     /// 使用 unchecked_transaction 与 dequeue_embeddings/append_conversation_turn 保持一致，
     /// 避免与 rusqlite 内部事务状态机冲突。
     pub fn set_meta_batch(&self, entries: &[(&str, &[u8])]) -> Result<()> {
+        self.mutate_meta_batch(entries, &[])
+    }
+
+    /// Atomically upsert and delete metadata rows.
+    ///
+    /// Credential persistence uses this to ensure an endpoint/config snapshot
+    /// and its encrypted secret can never be torn across a crash. Deletes are
+    /// applied before upserts inside the same transaction; an upsert wins if a
+    /// caller intentionally includes the same key in both slices.
+    pub fn mutate_meta_batch(&self, entries: &[(&str, &[u8])], deletes: &[&str]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        for key in deletes {
+            tx.execute("DELETE FROM vault_meta WHERE key = ?1", params![key])?;
+        }
         for (key, value) in entries {
             tx.execute(
-                "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key, value],
+                "INSERT INTO vault_meta (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Physically rewrite the database after migrating legacy plaintext
+    /// credentials. `secure_delete=ON` scrubs changed cells; the checked WAL
+    /// truncate and VACUUM remove historical frames and free-page remnants.
+    pub fn secure_compact(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA secure_delete=ON;")?;
+        let busy: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(VaultError::InvalidInput(
+                "secure metadata migration is waiting for SQLite readers".to_string(),
+            ));
+        }
+        self.conn.execute_batch("VACUUM;")?;
+        let busy: i64 = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err(VaultError::InvalidInput(
+                "secure metadata migration could not truncate the SQLite WAL".to_string(),
+            ));
+        }
         Ok(())
     }
 

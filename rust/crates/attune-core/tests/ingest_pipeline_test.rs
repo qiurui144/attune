@@ -170,17 +170,19 @@ fn document_parse_failure_ingests_metadata_only_fallback() {
     let outcome = ingest_document_with_options(&store, &dek, &doc, &IngestOptions::default())
         .expect("metadata fallback should keep the source searchable");
     let item_id = match outcome {
-        IngestOutcome::Inserted {
+        IngestOutcome::Degraded {
             item_id,
             chunks_enqueued,
+            reason,
         } => {
             assert!(
                 chunks_enqueued >= 1,
                 "metadata-only fallback must enqueue at least one searchable chunk"
             );
+            assert!(!reason.is_empty());
             item_id
         }
-        other => panic!("expected Inserted metadata-only item, got {other:?}"),
+        other => panic!("expected retryable Degraded metadata-only item, got {other:?}"),
     };
 
     let item = store

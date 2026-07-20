@@ -43,14 +43,15 @@ Endpoint：https://gateway.engi-stack.com/v1
 
 ### BYOK（用你自己的 API Key）
 
-如果你已有以下付费账号，对应 Plan 通常附带 API 额度：
+填写开发者 API 账号签发的 API Key；网页会员订阅不等同于 API 额度。BYOK endpoint 必须兼容 OpenAI chat 协议。
 
 | 账号类型 | API 地址 |
 |---------|---------|
-| OpenAI（ChatGPT Plus / Team） | `https://api.openai.com/v1` |
-| Anthropic（Claude Pro） | `https://api.anthropic.com` |
-| Google（Gemini Advanced） | `https://generativelanguage.googleapis.com` |
+| OpenAI API（独立 API Key 与计费） | `https://api.openai.com/v1` |
+| Google AI Studio（Gemini OpenAI compatibility） | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | DeepSeek / Qwen / 兼容 OpenAI | 服务商提供的 Base URL |
+
+Attune 当前不把 Anthropic 原生 Messages API 当作 OpenAI-compatible endpoint；需要 Anthropic 时使用 Attune Pro gateway 或自有兼容网关。
 
 ### Edge scheduler（本地/边缘高性能）
 

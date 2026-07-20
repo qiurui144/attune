@@ -20,7 +20,7 @@ pub use git::GitSourceConfig;
 pub use pipeline::{
     enqueue_content_embeddings, ingest_document, ingest_document_replacing,
     ingest_document_replacing_with_options, ingest_document_with_options,
-    ingest_document_with_profile, IngestOptions, IngestOutcome,
+    ingest_document_with_profile, retryable_degraded_marker, IngestOptions, IngestOutcome,
 };
 pub use rss::{
     parse_feed_bytes, FeedFetcher, FeedHttpResponse, ParsedRssEntry, RealFeedFetcher, RssConnector,

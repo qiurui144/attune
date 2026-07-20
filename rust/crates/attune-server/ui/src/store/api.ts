@@ -142,6 +142,27 @@ export async function apiCall<T>(
   throw new NetworkError(new Error('retry exhausted'), reqId);
 }
 
+/** Fetch a binary response once. Binary synthesis is user-triggered and is
+ * retried explicitly by the UI, avoiding duplicate non-idempotent work. */
+export async function apiBlob(
+  path: string,
+  options: ApiCallOptions = {},
+): Promise<Blob> {
+  const reqId = genId();
+  let res: Response;
+  try {
+    res = await fetchWithAuth(path, { ...options, retry: RETRY_POLICIES.destructive }, reqId);
+  } catch (error) {
+    throw new NetworkError(error, reqId);
+  }
+  if (res.ok) return res.blob();
+  if (res.status === 401) {
+    clearToken();
+    throw new ApiError(401, 'unauthorized', reqId);
+  }
+  throw new ApiError(res.status, await res.text(), reqId);
+}
+
 async function fetchWithAuth(
   path: string,
   options: ApiCallOptions,

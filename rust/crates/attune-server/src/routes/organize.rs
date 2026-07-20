@@ -87,6 +87,7 @@ pub async fn analyze(
     //    规范锁序 fulltext → vectors → vault:vectors 必须在 vault 之前取。
     //    无向量的 item 不丢 —— ItemView.embedding=None,引擎会把它归入 noise。
     let mut items: Vec<ItemView> = Vec::with_capacity(item_ids.len());
+    let mut contains_l0 = false;
     {
         let vecs = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -96,6 +97,11 @@ pub async fn analyze(
             let Ok(Some(item)) = vault.store().get_item(&dek, id) else {
                 continue;
             };
+            contains_l0 |= vault
+                .store()
+                .get_item_privacy_tier(id)
+                .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                .unwrap_or(true);
             let snippet: String = item.content.chars().take(200).collect();
             let embedding = vecs_ref.and_then(|v| v.get_vector(id));
             items.push(ItemView {
@@ -122,12 +128,7 @@ pub async fn analyze(
         .map(|g| g.is_paid())
         .unwrap_or(false);
     let llm: Option<std::sync::Arc<dyn LlmProvider>> = if is_paid {
-        state
-            .llm
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .cloned()
+        Some(crate::routes::privacy::governed_llm(&state, contains_l0)?)
     } else {
         None
     };

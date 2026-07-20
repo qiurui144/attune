@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document_replacing_with_options, ingest_document_with_options, DocumentSink,
-    IngestOutcome, RawDocument, SourceConnector,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    retryable_degraded_marker, DocumentSink, IngestOutcome, RawDocument, SourceConnector,
 };
 use attune_core::scanner_webdav::{WebDavConfig, WebDavConnector};
 
@@ -129,6 +129,15 @@ pub fn sync_webdav_dir(
             Ok(IngestOutcome::Updated { item_id, .. }) => {
                 let _ = store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id);
                 updated_files += 1;
+            }
+            Ok(IngestOutcome::Degraded {
+                item_id, reason, ..
+            }) => {
+                let retry_marker = retryable_degraded_marker(&etag);
+                let _ = store.upsert_indexed_file(dir_id, &source_ref, &retry_marker, &item_id);
+                errors.push(format!(
+                    "{filename}: retryable degraded extraction: {reason}"
+                ));
             }
             Ok(IngestOutcome::Duplicate { .. }) | Ok(IngestOutcome::Skipped { .. }) => {
                 skipped_files += 1;

@@ -8,15 +8,14 @@
 //! `MemberState::is_paid()` → `403 { code: "membership-required" }` (parity with doc-intel).
 //! The gate is NOT UI-only — a direct request is rejected the same way.
 //!
-//! **Privacy (I1/I2)**: generation sends content to the cloud LLM, so it requires the user
-//! to have enabled cloud-LLM egress (`privacy.llm`), and the provider is PII-redacted. The
-//! writing engine itself redacts again via the hardened helper (defense in depth).
+//! **Privacy (I1/I2)**: local providers stay local. Cloud generation requires the user to have
+//! enabled cloud-LLM egress (`privacy.llm`), rejects L0 content, and receives a PII-redacted
+//! prompt. The writing engine itself redacts again via the hardened helper (defense in depth).
 //!
 //! **No secret leak (CLAUDE.md §1.4)**: `token_bill` carries only counts/USD/model-names.
 
 use crate::error::AppError;
 use crate::state::SharedState;
-use attune_core::llm::LlmProvider;
 use attune_core::writing::draft::{self, DraftRequest};
 use attune_core::writing::outline::{self, OutlineResult};
 use attune_core::writing::rewrite::{self, RewriteOutput, RewriteRequest};
@@ -30,7 +29,6 @@ use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 type AppResult<T> = std::result::Result<T, AppError>;
 
@@ -65,21 +63,6 @@ fn vault_locked() -> AppError {
         "vault is locked",
     )
 }
-fn cloud_llm_disabled() -> AppError {
-    werr(
-        axum::http::StatusCode::FORBIDDEN,
-        "cloud-llm-disabled",
-        "cloud LLM is disabled in Privacy settings; enable it to use this operation",
-    )
-}
-fn llm_unavailable() -> AppError {
-    werr(
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "llm-unavailable",
-        "no LLM provider is configured",
-    )
-}
-
 fn is_paid(state: &SharedState) -> bool {
     state
         .member_state
@@ -97,49 +80,33 @@ fn enforce_member_gate(state: &SharedState) -> AppResult<()> {
     }
 }
 
-/// Has the user enabled cloud-LLM egress in Privacy settings? (parity with documents.rs I2).
-fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
-    let bytes = match state.vault.lock() {
-        Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
-        Err(_) => None,
-    };
-    bytes
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|s| {
-            s.get("privacy")
-                .and_then(|p| p.get("llm"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
-}
-
-/// Resolve the tier-3 cloud LLM provider, enforcing privacy egress (I2) + PII redact (I1).
-fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
-    if !cloud_llm_egress_enabled(state) {
-        return Err(cloud_llm_disabled());
-    }
-    let inner = state.llm().ok_or_else(llm_unavailable)?;
-    Ok(Arc::new(
-        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
-    ))
-}
-
 /// Load KB item contents (decrypted) into [`SourceMaterial`]. Missing items are skipped (the
 /// engine grounds against whatever it gets; a draft with zero resolvable items + empty outline
-/// fails downstream with `no-source-material`).
-fn load_sources(state: &SharedState, item_ids: &[String]) -> AppResult<Vec<SourceMaterial>> {
+/// fails downstream with `no-source-material`). The L0 bit is captured under the
+/// same vault lock so the later cloud boundary can fail closed without holding a
+/// database lock during inference.
+fn load_sources(
+    state: &SharedState,
+    item_ids: &[String],
+) -> AppResult<(Vec<SourceMaterial>, bool)> {
     if item_ids.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], false));
     }
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
     let mut out = Vec::new();
+    let mut contains_l0 = false;
     for id in item_ids {
         if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
             out.push(SourceMaterial::new(id.clone(), item.content));
+            contains_l0 |= vault
+                .store()
+                .get_item_privacy_tier(id)
+                .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                .unwrap_or(true);
         }
     }
-    Ok(out)
+    Ok((out, contains_l0))
 }
 
 // ─────────────────────────── request bodies ───────────────────────────
@@ -212,9 +179,8 @@ pub async fn draft_writing(
     Json(body): Json<DraftBody>,
 ) -> AppResult<Json<WritingResult>> {
     enforce_member_gate(&state)?;
-    let llm = cloud_llm_or_refuse(&state)?;
-
-    let mut sources = load_sources(&state, &body.item_ids)?;
+    let (mut sources, contains_l0) = load_sources(&state, &body.item_ids)?;
+    let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
     for ex in &body.extra_sources {
         // External/user-supplied: empty item_id ⇒ engine grounds it as External kind.
         sources.push(SourceMaterial::new(
@@ -239,7 +205,7 @@ pub async fn rewrite_writing(
     Json(body): Json<RewriteBody>,
 ) -> AppResult<Json<WritingResult>> {
     enforce_member_gate(&state)?;
-    let llm = cloud_llm_or_refuse(&state)?;
+    let llm = crate::routes::privacy::governed_llm(&state, false)?;
 
     let output = match body.output_mode.as_deref() {
         Some("review") => RewriteOutput::Review,
@@ -284,10 +250,10 @@ pub async fn outline_writing(
         let result = outline::outline_reverse(draft_text).map_err(map_writing_err)?;
         return Ok(Json(result));
     }
-    // Forward: generation → tier-3 gate + cloud LLM.
+    // Forward: generation → tier-3 member gate + governed LLM boundary.
     enforce_member_gate(&state)?;
-    let llm = cloud_llm_or_refuse(&state)?;
-    let sources = load_sources(&state, &body.item_ids)?;
+    let (sources, contains_l0) = load_sources(&state, &body.item_ids)?;
+    let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
     let result =
         outline::outline_forward(llm.as_ref(), &body.topic, &sources).map_err(map_writing_err)?;
     Ok(Json(result))
@@ -370,9 +336,8 @@ pub async fn synthesis_writing(
     Json(body): Json<SynthesisBody>,
 ) -> AppResult<Json<WritingResult>> {
     enforce_member_gate(&state)?;
-    let llm = cloud_llm_or_refuse(&state)?;
-
-    let mut sources = load_sources(&state, &body.item_ids)?;
+    let (mut sources, contains_l0) = load_sources(&state, &body.item_ids)?;
+    let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
     for ex in &body.extra_sources {
         sources.push(SourceMaterial::new(
             ex.external_ref.clone(),

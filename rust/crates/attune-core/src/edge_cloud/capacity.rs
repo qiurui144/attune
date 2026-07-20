@@ -154,6 +154,8 @@ impl HttpCapacityClient {
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .connect_timeout(timeout)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         HttpCapacityClient {
@@ -163,7 +165,12 @@ impl HttpCapacityClient {
     }
 
     fn get_models(&self) -> Option<ModelsResponse> {
-        let url = format!("{}/models", self.base_url);
+        let Some(url) =
+            crate::net::destination::join_local_scheduler_url(&self.base_url, "/models")
+        else {
+            log::warn!("capacity model probe blocked: scheduler endpoint is not a safe local URL");
+            return None;
+        };
         let resp = match self.client.get(&url).send() {
             Ok(r) => r,
             Err(e) => {
@@ -188,7 +195,12 @@ impl HttpCapacityClient {
     }
 
     fn get_memory_headroom_mb(&self) -> u32 {
-        let url = format!("{}/capacity", self.base_url);
+        let Some(url) =
+            crate::net::destination::join_local_scheduler_url(&self.base_url, "/capacity")
+        else {
+            log::warn!("capacity memory probe blocked: scheduler endpoint is not a safe local URL");
+            return 0;
+        };
         let resp = match self.client.get(&url).send() {
             Ok(r) => r,
             Err(e) => {
@@ -395,6 +407,22 @@ mod tests {
     fn failing_probe_yields_unknown() {
         let p = MockCapacityProbe::failing();
         assert_eq!(p.query("any").state, CapacityState::Unknown);
+    }
+
+    #[test]
+    fn http_probe_rejects_ambiguous_scheduler_base_before_transport() {
+        for endpoint in [
+            "http://user@127.0.0.1:8090",
+            "http://127.0.0.1:8090/admin?target=/models",
+            "http://169.254.169.254/latest",
+        ] {
+            let probe = HttpCapacityClient::with_base(endpoint, Duration::from_millis(10));
+            assert_eq!(
+                probe.query("embedding-int8"),
+                CapacitySignal::unknown(),
+                "endpoint={endpoint}"
+            );
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
  */
 import { api } from '../store/api';
 import { t } from '../i18n';
+import { loadSettings } from './useSettings';
 import {
   memberState,
   memberVertical,
@@ -236,6 +237,7 @@ export async function memberLoginPassword(
     const resp = await api.post<MemberLoginResp>('/member/login-password', body);
     await loadMemberState();
     await loadSettingsLocks();
+    await loadSettings();
     // GAP-B: remember the cloud-issued vertical for display (Marketplace "current
     // scene" + login toast). vertical is UI copy only (never a gate); the client
     // only relays the cloud value, it never self-reports one.
@@ -259,6 +261,7 @@ export async function memberActivateLicense(licenseKey: string): Promise<MemberA
     });
     await loadMemberState();
     await loadSettingsLocks();
+    await loadSettings();
     memberVertical.value = resp.vertical ?? null;
     return {
       ok: true,
@@ -299,6 +302,7 @@ export async function memberLogout(): Promise<boolean> {
     };
     memberVertical.value = null;
     await loadSettingsLocks();
+    await loadSettings();
     return true;
   } catch {
     return false;

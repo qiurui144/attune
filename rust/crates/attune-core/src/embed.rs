@@ -1,5 +1,8 @@
 // npu-vault/crates/vault-core/src/embed.rs
 
+use crate::edge_cloud::scheduler::{
+    SchedulerJobState, SchedulerJobStatus, SchedulerKbTaskResponse,
+};
 use crate::error::{Result, VaultError};
 use serde::Deserialize;
 use serde_json::Value;
@@ -87,6 +90,8 @@ impl OllamaProvider {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client"),
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -247,12 +252,16 @@ struct OpenAiEmbeddingDatum {
 
 impl OpenAiEmbeddingProvider {
     pub fn new(endpoint: &str, api_key: &str, model: &str, dims: usize) -> Self {
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        let mut client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none());
+        if crate::net::destination::is_local_network_url(&endpoint) {
+            client = client.no_proxy();
+        }
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .expect("HTTP client"),
-            endpoint: endpoint.trim_end_matches('/').to_string(),
+            client: client.build().expect("HTTP client"),
+            endpoint,
             api_key: api_key.to_string(),
             model: model.to_string(),
             dims,
@@ -384,6 +393,8 @@ impl LocalSchedulerEmbeddingProvider {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client"),
             base_url: base,
@@ -594,7 +605,18 @@ impl LocalSchedulerEmbeddingProvider {
         input: Vec<String>,
         poll_timeout: Duration,
     ) -> Result<Value> {
-        let submit_url = format!("{}/kb/tasks/{}", base_url, task);
+        crate::edge_cloud::scheduler::validate_path_segment("task", &task)?;
+        let submit_path = format!("/kb/tasks/{task}");
+        let submit_url = crate::net::destination::join_local_scheduler_url(
+            &base_url,
+            &submit_path,
+        )
+        .ok_or_else(|| {
+            VaultError::LlmUnavailable(
+                "local scheduler embedding endpoint must use an unambiguous localhost, loopback, or private IP URL"
+                    .to_string(),
+            )
+        })?;
         let body = serde_json::json!({"input": input});
         let resp = client
             .post(&submit_url)
@@ -616,14 +638,33 @@ impl LocalSchedulerEmbeddingProvider {
                 "local scheduler embed submit response: {e}: {text}"
             ))
         })?;
-        if status.as_u16() == 202 || value.get("job_id").is_some() {
-            let job_id = value
-                .get("job_id")
-                .and_then(|v| v.as_str())
+        let mut submit_response: SchedulerKbTaskResponse = serde_json::from_value(value.clone())
+            .map_err(|e| {
+                VaultError::LlmUnavailable(format!(
+                    "local scheduler embed submit response contract: {e}: {text}"
+                ))
+            })?;
+        submit_response.http_status = Some(status.as_u16());
+        submit_response.validate_submission(false, "local scheduler embed")?;
+        let submit_state = submit_response.normalized_state();
+        if submit_state == SchedulerJobState::Failed {
+            return Err(VaultError::LlmUnavailable(format!(
+                "local scheduler embed task failed: {value}"
+            )));
+        }
+        if submit_state != SchedulerJobState::Succeeded
+            && (status.as_u16() == 202 || submit_response.job_id.is_some())
+        {
+            let job_id = submit_response
+                .job_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|job_id| !job_id.is_empty())
                 .ok_or_else(|| {
                     VaultError::LlmUnavailable("local scheduler embed missing job_id".into())
                 })?
                 .to_string();
+            crate::edge_cloud::scheduler::validate_path_segment("job_id", &job_id)?;
             let deadline = Instant::now() + poll_timeout;
             loop {
                 if Instant::now() >= deadline {
@@ -633,7 +674,14 @@ impl LocalSchedulerEmbeddingProvider {
                     )));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                let job_url = format!("{base_url}/jobs/{job_id}");
+                let job_path = format!("/jobs/{job_id}");
+                let job_url =
+                    crate::net::destination::join_local_scheduler_url(&base_url, &job_path)
+                        .ok_or_else(|| {
+                            VaultError::LlmUnavailable(
+                                "local scheduler embedding endpoint became invalid".to_string(),
+                            )
+                        })?;
                 let resp = client.get(&job_url).send().await.map_err(|e| {
                     VaultError::LlmUnavailable(format!("local scheduler embed poll: {e}"))
                 })?;
@@ -649,14 +697,21 @@ impl LocalSchedulerEmbeddingProvider {
                         "local scheduler embed job response: {e}: {text}"
                     ))
                 })?;
-                match value.get("status").and_then(|v| v.as_str()).unwrap_or("") {
-                    "done" => break,
-                    "error" | "expired" | "canceled" => {
+                let job: SchedulerJobStatus =
+                    serde_json::from_value(value.clone()).map_err(|e| {
+                        VaultError::LlmUnavailable(format!(
+                            "local scheduler embed job response contract: {e}: {text}"
+                        ))
+                    })?;
+                match job.normalized_state() {
+                    SchedulerJobState::Succeeded => break,
+                    SchedulerJobState::Failed => {
                         return Err(VaultError::LlmUnavailable(format!(
-                            "local scheduler embed job failed: {value}"
+                            "local scheduler embed job failed: {}",
+                            job.failure_detail().unwrap_or(&job.status)
                         )));
                     }
-                    _ => {}
+                    SchedulerJobState::Waiting => {}
                 }
             }
         }
@@ -719,6 +774,13 @@ fn env_usize_any(keys: &[&str], default: usize) -> usize {
 
 impl EmbeddingProvider for LocalSchedulerEmbeddingProvider {
     fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+        if !crate::net::destination::is_safe_local_scheduler_url(&self.base_url) {
+            return Err(VaultError::LlmUnavailable(
+                "local scheduler embedding endpoint must use an unambiguous localhost, loopback, or private IP URL"
+                    .to_string(),
+            ));
+        }
+        crate::edge_cloud::scheduler::validate_path_segment("task", &self.task)?;
         let mut empty_indices = Vec::new();
         let mut raw_non_empty: Vec<String> = Vec::new();
         for (i, t) in texts.iter().enumerate() {
@@ -820,7 +882,17 @@ impl EmbeddingProvider for LocalSchedulerEmbeddingProvider {
     }
 
     fn is_available(&self) -> bool {
-        let url = format!("{}/models/{}", self.base_url, self.model);
+        if !crate::net::destination::is_safe_local_scheduler_url(&self.base_url)
+            || crate::edge_cloud::scheduler::validate_path_segment("model", &self.model).is_err()
+        {
+            return false;
+        }
+        let model_path = format!("/models/{}", self.model);
+        let Some(url) =
+            crate::net::destination::join_local_scheduler_url(&self.base_url, &model_path)
+        else {
+            return false;
+        };
         let client = self.client.clone();
         embed_block_on(async move {
             let resp = client.get(&url).send().await.map_err(|e| {
@@ -1187,6 +1259,135 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_embedding_rejects_completed_job_with_error_payload() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let (status, body) = if request_index == 0 {
+                    (
+                        "202 Accepted",
+                        r#"{"job_id":"job_error","status":"queued"}"#,
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"job_id":"job_error","status":"done","error":"OOM","outputs":{"data":[{"embedding":[0.1,0.2]}]}}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            &format!("http://127.0.0.1:{port}"),
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        let error = provider
+            .embed(&["must fail closed"])
+            .expect_err("a completed job with an error payload must not return vectors");
+        assert!(error.to_string().contains("OOM"), "error={error}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn local_scheduler_embedding_rejects_200_waiting_or_unknown_without_job_id() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        for pending_status in ["queued", "running", "future_scheduler_state"] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let _ = read_http_request(&mut stream);
+                let body = serde_json::json!({
+                    "status": pending_status,
+                    "outputs": {}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+
+            let endpoint = format!("http://127.0.0.1:{port}");
+            let provider = LocalSchedulerEmbeddingProvider::new(
+                &endpoint,
+                "kb.query.embed",
+                "embedding-int8",
+                4,
+                1_000,
+            );
+            let error = provider
+                .embed(&["malformed pending response"])
+                .expect_err("200 waiting/unknown response without job_id must fail closed");
+            assert!(
+                error.to_string().contains("without job_id"),
+                "status={pending_status}, error={error}"
+            );
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn local_scheduler_embedding_rejects_202_completed_body_without_job_id() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_http_request(&mut stream);
+            let body = serde_json::json!({
+                "status": "done",
+                "outputs": {"data": [{"embedding": [0.1, 0.2]}]}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            &format!("http://127.0.0.1:{port}"),
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        let error = provider
+            .embed(&["untrackable accepted job"])
+            .expect_err("HTTP 202 must carry a job id even when its body says done");
+        assert!(
+            error.to_string().contains("without job_id"),
+            "error={error}"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn local_scheduler_embedding_splits_physical_batch_oversize() {
         use std::io::Write;
         use std::net::TcpListener;
@@ -1293,6 +1494,97 @@ mod tests {
             1_000,
         );
         assert_eq!(provider.max_batch_size, 2048);
+    }
+
+    #[test]
+    fn local_scheduler_embedding_public_endpoint_is_never_available() {
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            "https://scheduler.example.test:8090",
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        assert!(!provider.is_available());
+    }
+
+    #[test]
+    fn local_scheduler_embedding_rejects_ambiguous_base_and_path_segments() {
+        for endpoint in [
+            "http://user@127.0.0.1:8090",
+            "http://127.0.0.1:8090/admin?target=/kb/tasks/kb.query.embed",
+            "http://169.254.169.254/latest",
+        ] {
+            let provider = LocalSchedulerEmbeddingProvider::new(
+                endpoint,
+                "kb.query.embed",
+                "embedding-int8",
+                2,
+                1_000,
+            );
+            let error = provider
+                .embed(&["secret input"])
+                .expect_err("ambiguous scheduler base must fail before transport");
+            assert!(
+                error.to_string().contains("must use an unambiguous"),
+                "endpoint={endpoint}, error={error}"
+            );
+            assert!(!provider.is_available(), "endpoint={endpoint}");
+        }
+
+        let unsafe_task = LocalSchedulerEmbeddingProvider::new(
+            "http://127.0.0.1:1",
+            "../../admin",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        let error = unsafe_task
+            .embed(&["secret input"])
+            .expect_err("task must remain one safe path segment");
+        assert!(error.to_string().contains("invalid local scheduler task"));
+
+        let unsafe_model = LocalSchedulerEmbeddingProvider::new(
+            "http://127.0.0.1:1",
+            "kb.query.embed",
+            "../admin",
+            2,
+            1_000,
+        );
+        assert!(!unsafe_model.is_available());
+    }
+
+    #[test]
+    fn local_scheduler_embedding_rejects_unsafe_job_id_before_poll() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_http_request(&mut stream);
+            let body = r#"{"job_id":"../../admin","status":"queued"}"#;
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            &format!("http://127.0.0.1:{port}"),
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        let error = provider
+            .embed(&["secret input"])
+            .expect_err("job id must remain one safe path segment");
+        assert!(error.to_string().contains("invalid local scheduler job_id"));
+        handle.join().unwrap();
     }
 
     #[test]

@@ -18,6 +18,8 @@ use std::collections::HashMap;
 
 use crate::state::SharedState;
 
+type MarketplaceError = (StatusCode, Json<serde_json::Value>);
+
 #[derive(Serialize)]
 pub struct ListResponse {
     pub hub_version: String,
@@ -34,25 +36,53 @@ pub struct InstallRequest {
     pub device_fp: Option<String>,
 }
 
-fn _hub_arc(
+fn hub_arc(
     state: &SharedState,
-) -> Result<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>, (StatusCode, String)> {
+) -> Result<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>, MarketplaceError> {
     state.plugin_hub.lock().map(|g| g.clone()).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "plugin_hub lock poisoned".into(),
+            Json(serde_json::json!({
+                "error": "pluginhub_unavailable",
+                "code": "pluginhub-lock-poisoned",
+            })),
         )
     })
 }
 
+/// A mock PluginHub is an in-process catalog and never leaves the device. Every
+/// other provider is an Attune Cloud/PluginHub egress point and therefore needs
+/// the explicit `privacy.cloud_saas` consent bit before even listing metadata.
+fn require_cloud_saas(provider: &str, enabled: bool) -> Result<(), MarketplaceError> {
+    if provider == "mock" || enabled {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "cloud SaaS is disabled by privacy settings",
+            "code": "cloud-saas-disabled",
+            "provider": provider,
+        })),
+    ))
+}
+
 pub async fn list_plugins(
     State(state): State<SharedState>,
-) -> Result<Json<ListResponse>, (StatusCode, String)> {
-    let hub = _hub_arc(&state)?;
+) -> Result<Json<ListResponse>, MarketplaceError> {
+    let hub = hub_arc(&state)?;
+    require_cloud_saas(
+        hub.name(),
+        crate::routes::privacy::outbound_enabled(&state, "cloud_saas"),
+    )?;
     let resp = hub.list_plugins().map_err(|e| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("plugin hub unavailable: {e}"),
+            Json(serde_json::json!({
+                "error": "pluginhub_unavailable",
+                "code": "pluginhub-list-failed",
+                "detail": e.to_string(),
+            })),
         )
     })?;
 
@@ -87,12 +117,11 @@ pub async fn install_plugin(
     Path(plugin_id): Path<String>,
     Json(_req): Json<InstallRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let hub = _hub_arc(&state).map_err(|(code, msg)| {
-        (
-            code,
-            Json(serde_json::json!({ "error": "pluginhub_unavailable", "detail": msg })),
-        )
-    })?;
+    let hub = hub_arc(&state)?;
+    require_cloud_saas(
+        hub.name(),
+        crate::routes::privacy::outbound_enabled(&state, "cloud_saas"),
+    )?;
 
     // P0 (2026-05-20): 未配置 provider 无真实包体 — 之前 fall-through 返回 HTTP 200 +
     // InstallResponse 让 UI 误判"安装成功"实际什么都没装. 改为 503 + actionable error
@@ -349,4 +378,28 @@ fn persist_marketplace_install_entitlement(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_catalog_does_not_require_cloud_consent() {
+        assert!(require_cloud_saas("mock", false).is_ok());
+    }
+
+    #[test]
+    fn real_hub_fails_closed_with_stable_json_when_cloud_saas_is_disabled() {
+        let (status, Json(body)) =
+            require_cloud_saas("real-hub", false).expect_err("real hub must be gated");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "cloud-saas-disabled");
+        assert_eq!(body["provider"], "real-hub");
+    }
+
+    #[test]
+    fn real_hub_is_allowed_only_after_explicit_cloud_consent() {
+        assert!(require_cloud_saas("real-hub", true).is_ok());
+    }
 }

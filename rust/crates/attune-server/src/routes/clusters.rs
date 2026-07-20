@@ -1,7 +1,6 @@
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::Json;
 
 /// GET /api/v1/clusters — 当前聚类快照
@@ -55,27 +54,6 @@ pub async fn detail(
 pub async fn rebuild(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     use attune_core::clusterer::{ClusterInput, Clusterer};
 
-    // 取 LLM（聚类命名依赖 LLM）
-    let llm = state
-        .llm
-        .lock()
-        .map_err(|_| AppError::Internal("llm lock".into()))?
-        .as_ref()
-        .cloned();
-    let llm = match llm {
-        Some(l) => l,
-        // rich error: 带 hint 字段, 走 Detailed 保完整 body
-        None => {
-            return Err(AppError::detailed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                serde_json::json!({
-                    "error": "LLM 不可用，无法为聚类命名",
-                    "hint": "请启动 local scheduler，或在设置中配置云端 LLM"
-                }),
-            ))
-        }
-    };
-
     // 1. 取 item IDs（#83: 上限 10_000 避免大 vault OOM + 持锁超时）
     const CLUSTER_ITEM_CAP: usize = 10_000;
     let (ids, dek) = {
@@ -96,6 +74,7 @@ pub async fn rebuild(State(state): State<SharedState>) -> AppResult<Json<serde_j
     // 2. 构建 ClusterInput：逐 item 取均值向量
     let mut inputs: Vec<ClusterInput> = Vec::with_capacity(ids.len());
     let mut missing_vec = 0usize;
+    let mut contains_l0 = false;
     {
         // 规范锁序 fulltext → vectors → vault：vectors 必须在 vault 之前取
         // （与 search/chat 热点路径一致），反序持锁会 ABBA 死锁。
@@ -111,6 +90,11 @@ pub async fn rebuild(State(state): State<SharedState>) -> AppResult<Json<serde_j
                 }
             };
             if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
+                contains_l0 |= vault
+                    .store()
+                    .get_item_privacy_tier(id)
+                    .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                    .unwrap_or(true);
                 let snippet: String = item.content.chars().take(200).collect();
                 inputs.push(ClusterInput {
                     item_id: item.id,
@@ -121,6 +105,10 @@ pub async fn rebuild(State(state): State<SharedState>) -> AppResult<Json<serde_j
             }
         }
     }
+
+    // Cluster titles/snippets are vault-derived content. Cloud naming uses the
+    // shared consent/L0/redaction boundary; local models keep the original.
+    let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
 
     // 3. 跑聚类（heavy, spawn_blocking 避免阻塞 runtime）
     // HDBSCAN 默认 min_cluster_size=5，给向量少于 10 时会 panic out-of-bounds；

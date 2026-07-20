@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use attune_core::entities::extract_entities;
 use attune_core::llm::LlmProvider;
 use attune_core::monitoring::deep_research::{DeepResearch, ResearchDoc, ResearchOpts, SourceKind};
-use attune_core::monitoring::digest::{ContentSource, DigestBuilder};
+use attune_core::monitoring::digest::{DigestBuilder, MapContentSource};
 use attune_core::store::watches::{WatchInput, WatchPatch};
 use std::sync::Arc;
 
@@ -53,43 +53,6 @@ fn enforce_member_gate(state: &SharedState) -> AppResult<()> {
             }),
         ))
     }
-}
-
-/// 用户是否在 Privacy 设置里开了 cloud-LLM 出网（privacy.llm）？默认 false（fail-closed），
-/// 与 chat.rs::read_privacy_outbound_enabled / writing.rs::cloud_llm_egress_enabled 一致。
-fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
-    let bytes = match state.vault.lock() {
-        Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
-        Err(_) => None,
-    };
-    bytes
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|s| {
-            s.get("privacy")
-                .and_then(|p| p.get("llm"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
-}
-
-/// 解析 tier-3 cloud LLM provider，强制隐私出网门（关 → 403）+ PII 脱敏包裹（出网前脱敏）。
-/// 返回的 provider 已被 RedactingLlmProvider 包裹，调用方直接 chat 即出网内容已脱敏。
-fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
-    if !cloud_llm_egress_enabled(state) {
-        return Err(AppError::detailed(
-            axum::http::StatusCode::FORBIDDEN,
-            serde_json::json!({
-                "error": "cloud LLM is disabled in Privacy settings; enable it to use this operation",
-                "code": "cloud-llm-disabled"
-            }),
-        ));
-    }
-    let inner = state
-        .llm()
-        .ok_or_else(|| AppError::ServiceUnavailable("research-llm-unavailable".into()))?;
-    Ok(Arc::new(
-        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
-    ))
 }
 
 // ── Watch 管理 ──────────────────────────────────────────────────────────────
@@ -133,7 +96,7 @@ pub struct WatchView {
     pub hit_count_pending: usize,
 }
 
-/// POST /api/v1/monitoring/watches — 新增关注项（anchor embed = ⚡ 本地一次性）。
+/// POST /api/v1/monitoring/watches — 新增关注项（anchor embed 走统一本地/云边界）。
 pub async fn create_watch(
     State(state): State<SharedState>,
     Json(req): Json<CreateWatchRequest>,
@@ -151,7 +114,7 @@ pub async fn create_watch(
     let anchor_vec = if req.anchor_text.trim().is_empty() {
         None
     } else {
-        match state.embedding() {
+        match crate::routes::privacy::governed_embedding(&state, false) {
             Some(emb) => match emb.embed(&[req.anchor_text.trim()]) {
                 Ok((v, _)) if !v.is_empty() => Some(v[0].clone()),
                 _ => {
@@ -337,21 +300,6 @@ pub async fn scan_now(State(state): State<SharedState>) -> AppResult<Json<serde_
 
 // ── digest ────────────────────────────────────────────────────────────────
 
-/// Store-backed ContentSource：按 item_id 解密读 item content（digest 预览用）。
-struct StoreContent<'a> {
-    store: &'a attune_core::store::Store,
-    dek: &'a attune_core::crypto::Key32,
-}
-impl ContentSource for StoreContent<'_> {
-    fn content(&self, item_id: &str) -> Option<String> {
-        self.store
-            .get_item(self.dek, item_id)
-            .ok()
-            .flatten()
-            .map(|i| i.content)
-    }
-}
-
 /// POST /api/v1/monitoring/watches/:id/digest — 手动触发一次 digest（与 worker 同函数）。
 ///
 /// 默认零成本 extractive；watch.llm_summary=1 时同步加 LLM 摘要（显式路径）。生成后标记
@@ -360,16 +308,37 @@ pub async fn trigger_digest(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // llm 在锁外取（避免持 vault 锁调 LLM）。
-    let llm = state.llm();
-
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db()?;
-    let store = vault.store();
-    let row = store
-        .get_watch(&dek, &id)?
-        .ok_or_else(|| AppError::NotFound("watch-not-found".into()))?;
-    let hits = store.list_pending_hits(&id, 200)?;
+    // Materialize all vault-derived inputs, then release the vault before any
+    // possible LLM call. This also gives the cloud gate a complete L0 snapshot.
+    let (row, hits, hit_sources, content, contains_l0) = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = vault.dek_db()?;
+        let store = vault.store();
+        let row = store
+            .get_watch(&dek, &id)?
+            .ok_or_else(|| AppError::NotFound("watch-not-found".into()))?;
+        let hits = store.list_pending_hits(&id, 200)?;
+        let mut hit_sources: HashMap<String, Vec<String>> = HashMap::new();
+        let mut content = HashMap::new();
+        let mut contains_l0 = false;
+        for hit in &hits {
+            if let Ok(Some(item)) = store.get_item(&dek, &hit.item_id) {
+                hit_sources.insert(hit.item_id.clone(), vec![item.source_type]);
+                content.insert(hit.item_id.clone(), item.content);
+            }
+            contains_l0 |= store
+                .get_item_privacy_tier(&hit.item_id)
+                .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                .unwrap_or(true);
+        }
+        (
+            row,
+            hits,
+            hit_sources,
+            MapContentSource(content),
+            contains_l0,
+        )
+    };
     if hits.is_empty() {
         // digest-no-hits（非错误，spec §7）。
         return Ok(Json(serde_json::json!({
@@ -378,38 +347,23 @@ pub async fn trigger_digest(
         })));
     }
 
-    // 每条 hit 的源（dedup_group 内多源；这里按 item source_type 汇总）。
-    let mut hit_sources: HashMap<String, Vec<String>> = HashMap::new();
-    for h in &hits {
-        if let Ok(Some(it)) = store.get_item(&dek, &h.item_id) {
-            hit_sources.insert(h.item_id.clone(), vec![it.source_type]);
-        }
-    }
-
-    let content = StoreContent { store, dek: &dek };
     let builder = DigestBuilder::default();
     let now = chrono::Utc::now().to_rfc3339();
 
     let (card, llm_used) = if row.llm_summary {
-        match llm {
-            Some(llm) => {
-                let c = builder.build_llm_summary(
-                    &id,
-                    &row.watch.label,
-                    &hits,
-                    &content,
-                    &hit_sources,
-                    &now,
-                    llm.as_ref(),
-                );
-                let used = c.llm_summary.is_some();
-                (c, used)
-            }
-            None => (
-                builder.build_default(&id, &row.watch.label, &hits, &content, &hit_sources, &now),
-                false,
-            ),
-        }
+        enforce_member_gate(&state)?;
+        let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
+        let card = builder.build_llm_summary(
+            &id,
+            &row.watch.label,
+            &hits,
+            &content,
+            &hit_sources,
+            &now,
+            llm.as_ref(),
+        );
+        let used = card.llm_summary.is_some();
+        (card, used)
     } else {
         (
             builder.build_default(&id, &row.watch.label, &hits, &content, &hit_sources, &now),
@@ -419,8 +373,16 @@ pub async fn trigger_digest(
 
     let entries = card.entries.len();
     // 跨时间去重：标记本批 hits 已 digest（marker = 最新 hit created_at）。
-    let marker = hits.iter().map(|h| h.created_at.as_str()).max();
-    store.mark_hits_digested(&id, marker)?;
+    let marker = hits
+        .iter()
+        .map(|h| h.created_at.as_str())
+        .max()
+        .map(str::to_string);
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = vault.dek_db()?;
+        vault.store().mark_hits_digested(&id, marker.as_deref())?;
+    }
 
     let tier = if llm_used { "cloud" } else { "free" };
     Ok(Json(serde_json::json!({
@@ -454,7 +416,7 @@ pub async fn ask_watch(
     }
     // tier-3 会员门（free-tier 不得花 token；direct request 同样拒绝）。
     enforce_member_gate(&state)?;
-    let emb = state.embedding();
+    let emb = crate::routes::privacy::governed_embedding(&state, false);
 
     // dek 在独立 vault 锁段取出（Key32 是 Clone），并在该段内做 watch 存在校验 + scope 收集，
     // 然后 drop vault guard —— 绝不与 fulltext/vectors 同时持有（防 ABBA 死锁，对齐 search.rs）。
@@ -494,13 +456,27 @@ pub async fn ask_watch(
     };
     let scoped: Vec<_> = results
         .into_iter()
-        .filter(|r| scope.is_empty() || scope.contains(&r.item_id))
+        .filter(|r| scope.contains(&r.item_id))
         .take(8)
         .collect();
 
+    // An unknown tier is treated as L0 at this egress boundary. In particular,
+    // an empty watch scope must stay empty rather than falling back to the whole
+    // vault (the old `scope.is_empty()` branch crossed watch boundaries).
+    let contains_l0 = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        scoped.iter().any(|result| {
+            vault
+                .store()
+                .get_item_privacy_tier(&result.item_id)
+                .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                .unwrap_or(true)
+        })
+    };
+
     // tier-3 隐私门 + PII 脱敏：privacy.llm 关 → 403；开 → provider 经 RedactingLlmProvider 包裹，
     // 出网内容（解密 vault 片段 + 用户问题）先脱敏（对齐 writing.rs / chat.rs）。
-    let llm = cloud_llm_or_refuse(&state)?;
+    let llm = crate::routes::privacy::governed_llm(&state, contains_l0)?;
 
     // 构造带编号源的 context（grounding 引用核验）。
     let mut ctx_text = String::new();
@@ -555,24 +531,13 @@ pub async fn research(
     // tier-3 会员门（free-tier 不得花 token；direct request 同样拒绝）。
     enforce_member_gate(&state)?;
 
-    // tier-3 隐私门 + PII 脱敏：privacy.llm 开 → provider 经 RedactingLlmProvider 包裹后供综合用；
-    // 关 → 不出网（llm=None），退化为纯 vault extractive（DeepResearch 既有 degraded 语义，
-    // 与 web 禁用一致：降级不报错）。绝不把解密内容裸发 cloud LLM。
-    let llm: Option<Arc<dyn LlmProvider>> = if cloud_llm_egress_enabled(&state) {
-        state.llm().map(|inner| {
-            Arc::new(attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner))
-                as Arc<dyn LlmProvider>
-        })
-    } else {
-        None
-    };
-    let llm_disabled = llm.is_none();
-    let emb = state.embedding();
+    let emb = crate::routes::privacy::governed_embedding(&state, false);
     let web = state.web_search();
     let web_enabled = req.use_web && web.is_some();
 
     // 1. vault RAG（多源搜之 vault 半）。
     let mut docs: Vec<ResearchDoc> = Vec::new();
+    let contains_l0;
     {
         // dek + watch scope 在独立 vault 锁段取出（Key32 是 Clone），然后 drop guard。
         let (dek, scope) = {
@@ -612,12 +577,26 @@ pub async fn research(
                 .map_err(|e| AppError::Internal(e.to_string()))?
         };
 
+        let results: Vec<_> = results
+            .into_iter()
+            .filter(|result| {
+                scope
+                    .as_ref()
+                    .is_none_or(|watch_scope| watch_scope.contains(&result.item_id))
+            })
+            .collect();
+        contains_l0 = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            results.iter().any(|result| {
+                vault
+                    .store()
+                    .get_item_privacy_tier(&result.item_id)
+                    .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+                    .unwrap_or(true)
+            })
+        };
+
         for r in results {
-            if let Some(s) = &scope {
-                if !s.is_empty() && !s.contains(&r.item_id) {
-                    continue;
-                }
-            }
             // extractive 预裁（零 LLM 省 token）。
             let snippet = attune_core::document_intelligence::extractive::extract_candidates(
                 &r.content,
@@ -637,6 +616,19 @@ pub async fn research(
             });
         }
     }
+
+    // Local inference may consume L0 data. Cloud synthesis requires explicit
+    // consent, redaction, and a non-L0 source set; otherwise research remains
+    // available in its established extractive/degraded mode.
+    let provider = state.llm();
+    let l0_cloud_blocked = contains_l0
+        && provider
+            .as_ref()
+            .map(|provider| !provider.is_local())
+            .unwrap_or(false);
+    let llm: Option<Arc<dyn LlmProvider>> =
+        crate::routes::privacy::governed_llm(&state, contains_l0).ok();
+    let llm_disabled = llm.is_none();
 
     // 2. web 搜（走 OutboundGate WebSearch；禁用 → 退化纯 vault，不报错）。
     let mut web_disabled_note = false;
@@ -672,6 +664,7 @@ pub async fn research(
         "web_disabled": web_disabled_note,
         // privacy.llm 关 → LLM 综合被门控掉（纯 vault extractive 降级），UI 可据此提示用户开启。
         "llm_disabled": llm_disabled,
+        "l0_cloud_blocked": l0_cloud_blocked,
         "item_id": null,
         "cost_hint": { "tier": if report.degraded { "free" } else { "cloud" },
                        "note": "explicit deep research" }

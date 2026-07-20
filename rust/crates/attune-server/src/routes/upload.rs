@@ -157,11 +157,11 @@ pub async fn upload_file(
     )
     .map_err(|e| AppError::Unprocessable(e.to_string()))?;
 
-    let (item_id, chunks_queued, is_new) = match &outcome {
+    let (item_id, chunks_queued, is_new, response_status) = match &outcome {
         attune_core::ingest::IngestOutcome::Inserted {
             item_id,
             chunks_enqueued,
-        } => (item_id.clone(), *chunks_enqueued, true),
+        } => (item_id.clone(), *chunks_enqueued, true, "processing"),
         attune_core::ingest::IngestOutcome::Duplicate { item_id } => {
             tracing::info!(
                 "upload content_hash dedup hit: filename={filename} existing_item={item_id}"
@@ -176,7 +176,22 @@ pub async fn upload_file(
             })));
         }
         attune_core::ingest::IngestOutcome::Updated { item_id, .. } => {
-            (item_id.clone(), 0usize, true)
+            (item_id.clone(), 0usize, true, "processing")
+        }
+        attune_core::ingest::IngestOutcome::Degraded {
+            item_id,
+            chunks_enqueued,
+            reason,
+        } => {
+            tracing::warn!(
+                "upload indexed with retryable degraded extraction: filename={filename}: {reason}"
+            );
+            (
+                item_id.clone(),
+                *chunks_enqueued,
+                *chunks_enqueued > 0,
+                "degraded",
+            )
         }
         attune_core::ingest::IngestOutcome::Skipped { reason } => {
             return Err(AppError::Unprocessable(reason.clone()));
@@ -395,7 +410,7 @@ pub async fn upload_file(
         "id": item_id,
         "title": parsed_title,
         "chunks_queued": chunks_queued,
-        "status": "processing"
+        "status": response_status
     })))
 }
 

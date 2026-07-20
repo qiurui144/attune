@@ -141,8 +141,6 @@ pub async fn post_recognize(
             "profile_id": profile_id,
             "vlm_escalation": vlm_escalation,
             "file_base64": BASE64_STANDARD.encode(&bytes),
-            "timeout_ms": OCR_RECOGNIZE_TIMEOUT.as_millis() as u64,
-            "ttl_ms": OCR_RECOGNIZE_TIMEOUT.as_millis() as u64,
         }),
         true,
         OCR_RECOGNIZE_TIMEOUT,

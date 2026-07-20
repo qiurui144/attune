@@ -4,4 +4,5 @@
 //! 连接」的路径都应过 [`url_guard::validate_outbound_url`]，避免被诱导打内网 /
 //! 云 metadata 端点。
 
+pub mod destination;
 pub mod url_guard;

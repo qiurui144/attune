@@ -1,12 +1,16 @@
 // npu-vault/crates/vault-core/src/parser.rs
 
+use crate::edge_cloud::scheduler::SchedulerJobState;
 use crate::error::{Result, VaultError};
 use crate::text_norm::collapse_whitespace;
 use base64::Engine;
 use serde_json::Value;
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{io::Write, path::Path};
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 /// 代码文件扩展名
 const CODE_EXTENSIONS: &[&str] = &[
@@ -26,6 +30,122 @@ const DEFAULT_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 4_000;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
 const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 72;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
+const SCHEDULER_TASK_HTTP_MAX_TIMEOUT: Duration = Duration::from_secs(10);
+const SCHEDULER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SCHEDULER_TASK_CANCEL_RESERVE: Duration = Duration::from_millis(250);
+const PDF_TEXT_OUTPUT_MAX_BYTES: usize = 32 * 1024 * 1024;
+const PDFINFO_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
+const POPPLER_DIAGNOSTIC_MAX_BYTES: usize = 64 * 1024;
+const OCRMYPDF_SIDECAR_MAX_BYTES: usize = 32 * 1024 * 1024;
+// 4_000² is exactly the canonical OCR codec's 16 MP decoded-pixel ceiling.
+// pdftoppm therefore cannot materialize a page geometry that the next bounded
+// decode step would necessarily reject.
+const PDF_RENDER_MAX_DIMENSION: u32 = 4_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseQuality {
+    Complete,
+    /// Extraction covered the complete document and proved that it contains
+    /// no visual text. Ingest may retain filename/source metadata without
+    /// scheduling a pointless retry.
+    CompleteNoText {
+        reason: String,
+    },
+    /// Some useful text may have been retained, but a later scan must retry
+    /// because OCR/ASR coverage was not provably complete.
+    RetryableDegraded {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDocument {
+    pub title: String,
+    pub content: String,
+    pub quality: ParseQuality,
+}
+
+impl ParsedDocument {
+    fn complete(title: String, content: String) -> Self {
+        Self {
+            title,
+            content,
+            quality: ParseQuality::Complete,
+        }
+    }
+
+    fn degraded(title: String, content: String, reason: impl Into<String>) -> Self {
+        Self {
+            title,
+            content,
+            quality: ParseQuality::RetryableDegraded {
+                reason: reason.into(),
+            },
+        }
+    }
+
+    fn complete_no_text(title: String, reason: impl Into<String>) -> Self {
+        Self {
+            title,
+            content: String::new(),
+            quality: ParseQuality::CompleteNoText {
+                reason: reason.into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PdfOcrText {
+    text: String,
+    complete: bool,
+    reason: Option<String>,
+}
+
+impl PdfOcrText {
+    fn complete(text: String) -> Self {
+        Self {
+            text,
+            complete: true,
+            reason: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SchedulerPdfOcrBudget {
+    started_at: Instant,
+    deadline: Instant,
+}
+
+impl SchedulerPdfOcrBudget {
+    fn new(options: &ParseOptions) -> Self {
+        let started_at = Instant::now();
+        // `MAX_TOTAL_MS=0` historically disabled the short multi-page budget.
+        // Keep that override useful while retaining a hard upper bound from
+        // the caller's scheduler timeout so Poppler can never wait forever.
+        let duration =
+            scheduler_pdf_ocr_max_total_duration().unwrap_or_else(|| options.scheduler_timeout());
+        let deadline = started_at
+            .checked_add(duration)
+            .unwrap_or_else(|| started_at + options.scheduler_timeout());
+        Self {
+            started_at,
+            deadline,
+        }
+    }
+
+    fn remaining(self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    fn operation_deadline(self, max_duration: Duration) -> Instant {
+        Instant::now()
+            .checked_add(max_duration)
+            .map(|deadline| deadline.min(self.deadline))
+            .unwrap_or(self.deadline)
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ParseOptions {
@@ -161,11 +281,11 @@ fn scheduler_pdf_page_ocr_enabled() -> bool {
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_ENABLED",
             "ATTUNE_PDF_OCR_ENABLED",
         ],
-        false,
+        true,
     )
 }
 
-fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
+fn try_ocrmypdf_sidecar_from_path(path: &Path, deadline: Instant) -> Option<String> {
     if !ocrmypdf_fallback_enabled() {
         return None;
     }
@@ -188,7 +308,8 @@ fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
     let tmp = tempfile::TempDir::new().ok()?;
     let sidecar = tmp.path().join("ocr.txt");
     let out_pdf = tmp.path().join("ocr.pdf");
-    let output = match crate::process::command_no_window(&ocrmypdf)
+    let mut command = crate::process::command_no_window(&ocrmypdf);
+    command
         .arg("--sidecar")
         .arg(&sidecar)
         .arg("--skip-text")
@@ -197,15 +318,30 @@ fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
         .arg("--output-type")
         .arg("pdf")
         .arg(path)
-        .arg(&out_pdf)
-        .output()
-    {
+        .arg(&out_pdf);
+    let output = match run_child_bounded_until(
+        &mut command,
+        deadline,
+        POPPLER_DIAGNOSTIC_MAX_BYTES,
+        POPPLER_DIAGNOSTIC_MAX_BYTES,
+    ) {
         Ok(output) => output,
         Err(e) => {
             log::warn!("ocrmypdf failed to start for {}: {e}", path.display());
             return None;
         }
     };
+    if output.timed_out {
+        log::warn!("ocrmypdf timed out for {}", path.display());
+        return None;
+    }
+    if output.stdout_truncated || output.stderr_truncated {
+        log::warn!(
+            "ocrmypdf output exceeded the bounded diagnostic capture limit for {}",
+            path.display()
+        );
+        return None;
+    }
     if !output.status.success() {
         log::warn!(
             "ocrmypdf exited {:?} for {}; stderr={}",
@@ -214,7 +350,25 @@ fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let text = std::fs::read_to_string(&sidecar).ok()?;
+    let mut file = std::fs::File::open(&sidecar).ok()?;
+    let mut bytes = Vec::with_capacity(OCRMYPDF_SIDECAR_MAX_BYTES.min(64 * 1024));
+    std::io::Read::take(
+        &mut file,
+        u64::try_from(OCRMYPDF_SIDECAR_MAX_BYTES)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .read_to_end(&mut bytes)
+    .ok()?;
+    if bytes.len() > OCRMYPDF_SIDECAR_MAX_BYTES {
+        log::warn!(
+            "ocrmypdf sidecar exceeded the {} byte limit for {}",
+            OCRMYPDF_SIDECAR_MAX_BYTES,
+            path.display()
+        );
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
     if text.trim().is_empty() {
         None
     } else {
@@ -230,7 +384,11 @@ fn scheduler_ocr_path(path: &Path, options: &ParseOptions) -> Option<String> {
     let size = std::fs::metadata(path)
         .ok()
         .and_then(|m| usize::try_from(m.len()).ok())?;
-    if !scheduler_inline_file_fits_with_copies(&filename, size, "kb.document.ocr_recognize", 3) {
+    if size > crate::ocr_image_codec::MAX_ENCODED_INPUT_BYTES {
+        log::warn!(
+            "scheduler OCR image rejected for {filename}: encoded input is {size} bytes, max is {} bytes",
+            crate::ocr_image_codec::MAX_ENCODED_INPUT_BYTES
+        );
         return None;
     }
     let data = std::fs::read(path).ok()?;
@@ -283,6 +441,12 @@ fn scheduler_max_body_bytes() -> usize {
 
 fn base64_encoded_len(bytes: usize) -> Option<usize> {
     bytes.checked_add(2).map(|n| (n / 3) * 4)
+}
+
+fn scheduler_inline_raw_budget_with_copies(max_body_bytes: usize, encoded_copies: usize) -> usize {
+    let available = max_body_bytes.saturating_sub(SCHEDULER_INLINE_JSON_OVERHEAD_BYTES);
+    let base64_budget = available / encoded_copies.max(1);
+    (base64_budget / 4).saturating_mul(3)
 }
 
 fn scheduler_inline_file_fits_body(bytes: usize, max_body_bytes: usize) -> bool {
@@ -340,14 +504,11 @@ fn scheduler_inline_file_fits_with_copies(
 
 fn scheduler_ocr_body(data: &[u8], filename: &str, options: &ParseOptions) -> Value {
     let file_base64 = base64::engine::general_purpose::STANDARD.encode(data);
-    let timeout_ms = options
-        .scheduler_timeout()
-        .as_millis()
-        .min(u32::MAX as u128) as u32;
     let input = serde_json::json!({
         "filename": filename,
         "profile": options.profile_id(),
         "profile_id": options.profile_id(),
+        "content_type": crate::ocr_image_codec::CANONICAL_CONTENT_TYPE,
         "file_base64": file_base64.clone(),
     });
     serde_json::json!({
@@ -358,9 +519,8 @@ fn scheduler_ocr_body(data: &[u8], filename: &str, options: &ParseOptions) -> Va
         "filename": filename,
         "profile": options.profile_id(),
         "profile_id": options.profile_id(),
-        "file_base64": file_base64,
-        "timeout_ms": timeout_ms,
-        "ttl_ms": timeout_ms
+        "content_type": crate::ocr_image_codec::CANONICAL_CONTENT_TYPE,
+        "file_base64": file_base64
     })
 }
 
@@ -373,15 +533,11 @@ fn scheduler_ocr_image_body(
     options: &ParseOptions,
 ) -> Value {
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(data);
-    let timeout_ms = options
-        .scheduler_timeout()
-        .as_millis()
-        .min(u32::MAX as u128) as u32;
     let input = serde_json::json!({
         "filename": filename,
         "profile": options.profile_id(),
         "profile_id": options.profile_id(),
-        "content_type": "image/png",
+        "content_type": crate::ocr_image_codec::CANONICAL_CONTENT_TYPE,
         "page": page_number,
         "page_number": page_number,
         "page_count": page_count,
@@ -394,14 +550,12 @@ fn scheduler_ocr_image_body(
         "filename": filename,
         "profile": options.profile_id(),
         "profile_id": options.profile_id(),
-        "content_type": "image/png",
+        "content_type": crate::ocr_image_codec::CANONICAL_CONTENT_TYPE,
         "page": page_number,
         "page_number": page_number,
         "page_count": page_count,
         "dpi": dpi,
-        "image_base64": image_base64,
-        "timeout_ms": timeout_ms,
-        "ttl_ms": timeout_ms
+        "image_base64": image_base64
     })
 }
 
@@ -410,16 +564,39 @@ fn scheduler_ocr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> O
     if !scheduler_ocr_enabled() {
         return None;
     }
-    if !scheduler_inline_file_fits_with_copies(filename, data.len(), "kb.document.ocr_recognize", 3)
-    {
-        return None;
-    }
+    let body = match scheduler_ocr_canonical_body(data, filename, options) {
+        Ok(body) => body,
+        Err(error) => {
+            log::warn!("scheduler OCR image canonicalization rejected {filename}: {error}");
+            return None;
+        }
+    };
     scheduler_task_text(
         base,
         "kb.document.ocr_recognize",
-        scheduler_ocr_body(data, filename, options),
+        body,
         options.scheduler_timeout(),
     )
+}
+
+fn scheduler_ocr_canonical_body(
+    data: &[u8],
+    filename: &str,
+    options: &ParseOptions,
+) -> Result<Value> {
+    let max_png_bytes = scheduler_inline_raw_budget_with_copies(scheduler_max_body_bytes(), 3);
+    let canonical_png = crate::ocr_image_codec::canonicalize_for_scheduler(data, max_png_bytes)?;
+    if !scheduler_inline_file_fits_with_copies(
+        filename,
+        canonical_png.len(),
+        "kb.document.ocr_recognize",
+        3,
+    ) {
+        return Err(VaultError::InvalidInput(
+            "canonical Scheduler OCR PNG exceeds the request body budget".to_string(),
+        ));
+    }
+    Ok(scheduler_ocr_body(&canonical_png, filename, options))
 }
 
 fn scheduler_ocr_image_bytes(
@@ -447,12 +624,12 @@ fn scheduler_ocr_image_bytes(
         scheduler_ocr_image_body(data, filename, page_number, page_count, dpi, options),
         poll_timeout,
     )?;
-    if let Some(error) = scheduler_output_error_message(&outputs) {
-        return Err(VaultError::LlmUnavailable(format!(
-            "scheduler OCR returned error: {error}"
-        )));
-    }
-    Ok(scheduler_output_text(&outputs))
+    Ok(outputs
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string))
 }
 
 fn scheduler_asr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
@@ -460,15 +637,9 @@ fn scheduler_asr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> O
     if !scheduler_inline_file_fits(filename, data.len(), "kb.meeting.asr_frontend") {
         return None;
     }
-    let timeout_ms = options
-        .scheduler_timeout()
-        .as_millis()
-        .min(u32::MAX as u128) as u32;
     let body = serde_json::json!({
         "filename": filename,
-        "file_base64": base64::engine::general_purpose::STANDARD.encode(data),
-        "timeout_ms": timeout_ms,
-        "ttl_ms": timeout_ms
+        "file_base64": base64::engine::general_purpose::STANDARD.encode(data)
     });
     scheduler_task_text(
         base,
@@ -485,6 +656,12 @@ fn scheduler_task_text(
     poll_timeout: Duration,
 ) -> Option<String> {
     match scheduler_task_outputs(base, task, body, poll_timeout) {
+        Ok(outputs) if task == "kb.document.ocr_recognize" => outputs
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
         Ok(outputs) => scheduler_output_text(&outputs),
         Err(e) => {
             log::warn!("scheduler task {task} failed: {e}");
@@ -499,18 +676,54 @@ fn scheduler_task_outputs(
     body: Value,
     poll_timeout: Duration,
 ) -> Result<Value> {
-    let http_timeout = poll_timeout
-        .max(Duration::from_secs(1))
-        .min(Duration::from_secs(10));
-    let client = crate::edge_cloud::scheduler::LocalSchedulerClient::with_base(base, http_timeout);
+    let started_at = Instant::now();
+    let deadline = started_at.checked_add(poll_timeout).ok_or_else(|| {
+        VaultError::LlmUnavailable(format!("scheduler task {task} received an invalid timeout"))
+    })?;
+    let submit_timeout = scheduler_task_request_timeout(deadline, Duration::ZERO)
+        .ok_or_else(|| scheduler_task_timeout_error(task, None, poll_timeout))?;
+    let client =
+        crate::edge_cloud::scheduler::LocalSchedulerClient::with_base(base, submit_timeout);
     let response = client.submit_kb_task(task, &body, true)?;
-    if response
-        .status
+    let cancel_candidate = response
+        .job_id
         .as_deref()
-        .is_some_and(|s| s.eq_ignore_ascii_case("done"))
-        || response.job_id.is_none()
-    {
-        return Ok(response.outputs);
+        .filter(|job_id| {
+            crate::edge_cloud::scheduler::validate_path_segment("job_id", job_id).is_ok()
+        })
+        .map(str::to_string);
+    if let Err(error) = validate_scheduler_task_submission(&response, task) {
+        if let Some(job_id) = cancel_candidate.as_deref() {
+            best_effort_scheduler_task_cancel(&client, job_id, deadline);
+        }
+        return Err(error);
+    }
+    match response.normalized_state() {
+        SchedulerJobState::Succeeded => {
+            let outputs = response.outputs;
+            if let Err(error) = validate_scheduler_task_success_outputs(task, &body, &outputs) {
+                if let Some(job_id) = cancel_candidate.as_deref() {
+                    best_effort_scheduler_task_cancel(&client, job_id, deadline);
+                }
+                return Err(error);
+            }
+            return Ok(outputs);
+        }
+        SchedulerJobState::Failed => {
+            let error = VaultError::LlmUnavailable(format!(
+                "scheduler task {task} failed: {}",
+                response
+                    .failure_detail()
+                    .or(response.status.as_deref())
+                    .unwrap_or("unknown error")
+            ));
+            if let Some(job_id) = cancel_candidate.as_deref() {
+                best_effort_scheduler_task_cancel(&client, job_id, deadline);
+            }
+            return Err(error);
+        }
+        SchedulerJobState::Waiting if response.job_id.is_none() => return Ok(response.outputs),
+        SchedulerJobState::Waiting => {}
     }
 
     let job_id = response.job_id.ok_or_else(|| {
@@ -518,42 +731,227 @@ fn scheduler_task_outputs(
             "scheduler task {task} returned async without job_id"
         ))
     })?;
-    let deadline = Instant::now() + poll_timeout;
+    crate::edge_cloud::scheduler::validate_path_segment("job_id", &job_id)?;
     loop {
-        if Instant::now() >= deadline {
-            return Err(VaultError::LlmUnavailable(format!(
-                "scheduler task {task} job {job_id} timed out after {} ms",
-                poll_timeout.as_millis()
-            )));
+        let Some(request_timeout) =
+            scheduler_task_request_timeout(deadline, SCHEDULER_TASK_CANCEL_RESERVE)
+        else {
+            best_effort_scheduler_task_cancel(&client, &job_id, deadline);
+            return Err(scheduler_task_timeout_error(
+                task,
+                Some(&job_id),
+                poll_timeout,
+            ));
+        };
+        let poll_client = client.with_timeout(request_timeout);
+        let job = match poll_client.job(&job_id) {
+            Ok(job) => job,
+            Err(error) => {
+                best_effort_scheduler_task_cancel(&client, &job_id, deadline);
+                return Err(error);
+            }
+        };
+        if let Err(error) = validate_scheduler_task_job(&job, &job_id, task, &response.model) {
+            best_effort_scheduler_task_cancel(&client, &job_id, deadline);
+            return Err(error);
         }
-        let job = client.job(&job_id)?;
-        match job.status.to_ascii_lowercase().as_str() {
-            "done" => return Ok(job.outputs),
-            "error" => {
-                return Err(VaultError::LlmUnavailable(format!(
-                    "scheduler task {task} job {job_id} failed: {}",
-                    job.error
-                        .or(job.detail)
-                        .unwrap_or_else(|| "unknown error".to_string())
-                )));
-            }
-            "canceled" | "cancelled" | "expired" => {
-                return Err(VaultError::LlmUnavailable(format!(
-                    "scheduler task {task} job {job_id} ended with status {}",
-                    job.status
-                )));
-            }
-            _ => {
-                if Instant::now() >= deadline {
-                    return Err(VaultError::LlmUnavailable(format!(
-                        "scheduler task {task} job {job_id} timed out after {} ms",
-                        poll_timeout.as_millis()
-                    )));
+        match job.normalized_state() {
+            SchedulerJobState::Succeeded => {
+                let outputs = job.outputs;
+                if let Err(error) = validate_scheduler_task_success_outputs(task, &body, &outputs) {
+                    best_effort_scheduler_task_cancel(&client, &job_id, deadline);
+                    return Err(error);
                 }
-                thread::sleep(Duration::from_millis(250));
+                return Ok(outputs);
+            }
+            SchedulerJobState::Failed => {
+                let error = VaultError::LlmUnavailable(format!(
+                    "scheduler task {task} job {job_id} failed: {}",
+                    job.failure_detail().unwrap_or(&job.status)
+                ));
+                best_effort_scheduler_task_cancel(&client, &job_id, deadline);
+                return Err(error);
+            }
+            SchedulerJobState::Waiting => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining <= SCHEDULER_TASK_CANCEL_RESERVE {
+                    best_effort_scheduler_task_cancel(&client, &job_id, deadline);
+                    return Err(scheduler_task_timeout_error(
+                        task,
+                        Some(&job_id),
+                        poll_timeout,
+                    ));
+                }
+                thread::sleep(
+                    SCHEDULER_TASK_POLL_INTERVAL
+                        .min(remaining.saturating_sub(SCHEDULER_TASK_CANCEL_RESERVE)),
+                );
             }
         }
     }
+}
+
+fn scheduler_task_request_timeout(deadline: Instant, reserve: Duration) -> Option<Duration> {
+    let available = deadline
+        .saturating_duration_since(Instant::now())
+        .saturating_sub(reserve);
+    (!available.is_zero()).then(|| available.min(SCHEDULER_TASK_HTTP_MAX_TIMEOUT))
+}
+
+fn scheduler_task_timeout_error(
+    task: &str,
+    job_id: Option<&str>,
+    poll_timeout: Duration,
+) -> VaultError {
+    let job = job_id
+        .map(|job_id| format!(" job {job_id}"))
+        .unwrap_or_default();
+    VaultError::LlmUnavailable(format!(
+        "scheduler task {task}{job} timed out after {} ms",
+        poll_timeout.as_millis()
+    ))
+}
+
+fn best_effort_scheduler_task_cancel(
+    client: &crate::edge_cloud::scheduler::LocalSchedulerClient,
+    job_id: &str,
+    deadline: Instant,
+) {
+    let available = deadline.saturating_duration_since(Instant::now());
+    if available.is_zero() {
+        return;
+    }
+    let cancel_client = client.with_timeout(available.min(SCHEDULER_TASK_CANCEL_RESERVE));
+    let _ = cancel_client.cancel_job(job_id);
+}
+
+fn validate_scheduler_task_submission(
+    response: &crate::edge_cloud::scheduler::SchedulerKbTaskResponse,
+    expected_task: &str,
+) -> Result<()> {
+    response.validate_submission(true, &format!("scheduler task {expected_task}"))?;
+    let safe_job_id = response.job_id.as_deref().is_some_and(|job_id| {
+        crate::edge_cloud::scheduler::validate_path_segment("job_id", job_id).is_ok()
+    });
+    if response.http_status != Some(202)
+        || response.schema_version != "kb_task.v1"
+        || response.scheduled_as != "async"
+        || response.status.as_deref() != Some("queued")
+        || response.task != expected_task
+        || response.model.trim().is_empty()
+        || !safe_job_id
+    {
+        return Err(VaultError::LlmUnavailable(format!(
+            "scheduler task {expected_task} returned an invalid async submission envelope"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_scheduler_task_job(
+    job: &crate::edge_cloud::scheduler::SchedulerJobStatus,
+    expected_job_id: &str,
+    expected_task: &str,
+    expected_model: &str,
+) -> Result<()> {
+    let status_phase_valid = matches!(
+        (job.status.as_str(), job.phase.as_deref()),
+        ("queued", Some("not_started" | "scheduler_queue"))
+            | ("running", Some("worker_infer"))
+            | (
+                "cancel_requested",
+                Some("not_started" | "scheduler_queue" | "worker_infer")
+            )
+            | ("done" | "error" | "canceled" | "expired", Some("done"))
+    );
+    if job.http_status != Some(200)
+        || job.schema_version != "job_status.v2"
+        || job.job_id != expected_job_id
+        || job.task.as_deref() != Some(expected_task)
+        || job.model != expected_model
+        || job.scheduled_as.as_deref() != Some("async")
+        || !status_phase_valid
+    {
+        return Err(VaultError::LlmUnavailable(format!(
+            "scheduler task {expected_task} job {expected_job_id} returned an invalid status envelope"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_scheduler_task_success_outputs(
+    task: &str,
+    request_body: &Value,
+    outputs: &Value,
+) -> Result<()> {
+    if task != "kb.document.ocr_recognize" {
+        return Ok(());
+    }
+    let expected_page_index = [
+        "/page_index",
+        "/page",
+        "/page_number",
+        "/input/page_index",
+        "/input/page",
+        "/input/page_number",
+        "/x/page_index",
+        "/x/page",
+        "/x/page_number",
+    ]
+    .iter()
+    .find_map(|pointer| request_body.pointer(pointer).and_then(Value::as_u64))
+    .unwrap_or(0);
+
+    let status = outputs.get("status").and_then(Value::as_str);
+    if status == Some("error") {
+        let code = outputs
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let detail = outputs
+            .pointer("/error/detail")
+            .and_then(Value::as_str)
+            .unwrap_or("no detail");
+        return Err(VaultError::LlmUnavailable(format!(
+            "scheduler OCR returned error: {code}: {detail}"
+        )));
+    }
+
+    let pages = outputs.get("pages").and_then(Value::as_array);
+    let page = pages.and_then(|pages| (pages.len() == 1).then(|| &pages[0]));
+    let text = outputs.get("text").and_then(Value::as_str);
+    let page_text = page
+        .and_then(|page| page.get("text"))
+        .and_then(Value::as_str);
+    let valid = outputs.get("schema_version").and_then(Value::as_str) == Some("ocr_result.v1")
+        && outputs.get("task").and_then(Value::as_str) == Some("kb.document.ocr_recognize")
+        && status == Some("ok")
+        && outputs.get("error").is_none()
+        && outputs
+            .get("engine")
+            .and_then(Value::as_str)
+            .is_some_and(|engine| !engine.trim().is_empty())
+        && outputs.get("degraded").and_then(Value::as_bool) == Some(false)
+        && text.is_some()
+        && text == page_text
+        && page
+            .and_then(|page| page.get("page_index"))
+            .and_then(Value::as_u64)
+            == Some(expected_page_index)
+        && outputs.get("layout").is_some_and(Value::is_array)
+        && outputs.get("lines").is_some_and(Value::is_array)
+        && page
+            .and_then(|page| page.get("blocks"))
+            .is_some_and(Value::is_array)
+        && page
+            .and_then(|page| page.get("layout"))
+            .is_some_and(Value::is_array);
+    if !valid {
+        return Err(VaultError::LlmUnavailable(format!(
+            "scheduler task {task} returned an invalid ocr_result.v1 envelope"
+        )));
+    }
+    Ok(())
 }
 
 fn scheduler_output_text(value: &Value) -> Option<String> {
@@ -593,28 +991,6 @@ fn scheduler_output_text(value: &Value) -> Option<String> {
         }
     }
     value.get("outputs").and_then(scheduler_output_text)
-}
-
-fn scheduler_output_error_message(value: &Value) -> Option<String> {
-    let status = value.get("status").and_then(Value::as_str)?;
-    if !matches!(
-        status.trim().to_ascii_lowercase().as_str(),
-        "error" | "failed" | "failure" | "unsupported"
-    ) {
-        return None;
-    }
-    let code = value
-        .pointer("/error/code")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("code").and_then(Value::as_str))
-        .unwrap_or("unknown");
-    let detail = value
-        .pointer("/error/detail")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("detail").and_then(Value::as_str))
-        .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("no detail");
-    Some(format!("{code}: {detail}"))
 }
 
 fn scheduler_ocr_error_is_fatal(message: &str) -> bool {
@@ -734,6 +1110,121 @@ pub fn parse_bytes_with_profile(
     parse_bytes_with_options(data, filename, &ParseOptions::with_profile(profile_id))
 }
 
+/// Parse bytes while retaining whether Scheduler-backed extraction was
+/// complete.  Existing tuple-returning callers remain source-compatible; the
+/// ingest pipeline uses this richer result so a metadata-only or partial OCR
+/// item is searchable now but is not permanently marked as fully indexed.
+pub fn parse_bytes_with_options_detailed(
+    data: &[u8],
+    filename: &str,
+    options: &ParseOptions,
+) -> Result<ParsedDocument> {
+    let ext = Path::new(filename)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+    if ext == ".pdf" {
+        return parse_pdf_bytes_detailed(data, filename, options);
+    }
+    let (title, content) = parse_bytes_with_options(data, filename, options)?;
+    Ok(ParsedDocument::complete(title, content))
+}
+
+fn parsed_pdf_ocr(stem: &str, result: PdfOcrText) -> ParsedDocument {
+    let title = first_line_title(&result.text, stem);
+    if result.complete && result.text.trim().is_empty() {
+        ParsedDocument::complete_no_text(
+            title,
+            "PDF OCR completed and every detected page was visually blank",
+        )
+    } else if result.complete {
+        ParsedDocument::complete(title, result.text)
+    } else {
+        ParsedDocument::degraded(
+            title,
+            result.text,
+            result
+                .reason
+                .unwrap_or_else(|| "PDF OCR coverage was incomplete".to_string()),
+        )
+    }
+}
+
+fn parse_pdf_bytes_detailed(
+    data: &[u8],
+    filename: &str,
+    options: &ParseOptions,
+) -> Result<ParsedDocument> {
+    let stem = Path::new(filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| filename.to_string());
+    let dpi = crate::ocr::dpi_for_profile(options.profile_id());
+    let budget = SchedulerPdfOcrBudget::new(options);
+
+    if let Some(pdftotext) = try_pdftotext_from_bytes(data, budget.deadline) {
+        if pdf_text_layer_is_usable(&pdftotext) {
+            let title = first_line_title(&pdftotext, &stem);
+            return Ok(ParsedDocument::complete(title, pdftotext));
+        }
+        if let Some(ocr) =
+            try_ocr_from_bytes_with_dpi_and_budget_detailed(data, filename, dpi, options, budget)
+        {
+            return Ok(parsed_pdf_ocr(&stem, ocr));
+        }
+        let title = first_line_title(&pdftotext, &stem);
+        return Ok(ParsedDocument::degraded(
+            title,
+            pdftotext,
+            "PDF text layer was thin/unusable and OCR produced no usable text",
+        ));
+    }
+
+    if options.scheduler_base.is_some() {
+        if let Some(ocr) =
+            try_ocr_from_bytes_with_dpi_and_budget_detailed(data, filename, dpi, options, budget)
+        {
+            return Ok(parsed_pdf_ocr(&stem, ocr));
+        }
+        return Err(pdf_ocr_unavailable_error(filename, ""));
+    }
+
+    match safe_pdf_extract_text_from_mem(data) {
+        Ok(text) if pdf_text_layer_is_usable(&text) => {
+            let title = first_line_title(&text, &stem);
+            Ok(ParsedDocument::complete(title, text))
+        }
+        Ok(thin_text) => {
+            if let Some(ocr) = try_ocr_from_bytes_with_dpi_and_budget_detailed(
+                data, filename, dpi, options, budget,
+            ) {
+                return Ok(parsed_pdf_ocr(&stem, ocr));
+            }
+            if thin_text.trim().is_empty() {
+                return Err(pdf_ocr_unavailable_error(filename, &thin_text));
+            }
+            let title = first_line_title(&thin_text, &stem);
+            Ok(ParsedDocument::degraded(
+                title,
+                thin_text,
+                "PDF text layer was thin/unusable and OCR produced no usable text",
+            ))
+        }
+        Err(error) => {
+            log::info!("pdf_extract failed for uploaded bytes ({error}); trying OCR");
+            if let Some(ocr) = try_ocr_from_bytes_with_dpi_and_budget_detailed(
+                data, filename, dpi, options, budget,
+            ) {
+                return Ok(parsed_pdf_ocr(&stem, ocr));
+            }
+            Err(VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("PDF extract failed: {error}; OCR unavailable or also failed"),
+            )))
+        }
+    }
+}
+
 /// 从内存解析，智能 OCR/ASR 可由 scheduler 统一承接。
 pub fn parse_bytes_with_options(
     data: &[u8],
@@ -750,17 +1241,25 @@ pub fn parse_bytes_with_options(
         .unwrap_or_else(|| filename.to_string());
     let dpi = crate::ocr::dpi_for_profile(options.profile_id());
 
+    if ext == ".pdf" {
+        let parsed = parse_pdf_bytes_detailed(data, filename, options)?;
+        return Ok((parsed.title, parsed.content));
+    }
+
     match ext.as_str() {
         ".pdf" => {
+            let budget = SchedulerPdfOcrBudget::new(options);
             // 上传路径走内存，但 OCR 需要磁盘文件（pdftoppm 读文件）。
             // Poppler 的 pdftotext 对大型飞行手册更稳，先用它取文字层；失败后再退回
             // pdf_extract，最后才走 OCR。
-            if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
+            if let Some(pdftotext) = try_pdftotext_from_bytes(data, budget.deadline) {
                 if pdf_text_layer_is_usable(&pdftotext) {
                     let title = first_line_title(&pdftotext, &stem);
                     return Ok((title, pdftotext));
                 }
-                if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, filename, dpi, options) {
+                if let Some(ocr_text) =
+                    try_ocr_from_bytes_with_dpi_and_budget(data, filename, dpi, options, budget)
+                {
                     let title = first_line_title(&ocr_text, &stem);
                     return Ok((title, ocr_text));
                 }
@@ -768,7 +1267,9 @@ pub fn parse_bytes_with_options(
                 return Ok((title, pdftotext));
             }
             if options.scheduler_base.is_some() {
-                if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, filename, dpi, options) {
+                if let Some(ocr_text) =
+                    try_ocr_from_bytes_with_dpi_and_budget(data, filename, dpi, options, budget)
+                {
                     let title = first_line_title(&ocr_text, &stem);
                     return Ok((title, ocr_text));
                 }
@@ -780,7 +1281,7 @@ pub fn parse_bytes_with_options(
                 Ok(text) if pdf_text_layer_is_usable(&text) => text,
                 Ok(thin_text) => {
                     if let Some(ocr_text) =
-                        try_ocr_from_bytes_with_dpi(data, filename, dpi, options)
+                        try_ocr_from_bytes_with_dpi_and_budget(data, filename, dpi, options, budget)
                     {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
@@ -793,7 +1294,7 @@ pub fn parse_bytes_with_options(
                 Err(e) => {
                     log::info!("pdf_extract failed for uploaded bytes ({e}); trying pdftotext/OCR");
                     if let Some(ocr_text) =
-                        try_ocr_from_bytes_with_dpi(data, filename, dpi, options)
+                        try_ocr_from_bytes_with_dpi_and_budget(data, filename, dpi, options, budget)
                     {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
@@ -956,13 +1457,29 @@ pub fn parse_bytes_with_options(
 }
 
 fn try_ocr_from_pdf_path_with_dpi(path: &Path, dpi: u32, options: &ParseOptions) -> Option<String> {
+    try_ocr_from_pdf_path_with_dpi_and_budget(
+        path,
+        dpi,
+        options,
+        SchedulerPdfOcrBudget::new(options),
+    )
+}
+
+fn try_ocr_from_pdf_path_with_dpi_and_budget(
+    path: &Path,
+    dpi: u32,
+    options: &ParseOptions,
+    budget: SchedulerPdfOcrBudget,
+) -> Option<String> {
     // The scheduler OCR contract accepts rendered page images, not raw PDF
     // payloads. Go straight to page rendering for PDFs to avoid a guaranteed
     // 422 on current edge schedulers and unnecessary long-text indexing stalls.
-    if let Some(text) = try_scheduler_pdf_page_ocr_from_path(path, dpi, options) {
-        return Some(text);
+    if let Some(result) =
+        try_scheduler_pdf_page_ocr_from_path_with_budget(path, dpi, options, budget)
+    {
+        return Some(result.text);
     }
-    if let Some(text) = try_ocrmypdf_sidecar_from_path(path) {
+    if let Some(text) = try_ocrmypdf_sidecar_from_path(path, budget.deadline) {
         return Some(text);
     }
     if options.scheduler_base.is_some() && !scheduler_local_ocr_provider_fallback_enabled() {
@@ -984,29 +1501,59 @@ fn try_ocr_from_pdf_path_with_dpi(path: &Path, dpi: u32, options: &ParseOptions)
 
 /// 把 PDF 字节写到临时文件并调用 OCR provider, 指定 DPI (200 / 300 / 600).
 /// dpi 由调用方按 OcrProfile 决定 — 默认走 `dpi_for_profile(None) = 300`.
+#[cfg(test)]
 fn try_ocr_from_bytes_with_dpi(
     data: &[u8],
     _filename: &str,
     dpi: u32,
     options: &ParseOptions,
 ) -> Option<String> {
+    try_ocr_from_bytes_with_dpi_and_budget(
+        data,
+        _filename,
+        dpi,
+        options,
+        SchedulerPdfOcrBudget::new(options),
+    )
+}
+
+fn try_ocr_from_bytes_with_dpi_and_budget(
+    data: &[u8],
+    _filename: &str,
+    dpi: u32,
+    options: &ParseOptions,
+    budget: SchedulerPdfOcrBudget,
+) -> Option<String> {
+    try_ocr_from_bytes_with_dpi_and_budget_detailed(data, _filename, dpi, options, budget)
+        .map(|result| result.text)
+}
+
+fn try_ocr_from_bytes_with_dpi_and_budget_detailed(
+    data: &[u8],
+    _filename: &str,
+    dpi: u32,
+    options: &ParseOptions,
+    budget: SchedulerPdfOcrBudget,
+) -> Option<PdfOcrText> {
     // PDF OCR through the scheduler is page-image based. Whole-PDF upload is
     // intentionally skipped here for the same reason as the path-based flow.
     let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
-    if let Some(text) = try_scheduler_pdf_page_ocr_from_path(tmp.path(), dpi, options) {
-        return Some(text);
+    if let Some(result) =
+        try_scheduler_pdf_page_ocr_from_path_with_budget(tmp.path(), dpi, options, budget)
+    {
+        return Some(result);
     }
-    if let Some(text) = try_ocrmypdf_sidecar_from_path(tmp.path()) {
-        return Some(text);
+    if let Some(text) = try_ocrmypdf_sidecar_from_path(tmp.path(), budget.deadline) {
+        return Some(PdfOcrText::complete(text));
     }
     if options.scheduler_base.is_some() && !scheduler_local_ocr_provider_fallback_enabled() {
         return None;
     }
     let provider = crate::ocr::detect_default_provider()?;
     match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), tmp.path(), dpi) {
-        Ok(text) if !text.trim().is_empty() => Some(text),
+        Ok(text) if !text.trim().is_empty() => Some(PdfOcrText::complete(text)),
         Ok(_) => {
             log::warn!("OCR returned empty text for uploaded PDF");
             None
@@ -1124,12 +1671,234 @@ fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
     candidates
 }
 
-fn pdf_page_count(path: &Path) -> Option<usize> {
+struct BoundedChildOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+fn read_child_pipe_bounded<R>(mut pipe: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: std::io::Read,
+{
+    let mut retained = Vec::with_capacity(limit.min(8192));
+    let mut truncated = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = pipe.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        let available = limit.saturating_sub(retained.len());
+        let keep = count.min(available);
+        retained.extend_from_slice(&chunk[..keep]);
+        truncated |= keep < count;
+    }
+    Ok((retained, truncated))
+}
+
+#[cfg(unix)]
+fn isolate_child_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Give every bounded helper its own process group.  Killing only the
+    // direct child is insufficient for shell scripts and tools such as
+    // ocrmypdf that may start helper processes which inherit our output
+    // pipes; those descendants can otherwise survive the deadline and keep
+    // the reader threads blocked until they eventually exit.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn isolate_child_process_group(_command: &mut std::process::Command) {}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn signal_unix_process(
+    process: std::os::raw::c_int,
+    signal: std::os::raw::c_int,
+) -> std::io::Result<bool> {
+    extern "C" {
+        fn kill(pid: std::os::raw::c_int, signal: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+
+    if unsafe { kill(process, signal) } == 0 {
+        return Ok(true);
+    }
+
+    let error = std::io::Error::last_os_error();
+    // ESRCH means the group is already gone, which is the desired state.
+    if error.raw_os_error() == Some(3) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn signal_child_process_group(
+    child: &std::process::Child,
+    signal: std::os::raw::c_int,
+) -> std::io::Result<bool> {
+    let process_group = std::os::raw::c_int::try_from(child.id()).map_err(|_| {
+        std::io::Error::other("child process id cannot be represented as a process group id")
+    })?;
+    // process_group(0) makes the child's PID its process-group ID.  A
+    // negative PID targets the complete group, including any descendants
+    // that still hold stdout/stderr open.
+    signal_unix_process(-process_group, signal)
+}
+
+#[cfg(unix)]
+fn kill_child_process_group(child: &std::process::Child) -> std::io::Result<()> {
+    const SIGKILL: std::os::raw::c_int = 9;
+    signal_child_process_group(child, SIGKILL).map(|_| ())
+}
+
+#[cfg(unix)]
+fn wait_for_child_process_group_exit(child: &std::process::Child) {
+    const SIGNAL_EXISTENCE_CHECK: std::os::raw::c_int = 0;
+    // Once the leader has been reaped, killed grandchildren can briefly
+    // remain as resource-free zombies while the system reaper adopts them.
+    // Make a finite best-effort drain; they are not children of this process,
+    // so wait(2) cannot reap them directly and the operation deadline must
+    // not become an unbounded wait on PID 1.
+    let cleanup_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < cleanup_deadline {
+        match signal_child_process_group(child, SIGNAL_EXISTENCE_CHECK) {
+            Ok(false) => return,
+            Ok(true) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => return,
+        }
+    }
+}
+
+fn terminate_child_tree_and_wait(
+    child: &mut std::process::Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        if kill_child_process_group(child).is_err() {
+            // Retain the standard-library direct-child fallback if signalling
+            // the process group fails unexpectedly (for example, EPERM).
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    // Always reap the direct child.  On Unix, every member of its isolated
+    // process group has already received SIGKILL before this wait returns.
+    let status = child.wait()?;
+    #[cfg(unix)]
+    wait_for_child_process_group_exit(child);
+    Ok(status)
+}
+
+fn run_child_bounded_until(
+    command: &mut std::process::Command,
+    deadline: Instant,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> std::io::Result<BoundedChildOutput> {
+    if Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "child process deadline already elapsed",
+        ));
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    isolate_child_process_group(command);
+    let mut child = command.spawn()?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = terminate_child_tree_and_wait(&mut child);
+        return Err(std::io::Error::other("child stdout pipe was not created"));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = terminate_child_tree_and_wait(&mut child);
+        return Err(std::io::Error::other("child stderr pipe was not created"));
+    };
+    let stdout_reader = std::thread::spawn(move || read_child_pipe_bounded(stdout, stdout_limit));
+    let stderr_reader = std::thread::spawn(move || read_child_pipe_bounded(stderr, stderr_limit));
+
+    let (status, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // A helper must not daemonize descendants beyond this bounded
+                // invocation.  Clean up its now-orphaned process group before
+                // joining the pipe readers even on an otherwise normal exit.
+                #[cfg(unix)]
+                {
+                    let _ = kill_child_process_group(&child);
+                    wait_for_child_process_group_exit(&child);
+                }
+                break (status, false);
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                // Always wait after kill: reap the direct helper and ensure no
+                // live descendant retains its output pipes.  On Unix the
+                // complete isolated process group is signalled first.
+                break (terminate_child_tree_and_wait(&mut child)?, true);
+            }
+            Ok(None) => {
+                std::thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => {
+                let _ = terminate_child_tree_and_wait(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(error);
+            }
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| std::io::Error::other("child stdout reader panicked"))??;
+    let (stderr, stderr_truncated) = stderr_reader
+        .join()
+        .map_err(|_| std::io::Error::other("child stderr reader panicked"))??;
+    Ok(BoundedChildOutput {
+        status,
+        stdout,
+        stderr,
+        timed_out,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn pdf_page_count(path: &Path, deadline: Instant) -> Option<usize> {
     let pdfinfo = which::which("pdfinfo").ok()?;
-    let output = crate::process::command_no_window(&pdfinfo)
-        .arg(path)
-        .output()
-        .ok()?;
+    let mut command = crate::process::command_no_window(&pdfinfo);
+    command.arg(path);
+    let output = run_child_bounded_until(
+        &mut command,
+        deadline,
+        PDFINFO_OUTPUT_MAX_BYTES,
+        POPPLER_DIAGNOSTIC_MAX_BYTES,
+    )
+    .ok()?;
+    if output.timed_out {
+        log::warn!("pdfinfo timed out for {}", path.display());
+        return None;
+    }
+    if output.stdout_truncated || output.stderr_truncated {
+        log::warn!(
+            "pdfinfo output exceeded the bounded capture limit for {}",
+            path.display()
+        );
+        return None;
+    }
     if !output.status.success() {
         log::debug!(
             "pdfinfo failed for {}: exit {:?}; stderr={}",
@@ -1154,6 +1923,7 @@ fn render_pdf_page_png(
     page_number: usize,
     dpi: u32,
     tmp_dir: &Path,
+    deadline: Instant,
 ) -> Result<std::path::PathBuf> {
     let pdftoppm = which::which("pdftoppm").map_err(|_| {
         VaultError::Io(std::io::Error::new(
@@ -1170,10 +1940,14 @@ fn render_pdf_page_png(
     })?;
     let page = page_number.to_string();
     let dpi_s = dpi.to_string();
-    let status = crate::process::command_no_window(&pdftoppm)
+    let scale_to_s = PDF_RENDER_MAX_DIMENSION.to_string();
+    let mut command = crate::process::command_no_window(&pdftoppm);
+    command
         .args([
             "-r",
             dpi_s.as_str(),
+            "-scale-to",
+            scale_to_s.as_str(),
             "-png",
             "-f",
             page.as_str(),
@@ -1182,13 +1956,30 @@ fn render_pdf_page_png(
             "-singlefile",
         ])
         .arg(path)
-        .arg(prefix_str)
-        .status()
-        .map_err(VaultError::Io)?;
-    if !status.success() {
+        .arg(prefix_str);
+    let output = run_child_bounded_until(
+        &mut command,
+        deadline,
+        POPPLER_DIAGNOSTIC_MAX_BYTES,
+        POPPLER_DIAGNOSTIC_MAX_BYTES,
+    )
+    .map_err(VaultError::Io)?;
+    if output.timed_out {
+        return Err(VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("pdftoppm page {page_number} timed out"),
+        )));
+    }
+    if output.stdout_truncated || output.stderr_truncated {
         return Err(VaultError::Io(std::io::Error::other(format!(
-            "pdftoppm page {page_number} failed: exit {}",
-            status.code().unwrap_or(-1)
+            "pdftoppm page {page_number} exceeded the bounded diagnostic output limit"
+        ))));
+    }
+    if !output.status.success() {
+        return Err(VaultError::Io(std::io::Error::other(format!(
+            "pdftoppm page {page_number} failed: exit {}; stderr={}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
         ))));
     }
     let png = prefix.with_extension("png");
@@ -1201,11 +1992,55 @@ fn render_pdf_page_png(
     Ok(png)
 }
 
-fn try_scheduler_pdf_page_ocr_from_path(
+#[derive(Debug)]
+struct RenderedOcrPage {
+    png: Vec<u8>,
+    visually_blank: bool,
+}
+
+fn read_rendered_page_png_bounded(path: &Path) -> Result<RenderedOcrPage> {
+    let max_encoded = crate::ocr_image_codec::MAX_ENCODED_INPUT_BYTES;
+    let metadata = std::fs::metadata(path).map_err(VaultError::Io)?;
+    if metadata.len() > u64::try_from(max_encoded).unwrap_or(u64::MAX) {
+        return Err(VaultError::InvalidInput(format!(
+            "rendered OCR page is {} bytes, above the {max_encoded} byte encoded-input limit",
+            metadata.len()
+        )));
+    }
+
+    let file = std::fs::File::open(path).map_err(VaultError::Io)?;
+    let mut encoded =
+        Vec::with_capacity(usize::try_from(metadata.len().min(64 * 1024)).unwrap_or(64 * 1024));
+    file.take(
+        u64::try_from(max_encoded)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .read_to_end(&mut encoded)
+    .map_err(VaultError::Io)?;
+    if encoded.len() > max_encoded {
+        return Err(VaultError::InvalidInput(format!(
+            "rendered OCR page grew above the {max_encoded} byte encoded-input limit while reading"
+        )));
+    }
+
+    // Header, decoded allocation, pixel count, dimensions and the re-encoded
+    // Scheduler body are all checked here before the page is copied into JSON.
+    let max_png_bytes = scheduler_inline_raw_budget_with_copies(scheduler_max_body_bytes(), 3);
+    crate::ocr_image_codec::canonicalize_for_scheduler_with_analysis(&encoded, max_png_bytes).map(
+        |image| RenderedOcrPage {
+            png: image.png,
+            visually_blank: image.visually_blank,
+        },
+    )
+}
+
+fn try_scheduler_pdf_page_ocr_from_path_with_budget(
     path: &Path,
     requested_dpi: u32,
     options: &ParseOptions,
-) -> Option<String> {
+    budget: SchedulerPdfOcrBudget,
+) -> Option<PdfOcrText> {
     if options.scheduler_base.is_none() || !scheduler_ocr_enabled() {
         return None;
     }
@@ -1228,7 +2063,8 @@ fn try_scheduler_pdf_page_ocr_from_path(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "document.pdf".to_string());
-    let page_count = pdf_page_count(path);
+    let page_timeout = scheduler_pdf_ocr_page_timeout(options);
+    let page_count = pdf_page_count(path, budget.operation_deadline(page_timeout));
     let page_limit = scheduler_pdf_ocr_page_limit(page_count);
     if page_limit == 0 {
         return None;
@@ -1236,58 +2072,46 @@ fn try_scheduler_pdf_page_ocr_from_path(
     let max_failed = scheduler_pdf_ocr_max_failed_pages(page_limit);
     let max_consecutive_failed = scheduler_pdf_ocr_max_consecutive_failures();
     let dpi_candidates = scheduler_pdf_ocr_dpi_candidates(requested_dpi);
-    let max_total_duration = scheduler_pdf_ocr_max_total_duration();
-    let page_timeout = scheduler_pdf_ocr_page_timeout(options);
-    let started_at = Instant::now();
     let tmp = tempfile::TempDir::new().ok()?;
 
     let mut all = String::with_capacity(page_limit.min(32) * 1024);
     let mut ok_pages = 0usize;
+    let mut blank_pages = 0usize;
     let mut empty_pages = 0usize;
     let mut failed_pages = 0usize;
     let mut consecutive_failed = 0usize;
+    let mut attempted_pages = 0usize;
+    let mut stopped_on_fatal_error = false;
 
     for page in 1..=page_limit {
-        if let Some(max_total_duration) = max_total_duration {
-            if started_at.elapsed() >= max_total_duration {
-                log::warn!(
-                    "scheduler PDF page OCR stopping for {} after {} ms (text_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?})",
-                    path.display(),
-                    started_at.elapsed().as_millis(),
-                    ok_pages,
-                    empty_pages,
-                    failed_pages,
-                    page_limit,
-                    page_count
-                );
-                break;
-            }
+        if budget.remaining() < SCHEDULER_TASK_CANCEL_RESERVE {
+            log::warn!(
+                "scheduler PDF page OCR stopping for {} after {} ms (text_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?})",
+                path.display(),
+                budget.started_at.elapsed().as_millis(),
+                ok_pages,
+                empty_pages,
+                failed_pages,
+                page_limit,
+                page_count
+            );
+            break;
         }
-        let mut poll_timeout = page_timeout;
-        if let Some(max_total_duration) = max_total_duration {
-            let remaining = max_total_duration.saturating_sub(started_at.elapsed());
-            if remaining < Duration::from_millis(250) {
-                log::warn!(
-                    "scheduler PDF page OCR stopping for {} with less than 250ms budget remaining (text_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?})",
-                    path.display(),
-                    ok_pages,
-                    empty_pages,
-                    failed_pages,
-                    page_limit,
-                    page_count
-                );
-                break;
-            }
-            poll_timeout = poll_timeout.min(remaining);
-        }
+        attempted_pages += 1;
+        let page_deadline = budget.operation_deadline(page_timeout);
 
         let mut page_rendered = false;
         let mut page_failed = false;
         let mut page_too_large = false;
+        let mut page_visually_blank = false;
         let mut page_text: Option<String> = None;
 
         for dpi in &dpi_candidates {
-            let png = match render_pdf_page_png(path, page, *dpi, tmp.path()) {
+            if Instant::now() >= page_deadline {
+                page_failed = true;
+                break;
+            }
+            let png = match render_pdf_page_png(path, page, *dpi, tmp.path(), page_deadline) {
                 Ok(png) => png,
                 Err(e) => {
                     page_failed = true;
@@ -1302,8 +2126,8 @@ fn try_scheduler_pdf_page_ocr_from_path(
                 }
             };
             page_rendered = true;
-            let data = match std::fs::read(&png) {
-                Ok(data) => data,
+            let rendered = match read_rendered_page_png_bounded(&png) {
+                Ok(rendered) => rendered,
                 Err(e) => {
                     page_failed = true;
                     log::warn!(
@@ -1315,6 +2139,8 @@ fn try_scheduler_pdf_page_ocr_from_path(
                     continue;
                 }
             };
+            page_visually_blank = rendered.visually_blank;
+            let data = rendered.png;
             if !scheduler_inline_file_fits_with_copies(
                 &format!("{filename}#page={page}"),
                 data.len(),
@@ -1323,6 +2149,11 @@ fn try_scheduler_pdf_page_ocr_from_path(
             ) {
                 page_too_large = true;
                 continue;
+            }
+            let poll_timeout = page_deadline.saturating_duration_since(Instant::now());
+            if poll_timeout <= SCHEDULER_TASK_CANCEL_RESERVE {
+                page_failed = true;
+                break;
             }
             match scheduler_ocr_image_bytes(
                 &data,
@@ -1357,11 +2188,17 @@ fn try_scheduler_pdf_page_ocr_from_path(
                             path.display(),
                             page
                         );
-                        return None;
+                        stopped_on_fatal_error = true;
+                        break;
                     }
                     break;
                 }
             }
+        }
+
+        if stopped_on_fatal_error {
+            failed_pages += 1;
+            break;
         }
 
         match page_text {
@@ -1371,6 +2208,18 @@ fn try_scheduler_pdf_page_ocr_from_path(
                 all.push_str(&format!("--- Page {page} ---\n"));
                 all.push_str(text.trim());
                 all.push_str("\n\n");
+            }
+            Some(_) if page_visually_blank => {
+                // A blank page is successful OCR coverage with no searchable
+                // text. Treating it as a failure would leave otherwise
+                // complete scanned PDFs on a permanent retry marker.
+                consecutive_failed = 0;
+                blank_pages += 1;
+                log::debug!(
+                    "scheduler PDF page OCR confirmed visually blank page {} for {}",
+                    page,
+                    path.display()
+                );
             }
             Some(_) => {
                 empty_pages += 1;
@@ -1424,42 +2273,70 @@ fn try_scheduler_pdf_page_ocr_from_path(
         }
     }
 
-    if all.trim().is_empty() {
+    let complete = !stopped_on_fatal_error
+        && failed_pages == 0
+        && empty_pages == 0
+        && attempted_pages == page_limit
+        && page_count.is_some_and(|count| count == page_limit);
+    if all.trim().is_empty() && !complete {
         return None;
     }
     log::info!(
-        "scheduler PDF page OCR completed for {}: text_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?}",
+        "scheduler PDF page OCR completed for {}: text_pages={}, blank_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?}",
         path.display(),
         ok_pages,
+        blank_pages,
         empty_pages,
         failed_pages,
         page_limit,
         page_count
     );
-    Some(all)
+    let reason = (!complete).then(|| {
+        format!(
+            "scheduler PDF OCR coverage incomplete: text_pages={ok_pages}, blank_pages={blank_pages}, empty_pages={empty_pages}, failed_pages={failed_pages}, attempted_pages={attempted_pages}, page_limit={page_limit}, detected_pages={page_count:?}"
+        )
+    });
+    Some(PdfOcrText {
+        text: all,
+        complete,
+        reason,
+    })
 }
 
-fn try_pdftotext_from_bytes(data: &[u8]) -> Option<String> {
+fn try_pdftotext_from_bytes(data: &[u8], deadline: Instant) -> Option<String> {
     let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
-    try_pdftotext_from_path(tmp.path())
+    try_pdftotext_from_path(tmp.path(), deadline)
 }
 
-fn try_pdftotext_from_path(path: &Path) -> Option<String> {
+fn try_pdftotext_from_path(path: &Path, deadline: Instant) -> Option<String> {
     let pdftotext = which::which("pdftotext").ok()?;
-    let output = match crate::process::command_no_window(&pdftotext)
-        .args(["-enc", "UTF-8"])
-        .arg(path)
-        .arg("-")
-        .output()
-    {
+    let mut command = crate::process::command_no_window(&pdftotext);
+    command.args(["-enc", "UTF-8"]).arg(path).arg("-");
+    let output = match run_child_bounded_until(
+        &mut command,
+        deadline,
+        PDF_TEXT_OUTPUT_MAX_BYTES,
+        POPPLER_DIAGNOSTIC_MAX_BYTES,
+    ) {
         Ok(output) => output,
         Err(e) => {
             log::warn!("pdftotext failed to start for {}: {e}", path.display());
             return None;
         }
     };
+    if output.timed_out {
+        log::warn!("pdftotext timed out for {}", path.display());
+        return None;
+    }
+    if output.stdout_truncated || output.stderr_truncated {
+        log::warn!(
+            "pdftotext output exceeded the bounded capture limit for {}",
+            path.display()
+        );
+        return None;
+    }
     if !output.status.success() {
         log::warn!(
             "pdftotext failed for {}: exit {:?}; stderr={}",
@@ -1483,14 +2360,17 @@ fn parse_pdf_file_with_dpi(
     dpi: u32,
     options: &ParseOptions,
 ) -> Result<(String, String)> {
+    let budget = SchedulerPdfOcrBudget::new(options);
     // 1. 本地文件优先走 Poppler。大型手册上 pdf_extract 可能产生海量日志或 panic，
     //    pdftotext 的流式外部进程路径更适合批量索引。
-    if let Some(pdftotext) = try_pdftotext_from_path(path) {
+    if let Some(pdftotext) = try_pdftotext_from_path(path, budget.deadline) {
         if pdf_text_layer_is_usable(&pdftotext) {
             let title = first_line_title(&pdftotext, stem);
             return Ok((title, pdftotext));
         }
-        if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+        if let Some(ocr_text) =
+            try_ocr_from_pdf_path_with_dpi_and_budget(path, dpi, options, budget)
+        {
             let title = first_line_title(&ocr_text, stem);
             return Ok((title, ocr_text));
         }
@@ -1502,7 +2382,9 @@ fn parse_pdf_file_with_dpi(
             "pdftotext produced no usable text for {}; trying scheduler OCR before pdf_extract",
             path.display()
         );
-        if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+        if let Some(ocr_text) =
+            try_ocr_from_pdf_path_with_dpi_and_budget(path, dpi, options, budget)
+        {
             let title = first_line_title(&ocr_text, stem);
             return Ok((title, ocr_text));
         }
@@ -2213,6 +3095,120 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn install_test_pdftoppm(path: &Path, dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = dir.join("rendered-page-fixture.png");
+        // Keep the generic rendered-page fixture visibly non-uniform.  A
+        // uniform synthetic image is intentionally classified as a confirmed
+        // blank page by the production codec, which would make tests for an
+        // OCR-empty *non-blank* page exercise the wrong branch.
+        image_wire::RgbaImage::from_fn(8, 8, |x, y| {
+            image_wire::Rgba([
+                20u8.saturating_add((x * 3) as u8),
+                40u8.saturating_add((y * 5) as u8),
+                60,
+                255,
+            ])
+        })
+        .save(&fixture)
+        .unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n\
+                 prefix=''\n\
+                 while [ \"$#\" -gt 0 ]; do\n\
+                   case \"$1\" in\n\
+                     -f|-l|-r|-scale-to) shift 2 ;;\n\
+                     -png|-singlefile) shift ;;\n\
+                     *) prefix=\"$1\"; shift ;;\n\
+                   esac\n\
+                 done\n\
+                 cp '{}' \"${{prefix}}.png\"\n",
+                fixture.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn install_test_pdftoppm_with_blank_second_page(path: &Path, dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let page_one = dir.join("rendered-page-1.png");
+        image_wire::RgbaImage::from_fn(8, 8, |x, y| {
+            image_wire::Rgba([(x * 23) as u8, (y * 19) as u8, 40, 255])
+        })
+        .save(&page_one)
+        .unwrap();
+        let page_two = dir.join("rendered-page-2.png");
+        image_wire::RgbaImage::from_pixel(8, 8, image_wire::Rgba([255, 255, 255, 255]))
+            .save(&page_two)
+            .unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n\
+                 prefix=''\n\
+                 page='1'\n\
+                 while [ \"$#\" -gt 0 ]; do\n\
+                   case \"$1\" in\n\
+                     -f) page=\"$2\"; shift 2 ;;\n\
+                     -l|-r|-scale-to) shift 2 ;;\n\
+                     -png|-singlefile) shift ;;\n\
+                     *) prefix=\"$1\"; shift ;;\n\
+                   esac\n\
+                 done\n\
+                 if [ \"$page\" = '2' ]; then\n\
+                   cp '{}' \"${{prefix}}.png\"\n\
+                 else\n\
+                   cp '{}' \"${{prefix}}.png\"\n\
+                 fi\n",
+                page_two.display(),
+                page_one.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn install_test_pdftoppm_with_blank_pages(path: &Path, dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = dir.join("rendered-blank-page.png");
+        image_wire::RgbaImage::from_pixel(8, 8, image_wire::Rgba([255, 255, 255, 255]))
+            .save(&fixture)
+            .unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\n\
+                 prefix=''\n\
+                 while [ \"$#\" -gt 0 ]; do\n\
+                   case \"$1\" in\n\
+                     -f|-l|-r|-scale-to) shift 2 ;;\n\
+                     -png|-singlefile) shift ;;\n\
+                     *) prefix=\"$1\"; shift ;;\n\
+                   esac\n\
+                 done\n\
+                 cp '{}' \"${{prefix}}.png\"\n",
+                fixture.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
     // ─── HTML ─────────────────────────────────────────────────────────────────
 
     #[test]
@@ -2719,7 +3715,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_pdf_page_ocr_is_explicit_opt_in() {
+    fn scheduler_pdf_page_ocr_defaults_on_and_can_be_disabled() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _restore = EnvRestore::new(&[
             "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
@@ -2734,6 +3730,9 @@ mod tests {
             std::env::remove_var(key);
         }
 
+        assert!(scheduler_pdf_page_ocr_enabled());
+
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "0");
         assert!(!scheduler_pdf_page_ocr_enabled());
 
         std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
@@ -2762,22 +3761,7 @@ mod tests {
         let pdfinfo = dir.path().join("pdfinfo");
         std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 1'\n").unwrap();
         let pdftoppm = dir.path().join("pdftoppm");
-        std::fs::write(
-            &pdftoppm,
-            "#!/bin/sh\n\
-             page=1\n\
-             prefix=''\n\
-             while [ \"$#\" -gt 0 ]; do\n\
-               case \"$1\" in\n\
-                 -f) page=\"$2\"; shift 2 ;;\n\
-                 -l|-r) shift 2 ;;\n\
-                 -png|-singlefile) shift ;;\n\
-                 *) prefix=\"$1\"; shift ;;\n\
-               esac\n\
-             done\n\
-             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
-        )
-        .unwrap();
+        install_test_pdftoppm(&pdftoppm, dir.path());
         for exe in [&pdftotext, &pdfinfo, &pdftoppm] {
             let mut perms = std::fs::metadata(exe).unwrap().permissions();
             perms.set_mode(0o755);
@@ -2804,8 +3788,8 @@ mod tests {
 
         let (_title, text) = parse_file_with_options(&pdf, &options).unwrap();
         assert!(text.contains("OCR page 1"), "text={text}");
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
         handle.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2831,6 +3815,18 @@ mod tests {
             Some(encoded.as_str())
         );
         assert_eq!(
+            body.pointer("/content_type").and_then(Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            body.pointer("/input/content_type").and_then(Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            body.pointer("/x/content_type").and_then(Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
             body.pointer("/input/profile").and_then(Value::as_str),
             Some("scan")
         );
@@ -2838,10 +3834,8 @@ mod tests {
             body.pointer("/x/profile_id").and_then(Value::as_str),
             Some("scan")
         );
-        assert_eq!(
-            body.pointer("/timeout_ms").and_then(Value::as_u64),
-            Some(1_500)
-        );
+        assert!(body.get("timeout_ms").is_none());
+        assert!(body.get("ttl_ms").is_none());
     }
 
     #[test]
@@ -2884,19 +3878,17 @@ mod tests {
     fn start_scheduler_ocr_mock(
         expected_requests: usize,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
-        start_scheduler_ocr_mock_with_outputs(
-            expected_requests,
-            |page| serde_json::json!({"text": format!("OCR page {page}")}),
-        )
+        start_scheduler_ocr_mock_with_outputs(expected_requests, |page| {
+            scheduler_native_ocr_outputs(page, &format!("OCR page {page}"))
+        })
     }
 
     fn start_scheduler_empty_ocr_mock(
         expected_requests: usize,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
-        start_scheduler_ocr_mock_with_outputs(
-            expected_requests,
-            |_page| serde_json::json!({"text": ""}),
-        )
+        start_scheduler_ocr_mock_with_outputs(expected_requests, |page| {
+            scheduler_native_ocr_outputs(page, "")
+        })
     }
 
     fn start_scheduler_unsupported_ocr_mock(
@@ -2920,6 +3912,52 @@ mod tests {
     fn start_scheduler_ocr_mock_with_outputs<F>(
         expected_requests: usize,
         outputs_for_page: F,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>)
+    where
+        F: Fn(u64) -> Value + Send + 'static,
+    {
+        let mut replies = Vec::with_capacity(expected_requests.saturating_mul(3));
+        for page in 1..=expected_requests as u64 {
+            let job_id = format!("ocr-inline-{page}");
+            let outputs = outputs_for_page(page);
+            let output_failed = outputs.get("status").and_then(Value::as_str) != Some("ok");
+            replies.push(scheduler_async_submit(Some(&job_id), Duration::ZERO));
+            replies.push(SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": job_id.clone(),
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "done",
+                    "phase": "done",
+                    "outputs": outputs
+                }),
+            ));
+            if output_failed {
+                replies.push(scheduler_cancel_reply(&job_id, 200));
+            }
+        }
+        let (base, request_lines, inner_handle) = start_scheduler_sequence_mock(replies);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
+        let handle = std::thread::spawn(move || {
+            let _ = inner_handle.join();
+            let submissions = request_lines
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.starts_with("POST /kb/tasks/kb.document.ocr_recognize:async "))
+                .count();
+            request_count.store(submissions, Ordering::SeqCst);
+        });
+        (base, requests, handle)
+    }
+
+    fn start_scheduler_ocr_mock_with_response<F>(
+        expected_requests: usize,
+        response_for_page: F,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>)
     where
         F: Fn(u64) -> Value + Send + 'static,
@@ -2986,14 +4024,7 @@ mod tests {
                     .and_then(|v| v.get("page_number").and_then(Value::as_u64))
                     .unwrap_or(0);
                 seen.fetch_add(1, Ordering::SeqCst);
-                let outputs = outputs_for_page(page);
-                let payload = serde_json::json!({
-                    "scheduled_as": "sync",
-                    "status": "done",
-                    "task": "kb.document.ocr_recognize",
-                    "outputs": outputs
-                })
-                .to_string();
+                let payload = response_for_page(page).to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     payload.len(),
@@ -3003,6 +4034,784 @@ mod tests {
             }
         });
         (format!("http://{addr}"), requests, handle)
+    }
+
+    struct SchedulerSequenceReply {
+        status: u16,
+        body: Option<String>,
+        delay: Duration,
+    }
+
+    impl SchedulerSequenceReply {
+        fn json(status: u16, body: Value) -> Self {
+            Self {
+                status,
+                body: Some(body.to_string()),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn delayed_json(status: u16, body: Value, delay: Duration) -> Self {
+            Self {
+                status,
+                body: Some(body.to_string()),
+                delay,
+            }
+        }
+    }
+
+    fn start_scheduler_sequence_mock(
+        replies: Vec<SchedulerSequenceReply>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let handle = std::thread::spawn(move || {
+            let accept_deadline = Instant::now() + Duration::from_secs(3);
+            let mut handlers = Vec::new();
+            for reply in replies {
+                let (stream, _) = loop {
+                    match listener.accept() {
+                        Ok(pair) => break pair,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= accept_deadline {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return,
+                    }
+                };
+                let seen = Arc::clone(&seen);
+                handlers.push(std::thread::spawn(move || {
+                    handle_scheduler_sequence_request(stream, seen, reply);
+                }));
+            }
+
+            let linger_deadline = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < linger_deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let seen = Arc::clone(&seen);
+                        handlers.push(std::thread::spawn(move || {
+                            handle_scheduler_sequence_request(
+                                stream,
+                                seen,
+                                SchedulerSequenceReply::json(
+                                    500,
+                                    serde_json::json!({"error": "unexpected request"}),
+                                ),
+                            );
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+            for handler in handlers {
+                let _ = handler.join();
+            }
+        });
+        (format!("http://{addr}"), requests, handle)
+    }
+
+    fn handle_scheduler_sequence_request(
+        mut stream: std::net::TcpStream,
+        requests: Arc<Mutex<Vec<String>>>,
+        reply: SchedulerSequenceReply,
+    ) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let mut header_end = None;
+        while header_end.is_none() {
+            let Ok(n) = stream.read(&mut tmp) else {
+                return;
+            };
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            header_end = buf.windows(4).position(|window| window == b"\r\n\r\n");
+        }
+        let header_end = header_end.unwrap() + 4;
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        let request_line = headers.lines().next().unwrap_or_default().to_string();
+        while buf.len().saturating_sub(header_end) < content_length {
+            let Ok(n) = stream.read(&mut tmp) else {
+                break;
+            };
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        requests.lock().unwrap().push(request_line);
+        std::thread::sleep(reply.delay);
+        let Some(body) = reply.body else {
+            return;
+        };
+        let reason = match reply.status {
+            200 => "OK",
+            202 => "Accepted",
+            500 => "Internal Server Error",
+            _ => "Mock",
+        };
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            reply.status,
+            reason,
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
+
+    fn scheduler_async_submit(job_id: Option<&str>, delay: Duration) -> SchedulerSequenceReply {
+        SchedulerSequenceReply::delayed_json(
+            202,
+            serde_json::json!({
+                "schema_version": "kb_task.v1",
+                "scheduled_as": "async",
+                "job_id": job_id,
+                "status": "queued",
+                "task": "kb.document.ocr_recognize",
+                "model": "ocr-rec",
+                "outputs": {}
+            }),
+            delay,
+        )
+    }
+
+    fn scheduler_native_ocr_outputs(page_index: u64, text: &str) -> Value {
+        let layout = if text.is_empty() {
+            Vec::<Value>::new()
+        } else {
+            vec![serde_json::json!({
+                "bbox": {"x": 0, "y": 0, "w": 10, "h": 10},
+                "text": text,
+                "confidence": 0.99
+            })]
+        };
+        serde_json::json!({
+            "schema_version": "ocr_result.v1",
+            "task": "kb.document.ocr_recognize",
+            "status": "ok",
+            "engine": "test-ocr",
+            "degraded": false,
+            "text": text,
+            "layout": layout.clone(),
+            "lines": layout.clone(),
+            "pages": [{
+                "page_index": page_index,
+                "width": 100,
+                "height": 100,
+                "text": text,
+                "blocks": layout.clone(),
+                "layout": layout,
+                "confidence": if text.is_empty() { Value::Null } else { serde_json::json!(0.99) }
+            }]
+        })
+    }
+
+    fn scheduler_cancel_reply(job_id: &str, status: u16) -> SchedulerSequenceReply {
+        SchedulerSequenceReply::json(
+            status,
+            serde_json::json!({"job_id": job_id, "status": "canceled"}),
+        )
+    }
+
+    fn scheduler_done_reply(job_id: &str, outputs: Value) -> SchedulerSequenceReply {
+        SchedulerSequenceReply::json(
+            200,
+            serde_json::json!({
+                "schema_version": "job_status.v2",
+                "job_id": job_id,
+                "task": "kb.document.ocr_recognize",
+                "model": "ocr-rec",
+                "scheduled_as": "async",
+                "status": "done",
+                "phase": "done",
+                "outputs": outputs
+            }),
+        )
+    }
+
+    #[test]
+    fn scheduler_task_outputs_rejects_async_response_without_job_id() {
+        let (base, requests, handle) = start_scheduler_ocr_mock_with_response(1, |_| {
+            serde_json::json!({
+                "scheduled_as": "async",
+                "status": "done",
+                "task": "kb.document.ocr_recognize",
+                "outputs": {"text": "must not escape validation"}
+            })
+        });
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .expect_err("async parser response without job_id must fail");
+        assert!(err.to_string().contains("without job_id"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn scheduler_task_outputs_rejects_unknown_200_status_without_job_id() {
+        let (base, requests, handle) = start_scheduler_ocr_mock_with_response(1, |_| {
+            serde_json::json!({
+                "scheduled_as": "sync",
+                "status": "future_scheduler_state",
+                "task": "kb.document.ocr_recognize",
+                "outputs": {"text": "must not escape validation"}
+            })
+        });
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .expect_err("unknown 200 status without job_id must fail closed");
+        assert!(err.to_string().contains("without job_id"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn scheduler_task_deadline_covers_submit_and_poll_then_cancels() {
+        let job_id = "ocr-deadline-job";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(job_id), Duration::from_millis(300)),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": job_id,
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "queued",
+                    "phase": "scheduler_queue"
+                }),
+            ),
+            scheduler_cancel_reply(job_id, 200),
+        ]);
+        let started = Instant::now();
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_millis(600),
+        )
+        .expect_err("one total deadline must cover submit and poll");
+        let elapsed = started.elapsed();
+        assert!(err.to_string().contains("timed out after 600 ms"));
+        assert!(elapsed < Duration::from_millis(800));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "requests={requests:?}");
+        assert!(requests[2].starts_with("POST /jobs/ocr-deadline-job:cancel "));
+    }
+
+    #[test]
+    fn scheduler_poll_transport_timeout_uses_remaining_budget_and_cancels() {
+        let job_id = "ocr-transport-job";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(job_id), Duration::from_millis(250)),
+            SchedulerSequenceReply {
+                status: 200,
+                body: Some(
+                    serde_json::json!({
+                        "schema_version": "job_status.v2",
+                        "job_id": job_id,
+                        "task": "kb.document.ocr_recognize",
+                        "model": "ocr-rec",
+                        "scheduled_as": "async",
+                        "status": "running",
+                        "phase": "worker_infer"
+                    })
+                    .to_string(),
+                ),
+                delay: Duration::from_millis(900),
+            },
+            scheduler_cancel_reply(job_id, 500),
+        ]);
+        let started = Instant::now();
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_millis(700),
+        )
+        .expect_err("stalled poll must fail within the remaining total budget");
+        let elapsed = started.elapsed();
+        let message = err.to_string();
+        assert!(message.contains("/jobs/ocr-transport-job request failed:"));
+        assert!(!message.contains(":cancel"));
+        assert!(elapsed < Duration::from_millis(800));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "requests={requests:?}");
+        assert!(requests[2].starts_with("POST /jobs/ocr-transport-job:cancel "));
+    }
+
+    #[test]
+    fn scheduler_invalid_poll_envelope_cancels_original_job() {
+        let job_id = "ocr-envelope-job";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(job_id), Duration::ZERO),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": "different-job",
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "done",
+                    "phase": "done",
+                    "outputs": scheduler_native_ocr_outputs(1, "must not be accepted")
+                }),
+            ),
+            scheduler_cancel_reply(job_id, 200),
+        ]);
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .expect_err("mismatched poll envelope must fail");
+        assert!(err.to_string().contains("invalid status envelope"));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "requests={requests:?}");
+        assert!(requests[2].starts_with("POST /jobs/ocr-envelope-job:cancel "));
+    }
+
+    #[test]
+    fn scheduler_wrong_submit_lineage_cancels_trackable_job() {
+        let job_id = "ocr-submit-lineage-job";
+        let mut submit = scheduler_async_submit(Some(job_id), Duration::ZERO);
+        submit.body = Some(
+            serde_json::json!({
+                "schema_version": "kb_task.v1",
+                "scheduled_as": "async",
+                "job_id": job_id,
+                "status": "queued",
+                "task": "kb.query.ask",
+                "model": "ocr-rec"
+            })
+            .to_string(),
+        );
+        let (base, requests, handle) =
+            start_scheduler_sequence_mock(vec![submit, scheduler_cancel_reply(job_id, 500)]);
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .expect_err("wrong submit task lineage must fail closed");
+        assert!(err
+            .to_string()
+            .contains("invalid async submission envelope"));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "requests={requests:?}");
+        assert!(requests[1].starts_with("POST /jobs/ocr-submit-lineage-job:cancel "));
+    }
+
+    #[test]
+    fn scheduler_wrong_poll_schema_or_task_cancels_original_job() {
+        for mutation in ["schema", "task"] {
+            let job_id = format!("ocr-poll-{mutation}-job");
+            let mut envelope = serde_json::json!({
+                "schema_version": "job_status.v2",
+                "job_id": job_id.clone(),
+                "task": "kb.document.ocr_recognize",
+                "model": "ocr-rec",
+                "scheduled_as": "async",
+                "status": "done",
+                "phase": "done",
+                "outputs": scheduler_native_ocr_outputs(1, "decoy")
+            });
+            if mutation == "schema" {
+                envelope["schema_version"] = serde_json::json!("job_status.v1");
+            } else {
+                envelope["task"] = serde_json::json!("kb.query.ask");
+            }
+            let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+                scheduler_async_submit(Some(&job_id), Duration::ZERO),
+                SchedulerSequenceReply::json(200, envelope),
+                scheduler_cancel_reply(&job_id, 200),
+            ]);
+            let err = scheduler_task_outputs(
+                &base,
+                "kb.document.ocr_recognize",
+                serde_json::json!({"page_number": 1}),
+                Duration::from_secs(1),
+            )
+            .expect_err("wrong poll lineage must fail closed");
+            assert!(err.to_string().contains("invalid status envelope"));
+            handle.join().unwrap();
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                3,
+                "mutation={mutation} requests={requests:?}"
+            );
+            assert!(requests[2].starts_with(&format!("POST /jobs/{job_id}:cancel ")));
+        }
+    }
+
+    #[test]
+    fn scheduler_ocr_output_schema_task_page_and_generic_decoys_fail_closed() {
+        for mutation in ["schema", "task", "page", "generic-answer"] {
+            let job_id = format!("ocr-output-{mutation}-job");
+            let mut outputs = scheduler_native_ocr_outputs(7, "canonical text");
+            match mutation {
+                "schema" => outputs["schema_version"] = serde_json::json!("ocr_result.v0"),
+                "task" => outputs["task"] = serde_json::json!("kb.query.ask"),
+                "page" => outputs["pages"][0]["page_index"] = serde_json::json!(8),
+                "generic-answer" => {
+                    outputs = serde_json::json!({
+                        "answer": "generic decoy must not become searchable OCR",
+                        "content": "another decoy"
+                    });
+                }
+                _ => unreachable!(),
+            }
+            let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+                scheduler_async_submit(Some(&job_id), Duration::ZERO),
+                scheduler_done_reply(&job_id, outputs),
+                scheduler_cancel_reply(&job_id, 500),
+            ]);
+            let err = scheduler_task_outputs(
+                &base,
+                "kb.document.ocr_recognize",
+                serde_json::json!({"page_number": 7}),
+                Duration::from_secs(1),
+            )
+            .expect_err("invalid OCR output must fail closed");
+            assert!(
+                err.to_string().contains("invalid ocr_result.v1 envelope"),
+                "mutation={mutation} error={err}"
+            );
+            handle.join().unwrap();
+            let requests = requests.lock().unwrap();
+            assert_eq!(
+                requests.len(),
+                3,
+                "mutation={mutation} requests={requests:?}"
+            );
+            assert!(requests[2].starts_with(&format!("POST /jobs/{job_id}:cancel ")));
+        }
+    }
+
+    #[test]
+    fn scheduler_failed_terminal_job_cancels_without_masking_error() {
+        let job_id = "ocr-failed-job";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(job_id), Duration::ZERO),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": job_id,
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "error",
+                    "phase": "done",
+                    "detail": "worker exploded"
+                }),
+            ),
+            scheduler_cancel_reply(job_id, 500),
+        ]);
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .expect_err("failed terminal job must remain an error");
+        let message = err.to_string();
+        assert!(message.contains("worker exploded"));
+        assert!(!message.contains(":cancel"));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "requests={requests:?}");
+        assert!(requests[2].starts_with("POST /jobs/ocr-failed-job:cancel "));
+    }
+
+    #[test]
+    fn scheduler_successful_job_does_not_cancel() {
+        let job_id = "ocr-success-job";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(job_id), Duration::ZERO),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": job_id,
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "done",
+                    "phase": "done",
+                    "outputs": scheduler_native_ocr_outputs(1, "recognized")
+                }),
+            ),
+        ]);
+        let outputs = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(outputs["text"], "recognized");
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn scheduler_submit_without_job_id_does_not_cancel() {
+        let (base, requests, handle) =
+            start_scheduler_sequence_mock(vec![scheduler_async_submit(None, Duration::ZERO)]);
+        let err = scheduler_task_outputs(
+            &base,
+            "kb.document.ocr_recognize",
+            serde_json::json!({"page_number": 1}),
+            Duration::from_secs(1),
+        )
+        .expect_err("async submit without a job id must fail");
+        assert!(err.to_string().contains("without job_id"));
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[cfg(unix)]
+    const PDF_DEADLINE_ENV_KEYS: &[&str] = &[
+        "PATH",
+        "ATTUNE_SCHEDULER_OCR_ENABLED",
+        "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
+        "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+        "ATTUNE_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+        "ATTUNE_SCHEDULER_ALLOW_LOCAL_OCR_PROVIDER_FALLBACK",
+        "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+    ];
+
+    #[cfg(unix)]
+    fn install_fake_executable(path: &Path, body: impl AsRef<[u8]>) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, body).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn configure_pdf_deadline_test(dir: &Path, total_ms: u64) {
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", dir.display(), old_path.to_string_lossy()),
+        );
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
+        std::env::set_var(
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            total_ms.to_string(),
+        );
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS", "1000");
+        std::env::set_var("ATTUNE_SCHEDULER_ALLOW_LOCAL_OCR_PROVIDER_FALLBACK", "0");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+    }
+
+    #[cfg(unix)]
+    fn assert_timed_child_is_gone(pid_file: &Path) {
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("timed child must record its pid")
+            .trim()
+            .to_string();
+        if Path::new("/proc").is_dir() {
+            assert!(
+                !Path::new("/proc").join(&pid).exists(),
+                "timed child process {pid} still exists after kill/wait"
+            );
+        }
+    }
+
+    fn unexpected_scheduler_reply() -> SchedulerSequenceReply {
+        SchedulerSequenceReply::json(
+            500,
+            serde_json::json!({"error": "unexpected scheduler request"}),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdftotext_timeout_uses_shared_budget_kills_child_and_skips_ocr() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(PDF_DEADLINE_ENV_KEYS);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("pdftotext.pid");
+        let pdfinfo_marker = dir.path().join("pdfinfo.started");
+        let render_marker = dir.path().join("pdftoppm.started");
+        install_fake_executable(
+            &dir.path().join("pdftotext"),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 5\n",
+                pid_file.display()
+            ),
+        );
+        install_fake_executable(
+            &dir.path().join("pdfinfo"),
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nprintf 'Pages: 1\\n'\n",
+                pdfinfo_marker.display()
+            ),
+        );
+        install_fake_executable(
+            &dir.path().join("pdftoppm"),
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nexit 0\n",
+                render_marker.display()
+            ),
+        );
+        configure_pdf_deadline_test(dir.path(), 400);
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF fake scanned document").unwrap();
+        // Keep the listener alive long enough to catch an erroneous submit.
+        let (base, requests, handle) =
+            start_scheduler_sequence_mock(vec![unexpected_scheduler_reply()]);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let started = Instant::now();
+        let result = parse_pdf_file_with_dpi(&pdf, "scan", 120, &options);
+        let elapsed = started.elapsed();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "pdftotext exceeded shared PDF deadline: {elapsed:?}"
+        );
+        assert!(!pdfinfo_marker.exists(), "pdfinfo started after deadline");
+        assert!(!render_marker.exists(), "render started after deadline");
+        assert_timed_child_is_gone(&pid_file);
+        handle.join().unwrap();
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdfinfo_timeout_kills_child_and_prevents_render_or_submit() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(PDF_DEADLINE_ENV_KEYS);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("pdfinfo.pid");
+        let render_marker = dir.path().join("pdftoppm.started");
+        install_fake_executable(
+            &dir.path().join("pdfinfo"),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 5\n",
+                pid_file.display()
+            ),
+        );
+        install_fake_executable(
+            &dir.path().join("pdftoppm"),
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nexit 0\n",
+                render_marker.display()
+            ),
+        );
+        configure_pdf_deadline_test(dir.path(), 400);
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF fake scanned document").unwrap();
+        let (base, requests, handle) =
+            start_scheduler_sequence_mock(vec![unexpected_scheduler_reply()]);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let started = Instant::now();
+        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 120, &options);
+        let elapsed = started.elapsed();
+        assert!(text.is_none());
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "pdfinfo exceeded total budget: {elapsed:?}"
+        );
+        assert!(
+            !render_marker.exists(),
+            "render started after pdfinfo timeout"
+        );
+        assert_timed_child_is_gone(&pid_file);
+        handle.join().unwrap();
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdftoppm_timeout_kills_child_and_prevents_scheduler_submit() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(PDF_DEADLINE_ENV_KEYS);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_file = dir.path().join("pdftoppm.pid");
+        install_fake_executable(
+            &dir.path().join("pdfinfo"),
+            "#!/bin/sh\nprintf 'Pages: 2\\n'\n",
+        );
+        install_fake_executable(
+            &dir.path().join("pdftoppm"),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /bin/sleep 5\n",
+                pid_file.display()
+            ),
+        );
+        configure_pdf_deadline_test(dir.path(), 500);
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF fake scanned document").unwrap();
+        let (base, requests, handle) =
+            start_scheduler_sequence_mock(vec![unexpected_scheduler_reply()]);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let started = Instant::now();
+        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 120, &options);
+        let elapsed = started.elapsed();
+        assert!(text.is_none());
+        assert!(
+            elapsed < Duration::from_millis(1_000),
+            "pdftoppm exceeded total budget: {elapsed:?}"
+        );
+        assert_timed_child_is_gone(&pid_file);
+        handle.join().unwrap();
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -3025,22 +4834,7 @@ mod tests {
         let pdfinfo = dir.path().join("pdfinfo");
         std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 2'\n").unwrap();
         let pdftoppm = dir.path().join("pdftoppm");
-        std::fs::write(
-            &pdftoppm,
-            "#!/bin/sh\n\
-             page=1\n\
-             prefix=''\n\
-             while [ \"$#\" -gt 0 ]; do\n\
-               case \"$1\" in\n\
-                 -f) page=\"$2\"; shift 2 ;;\n\
-                 -l|-r) shift 2 ;;\n\
-                 -png|-singlefile) shift ;;\n\
-                 *) prefix=\"$1\"; shift ;;\n\
-               esac\n\
-             done\n\
-             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
-        )
-        .unwrap();
+        install_test_pdftoppm(&pdftoppm, dir.path());
         for exe in [&pdfinfo, &pdftoppm] {
             let mut perms = std::fs::metadata(exe).unwrap().permissions();
             perms.set_mode(0o755);
@@ -3065,13 +4859,212 @@ mod tests {
             .with_scheduler_base(Some(&base))
             .with_scheduler_timeout_ms(5_000);
 
-        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options).unwrap();
+        let result = try_scheduler_pdf_page_ocr_from_path_with_budget(
+            &pdf,
+            300,
+            &options,
+            SchedulerPdfOcrBudget::new(&options),
+        )
+        .unwrap();
+        assert!(result.complete, "full two-page coverage must be complete");
+        let text = result.text;
         assert!(text.contains("--- Page 1 ---"));
         assert!(text.contains("OCR page 1"));
         assert!(text.contains("--- Page 2 ---"));
         assert!(text.contains("OCR page 2"));
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
         handle.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_counts_confirmed_blank_page_as_complete_coverage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 2'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        install_test_pdftoppm_with_blank_second_page(&pdftoppm, dir.path());
+        for executable in [&pdfinfo, &pdftoppm] {
+            let mut permissions = std::fs::metadata(executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(executable, permissions).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", dir.path().display(), old_path.to_string_lossy()),
+        );
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "8192");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "2");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "180");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("scan-with-blank-page.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let (base, requests, handle) = start_scheduler_ocr_mock_with_outputs(2, |page| {
+            scheduler_native_ocr_outputs(
+                page,
+                if page == 1 {
+                    "searchable first page"
+                } else {
+                    ""
+                },
+            )
+        });
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let result = try_scheduler_pdf_page_ocr_from_path_with_budget(
+            &pdf,
+            300,
+            &options,
+            SchedulerPdfOcrBudget::new(&options),
+        );
+        if result.is_none() {
+            handle.join().unwrap();
+            panic!(
+                "blank-page OCR returned no result after {} Scheduler submissions",
+                requests.load(Ordering::SeqCst)
+            );
+        }
+        let result = result.unwrap();
+        assert!(
+            result.complete,
+            "a confirmed blank page is complete coverage"
+        );
+        assert!(result.text.contains("searchable first page"));
+        assert!(!result.text.contains("--- Page 2 ---"));
+        assert!(result.reason.is_none());
+        handle.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_all_blank_pages_are_complete_without_text() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 2'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        install_test_pdftoppm_with_blank_pages(&pdftoppm, dir.path());
+        for executable in [&pdfinfo, &pdftoppm] {
+            let mut permissions = std::fs::metadata(executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(executable, permissions).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", dir.path().display(), old_path.to_string_lossy()),
+        );
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "8192");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "2");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("blank-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let (base, requests, handle) = start_scheduler_empty_ocr_mock(2);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let result = try_scheduler_pdf_page_ocr_from_path_with_budget(
+            &pdf,
+            120,
+            &options,
+            SchedulerPdfOcrBudget::new(&options),
+        )
+        .expect("confirmed blank pages should produce a complete OCR result");
+        assert!(result.complete);
+        assert!(result.text.is_empty());
+        assert!(result.reason.is_none());
+        let parsed = parsed_pdf_ocr("blank-scan", result);
+        assert!(matches!(
+            parsed.quality,
+            ParseQuality::CompleteNoText { .. }
+        ));
+        handle.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn partial_pdf_ocr_is_exposed_as_retryable_degraded_parse_quality() {
+        let parsed = parsed_pdf_ocr(
+            "scan",
+            PdfOcrText {
+                text: "--- Page 1 ---\npartial searchable text".to_string(),
+                complete: false,
+                reason: Some("only 1 of 2 pages completed".to_string()),
+            },
+        );
+        assert!(parsed.content.contains("partial searchable text"));
+        assert_eq!(
+            parsed.quality,
+            ParseQuality::RetryableDegraded {
+                reason: "only 1 of 2 pages completed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn fully_covered_blank_pdf_is_complete_without_searchable_text() {
+        let parsed = parsed_pdf_ocr("blank-scan", PdfOcrText::complete(String::new()));
+        assert_eq!(parsed.title, "blank-scan");
+        assert!(parsed.content.is_empty());
+        assert_eq!(
+            parsed.quality,
+            ParseQuality::CompleteNoText {
+                reason: "PDF OCR completed and every detected page was visually blank".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rendered_page_reader_rejects_oversized_file_before_full_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("oversized.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::ocr_image_codec::MAX_ENCODED_INPUT_BYTES as u64 + 1)
+            .unwrap();
+
+        let error = read_rendered_page_png_bounded(&path).unwrap_err();
+        assert!(error.to_string().contains("encoded-input limit"));
     }
 
     #[cfg(unix)]
@@ -3097,22 +5090,7 @@ mod tests {
         let pdfinfo = dir.path().join("pdfinfo");
         std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 10'\n").unwrap();
         let pdftoppm = dir.path().join("pdftoppm");
-        std::fs::write(
-            &pdftoppm,
-            "#!/bin/sh\n\
-             page=1\n\
-             prefix=''\n\
-             while [ \"$#\" -gt 0 ]; do\n\
-               case \"$1\" in\n\
-                 -f) page=\"$2\"; shift 2 ;;\n\
-                 -l|-r) shift 2 ;;\n\
-                 -png|-singlefile) shift ;;\n\
-                 *) prefix=\"$1\"; shift ;;\n\
-               esac\n\
-             done\n\
-             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
-        )
-        .unwrap();
+        install_test_pdftoppm(&pdftoppm, dir.path());
         for exe in [&pdfinfo, &pdftoppm] {
             let mut perms = std::fs::metadata(exe).unwrap().permissions();
             perms.set_mode(0o755);
@@ -3142,8 +5120,8 @@ mod tests {
 
         let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options);
         assert!(text.is_none());
-        assert_eq!(requests.load(Ordering::SeqCst), 3);
         handle.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 
     #[cfg(unix)]
@@ -3169,22 +5147,7 @@ mod tests {
         let pdfinfo = dir.path().join("pdfinfo");
         std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 10'\n").unwrap();
         let pdftoppm = dir.path().join("pdftoppm");
-        std::fs::write(
-            &pdftoppm,
-            "#!/bin/sh\n\
-             page=1\n\
-             prefix=''\n\
-             while [ \"$#\" -gt 0 ]; do\n\
-               case \"$1\" in\n\
-                 -f) page=\"$2\"; shift 2 ;;\n\
-                 -l|-r) shift 2 ;;\n\
-                 -png|-singlefile) shift ;;\n\
-                 *) prefix=\"$1\"; shift ;;\n\
-               esac\n\
-             done\n\
-             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
-        )
-        .unwrap();
+        install_test_pdftoppm(&pdftoppm, dir.path());
         for exe in [&pdfinfo, &pdftoppm] {
             let mut perms = std::fs::metadata(exe).unwrap().permissions();
             perms.set_mode(0o755);
@@ -3214,8 +5177,8 @@ mod tests {
 
         let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options);
         assert!(text.is_none());
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
         handle.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(unix)]
@@ -3257,6 +5220,98 @@ mod tests {
         let options = ParseOptions::default().with_scheduler_base(Some("http://127.0.0.1:1"));
         let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options).unwrap();
         assert_eq!(text.trim(), "OCR sidecar fallback text");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ocrmypdf_fallback_obeys_deadline_and_reaps_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+            "ATTUNE_TEST_OCRMYPDF_PID_FILE",
+            "ATTUNE_TEST_OCRMYPDF_CHILD_PID_FILE",
+            "ATTUNE_TEST_OCRMYPDF_TARGET",
+            "PATH",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let fake_ocrmypdf = dir.path().join("ocrmypdf");
+        std::fs::write(
+            &fake_ocrmypdf,
+            "#!/bin/sh\n\
+             target_seen=0\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"$ATTUNE_TEST_OCRMYPDF_TARGET\" ]; then target_seen=1; fi\n\
+             done\n\
+             if [ \"$target_seen\" != '1' ]; then exit 1; fi\n\
+             printf '%s' \"$$\" > \"$ATTUNE_TEST_OCRMYPDF_PID_FILE\"\n\
+             sleep 5 &\n\
+             child_pid=$!\n\
+             printf '%s' \"$child_pid\" > \"$ATTUNE_TEST_OCRMYPDF_CHILD_PID_FILE\"\n\
+             wait \"$child_pid\"\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_ocrmypdf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_ocrmypdf, perms).unwrap();
+
+        let pid_file = dir.path().join("ocrmypdf.pid");
+        let child_pid_file = dir.path().join("ocrmypdf-child.pid");
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "1");
+        std::env::set_var("ATTUNE_TEST_OCRMYPDF_PID_FILE", &pid_file);
+        std::env::set_var("ATTUNE_TEST_OCRMYPDF_CHILD_PID_FILE", &child_pid_file);
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF fake scanned page").unwrap();
+        std::env::set_var("ATTUNE_TEST_OCRMYPDF_TARGET", &pdf);
+
+        let started = Instant::now();
+        let text = try_ocrmypdf_sidecar_from_path(
+            &pdf,
+            started.checked_add(Duration::from_millis(300)).unwrap(),
+        );
+        assert!(text.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let parent_pid = std::fs::read_to_string(&pid_file).unwrap();
+        let parent_process_path = format!("/proc/{}", parent_pid.trim());
+        let parent_status = std::fs::read_to_string(format!("{parent_process_path}/status"))
+            .unwrap_or_else(|_| "process status unavailable".to_string());
+        assert!(
+            !Path::new(&parent_process_path).exists(),
+            "timed-out ocrmypdf parent {} was not reaped:\n{}",
+            parent_pid.trim(),
+            parent_status
+        );
+
+        let child_pid = std::fs::read_to_string(&child_pid_file).unwrap();
+        let child_process_path = format!("/proc/{}", child_pid.trim());
+        if Path::new(&child_process_path).exists() {
+            // The grandchild is not waitable by this Rust process.  PID 1 may
+            // retain its already-killed, resource-free zombie entry briefly;
+            // reject every live state while accepting that bounded handoff.
+            match std::fs::read_to_string(format!("{child_process_path}/status")) {
+                Ok(status) => {
+                    let state = status
+                        .lines()
+                        .find(|line| line.starts_with("State:"))
+                        .and_then(|line| line.split_whitespace().nth(1));
+                    assert!(
+                        matches!(state, Some("Z") | Some("X")),
+                        "timed-out ocrmypdf grandchild {} remains live:\n{}",
+                        child_pid.trim(),
+                        status
+                    );
+                }
+                Err(_) => assert!(
+                    !Path::new(&child_process_path).exists(),
+                    "timed-out ocrmypdf grandchild status could not be inspected"
+                ),
+            }
+        }
     }
 
     #[test]

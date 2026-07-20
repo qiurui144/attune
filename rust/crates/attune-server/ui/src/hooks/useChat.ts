@@ -71,14 +71,7 @@ type LocalSchedulerJobResponse = {
 
 async function getSchedulerJob(jobId: string): Promise<LocalSchedulerJobResponse> {
   const encoded = encodeURIComponent(jobId);
-  try {
-    return await api.get<LocalSchedulerJobResponse>(`/chat/edge-scheduler/jobs/${encoded}`);
-  } catch (e) {
-    if (String(e).includes('404')) {
-      return await api.get<LocalSchedulerJobResponse>(`/chat/local-scheduler/jobs/${encoded}`);
-    }
-    throw e;
-  }
+  return api.get<LocalSchedulerJobResponse>(`/chat/edge-scheduler/jobs/${encoded}`);
 }
 
 // 刚发送完一条消息后，sendMessage 会回填新 session_id，触发 ChatView 的
@@ -279,6 +272,9 @@ function isLocalSchedulerFailureStatus(status: string | null | undefined): boole
     case 'canceled':
     case 'cancelled':
     case 'expired':
+    case 'timeout':
+    case 'timed_out':
+    case 'timed-out':
       return true;
     default:
       return false;

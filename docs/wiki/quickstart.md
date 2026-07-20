@@ -102,7 +102,8 @@ attune-pro install --license <YOUR_KEY> law-pro
 ### Q: LLM 必须用付费 API 吗？
 
 不一定。三种模式：
-- **远端 token**（默认）— 用 Anthropic / OpenAI / 阿里通义 等的 API key
+- **远端 token**（默认）— 使用 OpenAI、通义、DeepSeek 等
+  OpenAI-compatible API 的独立开发者 key；原生 Anthropic Messages API 暂不直连
 - **edge scheduler** — 高性能本机、RISC-V、Windows 或 Linux x86 私有部署
 - **自管 OpenAI-compatible 本地服务** — 仅作为高级/调试路径，Attune 不负责安装或生命周期
 

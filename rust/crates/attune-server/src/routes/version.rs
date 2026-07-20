@@ -89,10 +89,8 @@ pub async fn get_version(State(state): State<SharedState>) -> Json<VersionInfo> 
     // honors `settings.privacy.telemetry` and fails closed (all 5 egress points
     // default off) until the user opts in. On refusal we degrade gracefully:
     // current version only + `update_check: disabled`, no network touched.
-    let telemetry_enabled = crate::routes::chat::read_privacy_outbound_enabled(
-        &state,
-        OutboundKind::Telemetry.as_str(),
-    );
+    let telemetry_enabled =
+        crate::routes::privacy::outbound_enabled(&state, OutboundKind::Telemetry.as_str());
     let policy = OutboundPolicy {
         kind: OutboundKind::Telemetry,
         enabled: telemetry_enabled,

@@ -24,6 +24,13 @@ impl Classifier {
         self
     }
 
+    /// Whether classification stays on the device. Server-side background
+    /// workers use this to decide whether cloud consent/L0/redaction gates are
+    /// required before dequeuing any vault content.
+    pub fn is_local(&self) -> bool {
+        self.llm.is_local()
+    }
+
     /// 分类单条
     pub fn classify_one(&self, title: &str, content: &str) -> Result<ClassificationResult> {
         let items = vec![(title.to_string(), content.to_string())];

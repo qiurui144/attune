@@ -65,6 +65,7 @@ hdbscan = "0.11"
 serde_yaml = "0.9"
 toml = "0.8"
 tempfile = "3"
+fs4 = "0.8"
 pdf-extract = "0.8"
 zip = "2"
 # ── Artifact export engine (export/) — pure-Rust renderers, no system deps ──
@@ -93,7 +94,12 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 # PP-OCR (P2-P4): 用 kreuzberg-paddle-ocr 替代自实现 DBNet+CRNN+CTC。
 # MIT 兼容 Apache-2.0；ort 2.0.0-rc.12 与本 crate 已对齐
 kreuzberg-paddle-ocr = { version = "4.9", optional = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+# Image input canonicalization is part of the Scheduler wire contract, not a
+# local inference/model feature. Keep its pure-Rust codecs on the Rust-1.75-
+# compatible 0.24 line so `scheduler-runtime` does not inherit image 0.25's
+# Rust 1.88 floor. Local inference retains the existing 0.25 API separately.
+image-wire = { package = "image", version = "0.24.9", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif"] }
+image = { version = "0.25", default-features = false, optional = true, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif"] }
 imageproc = { version = "0.26", default-features = false, optional = true }
 # hf-hub 已移除(C1): 其 0.5 ureq agent 不暴露超时配置, repo.get() 对连上后传输中途 stall
 # 的死源会永久 hang(9936dca gdb 实证)。模型下载改走 model_store::download_hf_file —— 带
@@ -232,7 +238,7 @@ vision-eval = ["nontext"]
 # Self-dev-dependency：让 `cargo test -p attune-core` 自动启用 test-utils feature，
 # 集成测试无需 --features 显式开启。生产 `cargo build` 不受影响（仅 dev profile）。
 [dev-dependencies]
-attune-core = { path = ".", features = ["test-utils"] }
+attune-core = { path = ".", default-features = false, features = ["test-utils"] }
 # memory_consolidation_agent (L2 → L3 deterministic promotion) — 属性测试需要 proptest.
 # 与 attune-server 同版本（workspace 内统一），dev profile only.
 proptest = "1"

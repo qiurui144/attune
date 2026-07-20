@@ -137,6 +137,10 @@ pub fn run_agent_subprocess(
 
     let mut inv = CapabilityInvocation::new(entry.path)
         .stdin(stdin_json)
+        // Agent binaries receive decrypted user input. Never let them inherit
+        // server credentials, cloud API keys, or proxy settings implicitly;
+        // the caller-provided allowlist below is their complete environment.
+        .clear_env()
         .timeout(timeout);
     if let Some(agent_arg) = entry.agent_arg {
         inv = inv.arg(agent_arg);

@@ -20,9 +20,12 @@ Attune 支持多种 LLM 提供商。本页说明各方案的优缺点和配置�
 
 ### 方式 2：BYOK（自带 API Key）
 
-如果你已有以下付费账号，对应 Plan 通常附带 API 额度：
+如果你有开发者 API 账号和 API Key，可配置 OpenAI-compatible endpoint。消费级网页订阅不应被当作 API 额度。
 
-#### OpenAI（ChatGPT Plus / Team）
+#### OpenAI API（独立 API Key 与计费）
+
+ChatGPT Plus、Business/Team 等 ChatGPT 订阅不包含 API 用量；需要在 OpenAI API
+平台单独开通计费并创建 API key。
 
 ```
 Provider：OpenAI
@@ -33,26 +36,18 @@ Base URL：https://api.openai.com/v1（默认，无需填写）
 
 从 [platform.openai.com/api-keys](https://platform.openai.com/api-keys) 生成 Key。
 
-#### Anthropic（Claude Pro）
-
-```
-Provider：Anthropic
-API Key：sk-ant-...
-模型：claude-haiku-3-5（推荐，低成本） / claude-sonnet-4（高精度）
-```
-
-从 [console.anthropic.com/keys](https://console.anthropic.com/keys) 生成 Key。
-
-#### Google（Gemini Advanced）
+#### Google Gemini OpenAI compatibility
 
 ```
 Provider：Gemini
 API Key：AIza...
-Base URL：https://generativelanguage.googleapis.com（默认）
+Base URL：https://generativelanguage.googleapis.com/v1beta/openai
 模型：gemini-2.0-flash（推荐）
 ```
 
 从 [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey) 生成 Key。
+
+> Attune 当前的 BYOK transport 使用 OpenAI-compatible chat 协议，不直连 Anthropic 原生 Messages API。需要 Anthropic 时请使用 Attune Pro gateway 或提供 OpenAI-compatible facade 的自有网关。
 
 #### 兼容 OpenAI 格式的提供商
 

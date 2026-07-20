@@ -1,7 +1,7 @@
 //! AI 底座状态 API（v0.6.0-rc.3，2026-04-27）。
 //!
 //! per CLAUDE.md "本地 AI 底座边界" 决策：本地仅捆绑必要底座（Embedding / Rerank /
-//! OCR / ASR），LLM 走远端 token 默认。
+//! OCR / ASR / TTS），LLM 走远端 token 默认。
 //!
 //! 本 route 暴露各底座的可用性 + 模型名 / 后端路径 — 让 Settings UI 简洁地显示
 //! 是否加载，无需让用户配置（默认全部自动检测 / 加载）。
@@ -11,8 +11,6 @@ use axum::Json;
 use serde_json::json;
 
 use crate::state::SharedState;
-use attune_core::edge_cloud::capacity::DEFAULT_PROBE_TIMEOUT;
-use attune_core::edge_cloud::scheduler::LocalSchedulerClient;
 
 fn note(available: bool, msg: &str) -> Option<String> {
     if available {
@@ -22,53 +20,10 @@ fn note(available: bool, msg: &str) -> Option<String> {
     }
 }
 
-#[derive(Debug, Default)]
-struct SchedulerRuntimeProbe {
-    status: String,
-    tasks: Vec<String>,
-    models: Vec<String>,
-    error: Option<String>,
-}
-
-async fn probe_scheduler_runtime(base_url: String) -> SchedulerRuntimeProbe {
-    tokio::task::spawn_blocking(move || {
-        let client = LocalSchedulerClient::with_base(&base_url, DEFAULT_PROBE_TIMEOUT);
-        let contract = client.benchmark_contract();
-        let models = client.models().ok();
-        match contract {
-            Ok(contract) => SchedulerRuntimeProbe {
-                status: "ready".to_string(),
-                tasks: contract
-                    .runtime_tasks
-                    .into_iter()
-                    .map(|task| task.name)
-                    .collect(),
-                models: models
-                    .map(|snapshot| snapshot.models.into_iter().map(|m| m.name).collect())
-                    .unwrap_or_default(),
-                error: None,
-            },
-            Err(e) => SchedulerRuntimeProbe {
-                status: "missing".to_string(),
-                tasks: Vec::new(),
-                models: Vec::new(),
-                error: Some(e.to_string()),
-            },
-        }
-    })
-    .await
-    .unwrap_or_else(|e| SchedulerRuntimeProbe {
-        status: "missing".to_string(),
-        tasks: Vec::new(),
-        models: Vec::new(),
-        error: Some(format!("scheduler runtime probe task join failed: {e}")),
-    })
-}
-
 /// GET /api/v1/ai_stack — 返各底座状态 + 硬件 tier + 模型推荐 + region
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let scheduler_base = crate::local_scheduler::base_from_state(&state);
-    let scheduler = probe_scheduler_runtime(scheduler_base.clone()).await;
+    let scheduler = crate::local_scheduler::probe_scheduler_runtime(scheduler_base.clone()).await;
     let embedding_loaded = state
         .embedding
         .lock()
@@ -107,6 +62,30 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     } else {
         "scheduler"
     };
+    let tts_registered = has_scheduler_task(crate::routes::tts::TTS_TASK);
+    let tts_task_dispatchable = scheduler.runtime_tasks.iter().any(|task| {
+        task.name == crate::routes::tts::TTS_TASK
+            && task.model == crate::routes::tts::TTS_ENGINE
+            && task.async_only
+    });
+    let tts_model = scheduler
+        .models
+        .iter()
+        .find(|model| model.name == "tts-default");
+    let tts_model_ready = tts_model.is_some_and(|model| {
+        model.lifecycle.eq_ignore_ascii_case("ready")
+            && matches!(
+                model.dispatchable.trim().to_ascii_uppercase().as_str(),
+                "FREE" | "BUSY" | "QUEUED"
+            )
+    });
+    let tts_available = tts_registered && tts_task_dispatchable && tts_model_ready;
+    state.set_tts_capability_ready(tts_available);
+    let scheduler_models = scheduler
+        .models
+        .iter()
+        .map(|model| model.name.clone())
+        .collect::<Vec<_>>();
 
     // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
     let hw = &state.hardware;
@@ -174,7 +153,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "endpoint": scheduler_base,
             "status": scheduler.status,
             "tasks": scheduler.tasks,
-            "models": scheduler.models,
+            "models": scheduler_models,
             "error": scheduler.error,
         },
         "recommendation": recommendation.as_ref().map(|r| json!({
@@ -209,6 +188,22 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "note": note(asr_available, "local scheduler 未暴露 kb.meeting.asr_frontend"),
             "gpu_note": serde_json::Value::Null
         },
+        "tts": {
+            "available": tts_available,
+            "registered": tts_registered,
+            "task": crate::routes::tts::TTS_TASK,
+            "model": "tts-default",
+            "model_state": tts_model.map(|model| model.state.clone()),
+            "dispatchable": tts_model.map(|model| model.dispatchable.clone()),
+            "engine": if tts_available { "scheduler:tts-default" } else { "scheduler" },
+            "note": if !tts_registered {
+                Some("local scheduler 未暴露 kb.speech.synthesize".to_string())
+            } else if !tts_model_ready {
+                Some("local scheduler 已注册 TTS task，但 tts-default 模型尚未配置或不可调度".to_string())
+            } else {
+                None
+            }
+        },
         "llm": {
             "configured": llm_configured,
             "default": "cloud or local scheduler OpenAI-compatible endpoint",
@@ -240,7 +235,8 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
             "kb.query.rerank",
             "kb.document.ocr_detect",
             "kb.document.ocr_recognize",
-            "kb.meeting.asr_frontend"
+            "kb.meeting.asr_frontend",
+            "kb.speech.synthesize"
         ],
     }))
 }

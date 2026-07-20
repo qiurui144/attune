@@ -28,6 +28,17 @@ pub(crate) fn settings_provider_is_scheduler_native(settings: &Value, section: &
         .unwrap_or(false)
 }
 
+/// Returns true for the legacy/default scheduler endpoint. Provider metadata is
+/// authoritative for custom ports; the port check only keeps existing `:8090`
+/// OpenAI-compatible settings working during migration.
+pub(crate) fn endpoint_is_scheduler(endpoint: &str) -> bool {
+    attune_core::net::destination::is_safe_local_scheduler_url(endpoint)
+        && url::Url::parse(endpoint)
+            .ok()
+            .and_then(|url| url.port_or_known_default())
+            .is_some_and(|port| port == 8090)
+}
+
 pub(crate) fn native_kb_enabled(
     settings: &Value,
     hardware: &attune_core::platform::HardwareProfile,
@@ -44,21 +55,67 @@ pub(crate) fn native_kb_enabled(
         )
 }
 
-pub(crate) fn base_from_settings(settings: &Value) -> String {
-    let configured = settings
-        .get("llm")
-        .and_then(|llm| llm.get("endpoint"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            settings
-                .get("embedding")
-                .and_then(|embedding| embedding.get("endpoint"))
-                .and_then(|v| v.as_str())
-        })
+fn settings_enable_native_kb_ask(settings: &Value) -> bool {
+    if settings_provider_is_scheduler_native(settings, "llm") {
+        return true;
+    }
+    if attune_core::llm_settings::membership_gateway_is_managed(settings) {
+        return false;
+    }
+    settings
+        .pointer("/llm/endpoint")
+        .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty());
+        .filter(|endpoint| !endpoint.is_empty())
+        .is_some_and(endpoint_is_scheduler)
+}
+
+/// Whether chat answer generation itself may use scheduler-native
+/// `kb.query.ask`.
+///
+/// This is deliberately narrower than [`native_kb_enabled`]: a local embedding
+/// provider may select the scheduler retrieval profile, but it must not override
+/// an explicitly configured cloud/member LLM. Local answer generation requires
+/// the LLM section itself to name the scheduler (or the existing operator env
+/// override).
+pub(crate) fn native_kb_ask_enabled(settings: &Value) -> bool {
+    settings_enable_native_kb_ask(settings)
+        || env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_NATIVE_KB",
+                "ATTUNE_LOCAL_SCHEDULER_NATIVE_KB",
+            ],
+            false,
+        )
+}
+
+pub(crate) fn base_from_settings(settings: &Value) -> String {
+    let configured = ["llm", "embedding"].into_iter().find_map(|section| {
+        let block = settings.get(section)?;
+        let endpoint = block.get("endpoint")?.as_str()?.trim();
+        if endpoint.is_empty() {
+            return None;
+        }
+        let provider = block
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let membership_gateway =
+            section == "llm" && attune_core::llm_settings::membership_gateway_is_managed(settings);
+        ((provider_is_scheduler_native(provider)
+            || (!membership_gateway && endpoint_is_scheduler(endpoint)))
+            && attune_core::net::destination::is_safe_local_scheduler_url(endpoint))
+        .then_some(endpoint)
+    });
     let base = configured.unwrap_or(attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE);
     attune_core::edge_cloud::capacity::normalize_scheduler_base(base)
+}
+
+pub(crate) fn base_from_optional_settings(settings: &Option<Value>) -> String {
+    settings
+        .as_ref()
+        .map(base_from_settings)
+        .unwrap_or_else(|| attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE.to_string())
 }
 
 pub(crate) fn base_from_state(state: &crate::state::SharedState) -> String {
@@ -116,6 +173,79 @@ pub(crate) fn runtime_profiles_for_base(base: &str) -> attune_core::edge_cloud::
         .unwrap_or_else(|_| {
             attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(base)
         })
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SchedulerRuntimeProbe {
+    pub status: String,
+    pub tasks: Vec<String>,
+    pub runtime_tasks: Vec<attune_core::edge_cloud::SchedulerRuntimeTaskSpec>,
+    pub models: Vec<attune_core::edge_cloud::SchedulerModelStatus>,
+    pub error: Option<String>,
+}
+
+/// Probe the scheduler contract and model inventory once for all server status
+/// surfaces. Keeping one implementation prevents the readiness panel and
+/// `/ai_stack` from reporting contradictory daemon state.
+pub(crate) async fn probe_scheduler_runtime(base_url: String) -> SchedulerRuntimeProbe {
+    let probe = tokio::task::spawn_blocking(move || {
+        let client = attune_core::edge_cloud::LocalSchedulerClient::with_base(
+            &base_url,
+            attune_core::edge_cloud::capacity::DEFAULT_PROBE_TIMEOUT,
+        );
+        match client.benchmark_contract() {
+            Ok(contract) => {
+                let runtime_tasks = contract.runtime_tasks;
+                let tasks = runtime_tasks.iter().map(|task| task.name.clone()).collect();
+                match client.models() {
+                    Ok(snapshot) => SchedulerRuntimeProbe {
+                        status: "ready".to_string(),
+                        tasks,
+                        runtime_tasks,
+                        models: snapshot.models,
+                        error: None,
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Scheduler model inventory probe failed"
+                        );
+                        SchedulerRuntimeProbe {
+                            status: "ready".to_string(),
+                            tasks,
+                            runtime_tasks,
+                            models: Vec::new(),
+                            error: Some("local scheduler model inventory unavailable".to_string()),
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Scheduler runtime contract probe failed");
+                SchedulerRuntimeProbe {
+                    status: "missing".to_string(),
+                    tasks: Vec::new(),
+                    runtime_tasks: Vec::new(),
+                    models: Vec::new(),
+                    error: Some("local scheduler runtime unavailable".to_string()),
+                }
+            }
+        }
+    })
+    .await;
+    match probe {
+        Ok(probe) => probe,
+        Err(error) => {
+            tracing::error!(error = %error, "Scheduler runtime probe task failed");
+            SchedulerRuntimeProbe {
+                status: "missing".to_string(),
+                tasks: Vec::new(),
+                runtime_tasks: Vec::new(),
+                models: Vec::new(),
+                error: Some("local scheduler runtime unavailable".to_string()),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,17 +453,128 @@ mod tests {
     }
 
     #[test]
-    fn base_from_settings_prefers_llm_then_embedding_and_strips_v1() {
+    fn base_from_settings_uses_only_scheduler_endpoints_and_strips_v1() {
         let settings = serde_json::json!({
-            "llm": { "endpoint": "http://127.0.0.1:8090/v1/" },
-            "embedding": { "endpoint": "http://127.0.0.1:8091" }
+            "llm": { "provider": "local_scheduler", "endpoint": "http://127.0.0.1:8090/v1/" },
+            "embedding": { "provider": "local_scheduler", "endpoint": "http://127.0.0.1:8091" }
         });
         assert_eq!(base_from_settings(&settings), "http://127.0.0.1:8090");
 
         let settings = serde_json::json!({
-            "embedding": { "endpoint": "http://127.0.0.1:8091/v1" }
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://api.openai.com/v1"
+            },
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8091/v1"
+            }
         });
         assert_eq!(base_from_settings(&settings), "http://127.0.0.1:8091");
+    }
+
+    #[test]
+    fn base_from_settings_never_treats_membership_openai_as_scheduler() {
+        let settings = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://member.example.test/v1"
+            }
+        });
+        assert_eq!(
+            base_from_settings(&settings),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE
+        );
+
+        let public_legacy_port = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://member.example.test:8090/v1"
+            }
+        });
+        assert_eq!(
+            base_from_settings(&public_legacy_port),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE
+        );
+
+        let private_legacy_port = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "http://10.0.0.8:8090/v1",
+                "managed_by": attune_core::llm_settings::MEMBER_GATEWAY_OWNER
+            }
+        });
+        assert_eq!(
+            base_from_settings(&private_legacy_port),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE,
+            "a membership gateway is OpenAI-compatible even when it happens to use the legacy scheduler port"
+        );
+        assert!(!settings_enable_native_kb_ask(&private_legacy_port));
+
+        let public_native_provider = serde_json::json!({
+            "llm": {
+                "provider": "local_scheduler",
+                "endpoint": "https://scheduler.example.test:8090/v1"
+            }
+        });
+        assert_eq!(
+            base_from_settings(&public_native_provider),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE,
+            "scheduler-native routing must never select a public destination"
+        );
+
+        for unsafe_endpoint in [
+            "http://user@127.0.0.1:8090",
+            "http://127.0.0.1:8090/admin?target=/models",
+            "http://169.254.169.254/latest",
+            "http://0.0.0.0:8090",
+        ] {
+            let settings = serde_json::json!({
+                "llm": {
+                    "provider": "local_scheduler",
+                    "endpoint": unsafe_endpoint
+                }
+            });
+            assert_eq!(
+                base_from_settings(&settings),
+                attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE,
+                "unsafe scheduler endpoint must fall back to loopback: {unsafe_endpoint}"
+            );
+            assert!(!endpoint_is_scheduler(unsafe_endpoint));
+        }
+    }
+
+    #[test]
+    fn native_kb_ask_gate_uses_llm_routing_not_embedding_routing() {
+        let cloud_member_with_local_embedding = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://member.example.test/v1"
+            },
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8090"
+            }
+        });
+        assert!(!settings_enable_native_kb_ask(
+            &cloud_member_with_local_embedding
+        ));
+
+        let native_provider = serde_json::json!({
+            "llm": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:18090"
+            }
+        });
+        assert!(settings_enable_native_kb_ask(&native_provider));
+
+        let legacy_scheduler_endpoint = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "http://192.168.1.20:8090/v1"
+            }
+        });
+        assert!(settings_enable_native_kb_ask(&legacy_scheduler_endpoint));
     }
 
     #[test]

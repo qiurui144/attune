@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document_with_options, DocumentSink, EmailConfig, EmailConnector, IngestOutcome,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    retryable_degraded_marker, DocumentSink, EmailConfig, EmailConnector, IngestOutcome,
     RawDocument, SourceConnector,
 };
 
@@ -72,13 +73,34 @@ pub fn sync_email_account(
                 }
                 Ok(dek) => {
                     let store = vault.store();
-                    // Message-ID 增量判断：indexed_files 已记录同 source_ref 则跳过。
+                    // A retryable-degraded marker deliberately differs from
+                    // the immutable Message-ID marker, so OCR is retried.
                     let existing = store.get_indexed_file(&source_ref).ok().flatten();
-                    if existing.is_some() {
+                    if existing
+                        .as_ref()
+                        .is_some_and(|row| row.file_hash == marker && !marker.is_empty())
+                    {
                         skipped_items += 1;
                         handled = true;
                     } else {
-                        match ingest_document_with_options(store, &dek, &doc, &ingest_options) {
+                        let old_item_id = existing.as_ref().and_then(|row| row.item_id.clone());
+                        if let Some(old) = old_item_id.as_deref() {
+                            let _ = store.delete_item(old);
+                            let _ = store.enqueue_reindex(old, "purge");
+                        }
+                        let outcome = match old_item_id.as_deref() {
+                            Some(old) => ingest_document_replacing_with_options(
+                                store,
+                                &dek,
+                                &doc,
+                                old,
+                                &ingest_options,
+                            ),
+                            None => {
+                                ingest_document_with_options(store, &dek, &doc, &ingest_options)
+                            }
+                        };
+                        match outcome {
                             Ok(IngestOutcome::Inserted { item_id, .. }) => {
                                 let _ = store.upsert_indexed_file(
                                     dir_id,
@@ -109,6 +131,22 @@ pub fn sync_email_account(
                                 );
                                 skipped_items += 1;
                                 handled = true;
+                            }
+                            Ok(IngestOutcome::Degraded {
+                                item_id, reason, ..
+                            }) => {
+                                let retry_marker = retryable_degraded_marker(&marker);
+                                let _ = store.upsert_indexed_file(
+                                    dir_id,
+                                    &source_ref,
+                                    &retry_marker,
+                                    &item_id,
+                                );
+                                errors.push(format!(
+                                    "{source_ref}: retryable degraded extraction: {reason}"
+                                ));
+                                // Keep handled=false so the UID cursor cannot
+                                // advance past a document needing OCR retry.
                             }
                             Ok(IngestOutcome::Skipped { .. }) => {
                                 // ingest 主动跳过是终态决定（重抓只会再跳）—— 视为已处理。

@@ -51,8 +51,8 @@ scheduler 可设 `ATTUNE_E2E_SCHEDULER_STRICT=0`。
 Attune embedding queue batch 和 scheduler-native embedding task batch 设为 512；
 两者都可升到 2048，且 scheduler-native provider 会在 scheduler 报 physical
 batch limit 时二分重试。长文本门禁默认开启 scheduler OCR 能力发现；普通 e2e 仍默认关闭
-OCR，可用 `ATTUNE_SCHEDULER_OCR_ENABLED=0/1` 显式覆盖。PDF page OCR 独立受控，
-默认不跑大 PDF/扫描页 OCR，必须显式设置 `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1`。
+OCR，可用 `ATTUNE_SCHEDULER_OCR_ENABLED=0/1` 显式覆盖。PDF page OCR 独立受控并默认开启，
+通过页数、总耗时、单页耗时与 DPI 上限保持有界；可显式设置 `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0` 关闭。
 开启后仍有通用保护：`ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES` 默认 4，
 `ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` 默认 12000ms，连续空 OCR 页也计入
 `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`，到阈值后诚实降级为

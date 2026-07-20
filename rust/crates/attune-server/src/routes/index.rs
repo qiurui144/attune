@@ -206,6 +206,7 @@ pub async fn bind_directory(
             "new": scan_result.new_files,
             "updated": scan_result.updated_files,
             "skipped": scan_result.skipped_files,
+            "degraded": scan_result.degraded_files,
         }
     })))
 }
@@ -259,12 +260,13 @@ fn spawn_background_bind_scan(
                 let elapsed_ms = started.elapsed().as_millis();
                 tracing::info!(
                     target: "access",
-                    "background bind scan completed dir_id={dir_id} path={} total={} new={} updated={} skipped={} errors={} elapsed_ms={elapsed_ms}",
+                    "background bind scan completed dir_id={dir_id} path={} total={} new={} updated={} skipped={} degraded={} errors={} elapsed_ms={elapsed_ms}",
                     canonical.display(),
                     scan.total_files,
                     scan.new_files,
                     scan.updated_files,
                     scan.skipped_files,
+                    scan.degraded_files,
                     scan.errors,
                 );
                 send_background_scan_progress(

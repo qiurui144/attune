@@ -340,11 +340,10 @@ Attune-side defaults for this gate are intentionally platform-neutral:
   `ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE` to 512. Both can be raised up to
   2048 for larger hosts, and the provider splits again if the scheduler reports
   a physical batch-size limit.
-- `ATTUNE_SCHEDULER_OCR_ENABLED=1` enables scheduler OCR capability discovery for
-  long-text runs, but PDF page OCR remains explicit opt-in via
-  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1`. Non-longtext e2e keeps OCR off unless
-  the caller opts in.
-- scheduler PDF page OCR has platform-neutral runaway protection when enabled:
+- Scheduler OCR capability discovery and bounded PDF page OCR are enabled when a
+  local Scheduler is configured. `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0` is the
+  explicit emergency/performance override.
+- Scheduler PDF page OCR has platform-neutral runaway protection:
   `ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES` defaults to 4,
   `ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` defaults to 12000ms, and consecutive
   empty OCR pages count toward `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`.
@@ -408,7 +407,7 @@ flowchart TD
   Bind["/api/v1/index/bind"]
   Fast["background=true<br/>accepted immediately"]
   Worker["spawn_blocking scan worker<br/>independent Store connection"]
-  Parse["pdftotext first<br/>PDF page OCR opt-in"]
+  Parse["pdftotext first<br/>bounded PDF page OCR by default"]
   Meta["metadata-only fallback<br/>honest parse status"]
   Queue["embed_queue<br/>batched scheduler embeddings"]
   Index["SQLite WAL + vector + BM25"]
@@ -444,21 +443,20 @@ flowchart TD
   exact substring already has candidates, Attune skips scheduler query
   embedding. This keeps simple KB search responsive while long background
   embedding batches are running.
-- Scheduler PDF OCR no longer uploads raw PDFs to `kb.document.ocr_recognize`.
-  The scheduler contract requires page images. Page OCR is now explicit opt-in:
-  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=1`, bounded by page count, per-page timeout,
-  total timeout, and failure limits.
-- Default bulk indexing leaves PDF page OCR disabled. Scanned PDFs without a
-  usable text layer become metadata-only entries quickly. This is intentional:
-  source lookup remains possible, while detailed content answers must refuse or
-  report unavailable content unless a dedicated OCR pass succeeds.
+- Scheduler PDF OCR never uploads raw PDFs to `kb.document.ocr_recognize`; it
+  renders bounded page images and submits the semantic image contract. Page OCR
+  is enabled by default and bounded by page count, per-page timeout, total
+  timeout, DPI, and failure limits. Operators can disable it with
+  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0`.
+- If page rendering, Scheduler availability, or OCR output fails, scanned PDFs
+  still fall back honestly to metadata-only entries instead of blocking a bind.
 
-Scheduler-side residual gap:
+Scheduler-side gap resolution (2026-07-16):
 
-- OCR worker payload compatibility is still incomplete for scanned PDFs in this
-  environment. The scheduler returns `unsupported_payload` with a requirement for
-  a numeric tensor field named `x`; Attune handles that honestly, but searchable
-  OCR text for those scanned manuals requires a scheduler OCR worker/schema fix.
+- The former `unsupported_payload` / numeric tensor field `x` mismatch is fixed
+  in the Scheduler OCR semantic adapter and worker schema. A no-text-layer PDF
+  now completes page OCR, indexing, and lexical search through K3; metadata-only
+  remains a failure fallback rather than the successful-path behavior.
 
 For the test pyramid entrypoint:
 

@@ -32,66 +32,19 @@ import { loadFolderLinks } from '../hooks/useFolderLinks';
 import { unbindDir } from '../hooks/useRemote';
 import { api, clearToken, getToken, ApiError } from '../store/api';
 import { useFilePicker } from '../hooks/useFilePicker';
-
-/** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
-type LlmPresetKey =
-  | 'custom'
-  | 'deepseek'
-  | 'qwen'
-  | 'glm'
-  | 'kimi'
-  | 'baichuan'
-  | 'local_scheduler'
-  | 'openai';
-
-interface LlmPreset {
-  labelKey: string;
-  endpoint: string;
-  model: string;
-}
-
-const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
-  custom: { labelKey: 'settings.ai.llm.preset.custom', endpoint: '', model: '' },
-  deepseek: {
-    labelKey: 'settings.ai.llm.preset.deepseek',
-    endpoint: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
-  },
-  qwen: {
-    labelKey: 'settings.ai.llm.preset.qwen',
-    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen-plus',
-  },
-  glm: {
-    labelKey: 'settings.ai.llm.preset.glm',
-    endpoint: 'https://open.bigmodel.cn/api/paas/v4',
-    model: 'glm-4-plus',
-  },
-  kimi: {
-    labelKey: 'settings.ai.llm.preset.kimi',
-    endpoint: 'https://api.moonshot.cn/v1',
-    model: 'moonshot-v1-8k',
-  },
-  baichuan: {
-    labelKey: 'settings.ai.llm.preset.baichuan',
-    endpoint: 'https://api.baichuan-ai.com/v1',
-    model: 'Baichuan4-Turbo',
-  },
-  local_scheduler: {
-    labelKey: 'settings.ai.llm.preset.local_scheduler',
-    endpoint: 'http://127.0.0.1:8090/v1',
-    model: 'llm-chat',
-  },
-  openai: {
-    labelKey: 'settings.ai.llm.preset.openai',
-    endpoint: 'https://api.openai.com/v1',
-    model: 'gpt-4o-mini',
-  },
-};
-
-const LLM_MODEL_OPTIONS = Array.from(
-  new Set(Object.values(LLM_PRESETS).map((p) => p.model).filter(Boolean)),
-);
+import {
+  detectLlmPreset,
+  isCloudNetworkEndpoint,
+  LLM_MODEL_OPTIONS,
+  LLM_PRESETS,
+  schedulerOpenAiEndpoint,
+  type LlmPresetKey,
+} from '../llmConfig';
+import {
+  normalizeTtsSettings,
+  ttsSettingsPatch,
+  type TtsSettingsValue,
+} from '../ttsSettings';
 
 type SettingsTab = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
 
@@ -568,6 +521,7 @@ function BackgroundComputeSection(): JSX.Element {
 
 function AIPanel(): JSX.Element {
   const llm = useComputed(() => (settings.value?.llm as Record<string, unknown>) ?? {});
+  const ttsSettings = useComputed(() => normalizeTtsSettings(settings.value?.tts));
 
   // 编辑态（草稿值，保存按钮才下发）
   const presetKey = useSignal<LlmPresetKey>('custom');
@@ -577,6 +531,11 @@ function AIPanel(): JSX.Element {
   const saving = useSignal(false);
   const testing = useSignal(false);
   const testResult = useSignal<{ ok: boolean; message: string } | null>(null);
+  const ttsEnabled = useSignal(true);
+  const ttsVoice = useSignal('auto');
+  const ttsLanguage = useSignal<TtsSettingsValue['language']>('auto');
+  const ttsSpeed = useSignal(1);
+  const ttsSaving = useSignal(false);
 
   // 锁定联动 — Paid 会员锁 cloud_llm 字段
   useEffect(() => { void loadSettingsLocks(); }, []);
@@ -586,10 +545,28 @@ function AIPanel(): JSX.Element {
   useEffect(() => {
     draftEndpoint.value = (llm.value.endpoint as string) ?? '';
     draftModel.value = (llm.value.model as string) ?? '';
-  }, [llm.value.endpoint, llm.value.model]);
+    testResult.value = null;
+    presetKey.value = detectLlmPreset(
+      (llm.value.provider as string) ?? '',
+      (llm.value.endpoint as string) ?? '',
+    );
+  }, [llm.value.provider, llm.value.endpoint, llm.value.model]);
+
+  useEffect(() => {
+    ttsEnabled.value = ttsSettings.value.enabled;
+    ttsVoice.value = ttsSettings.value.voice;
+    ttsLanguage.value = ttsSettings.value.language;
+    ttsSpeed.value = ttsSettings.value.speed;
+  }, [
+    ttsSettings.value.enabled,
+    ttsSettings.value.voice,
+    ttsSettings.value.language,
+    ttsSettings.value.speed,
+  ]);
 
   const onPresetChange = (key: LlmPresetKey): void => {
     presetKey.value = key;
+    testResult.value = null;
     if (key === 'custom') return; // 自定义：不动现有值
     const preset = LLM_PRESETS[key];
     draftEndpoint.value = preset.endpoint;
@@ -599,18 +576,20 @@ function AIPanel(): JSX.Element {
   const onSave = async (): Promise<void> => {
     saving.value = true;
     try {
-      const patch: Record<string, unknown> = {
-        llm: {
-          ...(settings.value?.llm as Record<string, unknown>),
-          endpoint: draftEndpoint.value,
-          model: draftModel.value,
-          provider: presetKey.value === 'local_scheduler' ? 'local_scheduler' : 'openai_compat',
-        },
+      // Send a typed delta, never the redacted GET DTO (`api_key: null`,
+      // `api_key_set`) back to storage. Paid members may still change model.
+      const llmPatch: Record<string, unknown> = {
+        model: draftModel.value,
       };
-      // 只有用户填了新 key 才下发（避免覆盖已有 key）
-      if (draftApiKey.value.trim()) {
-        (patch.llm as Record<string, unknown>).api_key = draftApiKey.value.trim();
+      if (!llmLocked) {
+        llmPatch.endpoint = draftEndpoint.value;
+        llmPatch.provider = presetKey.value === 'local_scheduler' ? 'local_scheduler' : 'openai_compat';
+        // 只有用户填了新 key 才下发（避免覆盖已有 key）
+        if (draftApiKey.value.trim()) {
+          llmPatch.api_key = draftApiKey.value.trim();
+        }
       }
+      const patch: Record<string, unknown> = { llm: llmPatch };
       const ok = await patchSettings(patch);
       if (ok) {
         draftApiKey.value = ''; // 清空输入框（key 已加密落盘）
@@ -633,9 +612,17 @@ function AIPanel(): JSX.Element {
     testing.value = true;
     testResult.value = null;
     try {
+      if (isCloudNetworkEndpoint(endpoint)) {
+        // The test button is explicit consent for one cloud LLM probe. Open the
+        // fail-closed egress gate before calling `/llm/test`.
+        await api.patch('/privacy/settings', { llm: true });
+      }
+      const testEndpoint = presetKey.value === 'local_scheduler'
+        ? schedulerOpenAiEndpoint(endpoint)
+        : endpoint;
       const res = await api.post<{ ok: boolean; latency_ms?: number; error?: string }>(
         '/llm/test',
-        { endpoint, api_key: draftApiKey.value.trim(), model },
+        { endpoint: testEndpoint, api_key: draftApiKey.value.trim(), model },
       );
       testResult.value = res.ok
         ? { ok: true, message: t('settings.ai.llm.test_ok', { latency: res.latency_ms ?? '?' }) }
@@ -690,7 +677,10 @@ function AIPanel(): JSX.Element {
             type="text"
             value={draftEndpoint.value}
             disabled={llmLocked}
-            onInput={(e) => (draftEndpoint.value = e.currentTarget.value)}
+            onInput={(e) => {
+              draftEndpoint.value = e.currentTarget.value;
+              testResult.value = null;
+            }}
             placeholder={t('settings.ai.llm.endpoint_placeholder')}
             style={lockedInputStyle}
           />
@@ -701,10 +691,12 @@ function AIPanel(): JSX.Element {
               type="text"
               list="settings-llm-model-options"
               value={draftModel.value}
-              disabled={llmLocked}
-              onInput={(e) => (draftModel.value = e.currentTarget.value)}
+              onInput={(e) => {
+                draftModel.value = e.currentTarget.value;
+                testResult.value = null;
+              }}
               placeholder={t('settings.ai.llm.model_placeholder')}
-              style={lockedInputStyle}
+              style={inputStyle}
             />
             <datalist id="settings-llm-model-options">
               {LLM_MODEL_OPTIONS.map((model) => (
@@ -719,7 +711,10 @@ function AIPanel(): JSX.Element {
               type="password"
               value={draftApiKey.value}
               disabled={llmLocked}
-              onInput={(e) => (draftApiKey.value = e.currentTarget.value)}
+              onInput={(e) => {
+                draftApiKey.value = e.currentTarget.value;
+                testResult.value = null;
+              }}
               placeholder={llm.value.api_key_set ? t('settings.ai.llm.api_key_keep') : t('settings.ai.llm.api_key_placeholder')}
               style={lockedInputStyle}
             />
@@ -740,7 +735,7 @@ function AIPanel(): JSX.Element {
               variant="primary"
               size="sm"
               onClick={() => void onSave()}
-              disabled={saving.value || llmLocked}
+              disabled={saving.value}
             >
               {saving.value ? t('settings.ai.llm.saving') : t('settings.ai.llm.save')}
             </Button>
@@ -765,11 +760,90 @@ function AIPanel(): JSX.Element {
           </div>
         </SettingRow>
         {/* 本地 scheduler 就绪 */}
-        {String(llm.value.provider ?? '') === 'local_scheduler' && (
+        {presetKey.value === 'local_scheduler' && (
           <SettingRow label={t('settings.ai.local_model.label')}>
             <LocalModelReadiness model={String(draftModel.value || llm.value.model || 'llm-chat')} compact />
           </SettingRow>
         )}
+      </Section>
+
+      <Section title={t('settings.ai.tts.title')}>
+        <SettingRow label={t('settings.ai.tts.enabled')}>
+          <Toggle value={ttsEnabled.value} onChange={(value) => (ttsEnabled.value = value)} />
+        </SettingRow>
+        <SettingRow label={t('settings.ai.tts.voice')}>
+          <input
+            type="text"
+            value={ttsVoice.value}
+            maxLength={64}
+            pattern="[A-Za-z0-9_.-]{1,64}"
+            onInput={(event) => (ttsVoice.value = event.currentTarget.value)}
+            placeholder={t('settings.ai.tts.voice_placeholder')}
+            style={inputStyle}
+          />
+        </SettingRow>
+        <SettingRow label={t('settings.ai.tts.language')}>
+          <select
+            value={ttsLanguage.value}
+            onChange={(event) => {
+              ttsLanguage.value = event.currentTarget.value as TtsSettingsValue['language'];
+            }}
+            style={{ ...selectStyle, minWidth: 180 }}
+          >
+            <option value="auto">{t('settings.ai.tts.language_auto')}</option>
+            <option value="zh-CN">{t('settings.lang.zh')}</option>
+            <option value="en-US">{t('settings.lang.en')}</option>
+          </select>
+        </SettingRow>
+        <SettingRow label={t('settings.ai.tts.speed')}>
+          <input
+            type="number"
+            min="0.5"
+            max="2"
+            step="0.1"
+            value={ttsSpeed.value}
+            onInput={(event) => {
+              const value = Number(event.currentTarget.value);
+              if (Number.isFinite(value)) ttsSpeed.value = value;
+            }}
+            style={{ ...inputStyle, width: 120 }}
+          />
+        </SettingRow>
+        <SettingRow label="">
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={ttsSaving.value}
+            onClick={async () => {
+              ttsSaving.value = true;
+              try {
+                const ok = await patchSettings(ttsSettingsPatch({
+                  enabled: ttsEnabled.value,
+                  voice: ttsVoice.value.trim() || 'auto',
+                  language: ttsLanguage.value,
+                  speed: ttsSpeed.value,
+                }));
+                toast(
+                  ok ? 'success' : 'error',
+                  ok ? t('settings.ai.tts.saved') : t('settings.ai.tts.save_failed'),
+                );
+              } finally {
+                ttsSaving.value = false;
+              }
+            }}
+          >
+            {ttsSaving.value ? t('settings.ai.tts.saving') : t('settings.ai.tts.save')}
+          </Button>
+        </SettingRow>
+        <div
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-secondary)',
+            padding: '0 var(--space-3)',
+          }}
+        >
+          {t('settings.ai.tts.hint')}
+        </div>
       </Section>
 
       {/* 摘要模式：off 纯检索 / local 本地模型 / cloud 复用 chat LLM */}
@@ -1652,6 +1726,7 @@ function AboutPanel(): JSX.Element {
   const rer = stackStatus('rerank');
   const ocr = stackStatus('ocr');
   const asr = stackStatus('asr');
+  const tts = stackStatus('tts');
   const ws = stackStatus('web_search');
 
   const dataDir = desktopInfo.value?.data_dir ?? (
@@ -1780,6 +1855,9 @@ function AboutPanel(): JSX.Element {
         </SettingRow>
         <SettingRow label={t('settings.about.services.asr')}>
           <ServiceStatus ok={asr.ok} note={asr.note} />
+        </SettingRow>
+        <SettingRow label={t('settings.about.services.tts')}>
+          <ServiceStatus ok={tts.ok} note={tts.note} />
         </SettingRow>
         <SettingRow label={t('settings.about.services.web_search')}>
           <ServiceStatus ok={ws.ok} note={ws.note} />
@@ -2306,29 +2384,38 @@ function MemberPanel(): JSX.Element {
     if (s && typeof s === 'object') {
       const cloud = s['cloud'] as Record<string, string | null> | undefined;
       const pluginhub = s['pluginhub'] as Record<string, string | null> | undefined;
-      if (cloud?.accounts_url) cloudAccountsUrl.value = cloud.accounts_url ?? '';
-      if (cloud?.gateway_url) cloudGatewayUrl.value = cloud.gateway_url ?? '';
-      if (pluginhub?.url) cloudPluginhubUrl.value = pluginhub.url ?? '';
-      if (pluginhub?.license_key) cloudPluginhubKey.value = pluginhub.license_key ?? '';
+      cloudAccountsUrl.value = typeof cloud?.accounts_url === 'string' ? cloud.accounts_url : '';
+      cloudGatewayUrl.value = typeof cloud?.gateway_url === 'string' ? cloud.gateway_url : '';
+      cloudPluginhubUrl.value = typeof pluginhub?.url === 'string' ? pluginhub.url : '';
     }
   }, [settings.value]);
 
   async function saveCloudConfig() {
+    const pluginhubUrl = cloudPluginhubUrl.value.trim();
+    const pluginhubKey = cloudPluginhubKey.value.trim();
+    if (pluginhubKey && !pluginhubUrl) {
+      toast('error', t('settings.member.cloud.save_fail'));
+      return;
+    }
     const patch: Record<string, unknown> = {
       cloud: {
         accounts_url: cloudAccountsUrl.value.trim() || null,
         gateway_url: cloudGatewayUrl.value.trim() || null,
       },
     };
-    if (cloudPluginhubUrl.value.trim()) {
-      patch.pluginhub = {
-        url: cloudPluginhubUrl.value.trim(),
-        license_key: cloudPluginhubKey.value.trim() || null,
-      };
+    const pluginhub: Record<string, unknown> = { url: pluginhubUrl || null };
+    if (pluginhubKey) {
+      pluginhub.license_key = pluginhubKey;
+    } else if (!pluginhubUrl) {
+      // Clearing the self-host URL also removes its now-unusable credential.
+      pluginhub.license_key = '';
     }
+    patch.pluginhub = pluginhub;
     const ok = await patchSettings(patch);
-    if (ok) toast('success', t('settings.member.cloud.save_ok'));
-    else toast('error', t('settings.member.cloud.save_fail'));
+    if (ok) {
+      cloudPluginhubKey.value = '';
+      toast('success', t('settings.member.cloud.save_ok'));
+    } else toast('error', t('settings.member.cloud.save_fail'));
   }
 
   return (
@@ -2615,8 +2702,12 @@ function MemberPanel(): JSX.Element {
               {t('settings.member.cloud.pluginhub_key_label')}
             </label>
             <input
-              type="text"
-              placeholder={t('settings.member.cloud.pluginhub_key_placeholder')}
+              type="password"
+              placeholder={
+                (settings.value?.pluginhub as Record<string, unknown> | undefined)?.license_key_set
+                  ? '●●●●●'
+                  : t('settings.member.cloud.pluginhub_key_placeholder')
+              }
               value={cloudPluginhubKey.value}
               onInput={(e) => { cloudPluginhubKey.value = (e.target as HTMLInputElement).value; }}
               style={{

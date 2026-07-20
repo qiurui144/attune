@@ -31,7 +31,6 @@ use attune_core::document_intelligence::deep_summary::{
 use attune_core::document_intelligence::model_routing::ModelRouter;
 use attune_core::document_intelligence::token_bill::TokenBill;
 use attune_core::document_intelligence::vlm_extract::{self, DocSource};
-use attune_core::llm::LlmProvider;
 use attune_core::vlm::VlmProvider;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
@@ -71,6 +70,7 @@ fn document_too_large() -> AppError {
         "document exceeds the maximum size",
     )
 }
+#[cfg(test)]
 fn llm_unavailable() -> AppError {
     doc_err(
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -87,11 +87,11 @@ fn vlm_unavailable() -> AppError {
 }
 /// I2: the user disabled cloud LLM in Privacy settings (`privacy.llm != true`). A tier-3 op that
 /// needs the cloud LLM must refuse rather than silently send private doc content to the cloud.
-fn cloud_llm_disabled() -> AppError {
+fn cloud_vlm_unsafe() -> AppError {
     doc_err(
         axum::http::StatusCode::FORBIDDEN,
-        "cloud-llm-disabled",
-        "cloud LLM is disabled in Privacy settings; enable it to use this operation",
+        "cloud-vlm-unsafe",
+        "raw images cannot be sent to a cloud VLM; configure a local VLM or provide locally extracted text",
     )
 }
 fn vault_locked() -> AppError {
@@ -113,7 +113,8 @@ pub struct DocRef {
     pub item_id: Option<String>,
     pub text: Option<String>,
     /// Optional local image/scanned-document path. If text is absent, image paths are routed
-    /// through the VLM text extractor before the normal doc-intel pipeline.
+    /// through a local VLM text extractor before the normal doc-intel pipeline. Cloud VLMs are
+    /// refused because image pixels cannot pass the text PII-redaction boundary.
     pub path: Option<String>,
     #[allow(dead_code)]
     pub name: Option<String>,
@@ -224,16 +225,24 @@ fn is_image_path(path: &str) -> bool {
 /// Resolve a DocRef to text: prefer inline `text`, else use VLM for an image path, else load
 /// the item by id (decrypt with the vault DEK). `vault-locked` if the vault is not unlocked;
 /// `item-not-found` if absent.
+struct ResolvedDoc {
+    text: String,
+    contains_l0: bool,
+}
+
 fn resolve_doc(
     state: &SharedState,
     doc: &DocRef,
     vlm: Option<&dyn VlmProvider>,
-) -> AppResult<String> {
+) -> AppResult<ResolvedDoc> {
     if let Some(t) = &doc.text {
         if t.chars().count() > MAX_DOC_CHARS {
             return Err(document_too_large());
         }
-        return Ok(t.clone());
+        return Ok(ResolvedDoc {
+            text: t.clone(),
+            contains_l0: false,
+        });
     }
     if let Some(path) = &doc.path {
         if !is_image_path(path) {
@@ -245,7 +254,10 @@ fn resolve_doc(
         if text.chars().count() > MAX_DOC_CHARS {
             return Err(document_too_large());
         }
-        return Ok(text);
+        return Ok(ResolvedDoc {
+            text,
+            contains_l0: false,
+        });
     }
     let id = doc
         .item_id
@@ -261,7 +273,15 @@ fn resolve_doc(
     if item.content.chars().count() > MAX_DOC_CHARS {
         return Err(document_too_large());
     }
-    Ok(item.content)
+    let contains_l0 = vault
+        .store()
+        .get_item_privacy_tier(id)
+        .map(|tier| matches!(tier, attune_core::store::audit::PrivacyTier::L0))
+        .unwrap_or(true);
+    Ok(ResolvedDoc {
+        text: item.content,
+        contains_l0,
+    })
 }
 
 /// The router + LLM handle the route uses. The per-stage routing DECISION is client-side
@@ -283,44 +303,19 @@ fn router_from_state(state: &SharedState) -> ModelRouter {
     ModelRouter::from_settings(&settings)
 }
 
-/// I2: has the user enabled cloud-LLM egress in Privacy settings? Reads `app_settings.privacy.llm`
-/// (v1.0.6 Privacy Logic Strategy — default `false` until the user opts in via the wizard/Privacy
-/// dashboard). A missing/false value ⇒ cloud LLM is NOT permitted.
-fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
-    let bytes = match state.vault.lock() {
-        Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
-        Err(_) => None,
-    };
-    bytes
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|s| {
-            s.get("privacy")
-                .and_then(|p| p.get("llm"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false)
+fn require_local_vlm(inner: Arc<dyn VlmProvider>) -> AppResult<Arc<dyn VlmProvider>> {
+    if !inner.is_local() {
+        return Err(cloud_vlm_unsafe());
+    }
+    Ok(inner)
 }
 
-/// Resolve the LLM provider for a tier-3 (cloud) op, enforcing two privacy guarantees before any
-/// content can leave:
-///   - **I2**: refuse (`cloud-llm-disabled`) when the user has not enabled cloud-LLM egress.
-///   - **I1**: wrap the provider in [`RedactingLlmProvider`] so every outbound payload is
-///     PII-redacted (parity with chat.rs's F-17 boundary) — doc-intel was sending RAW doc content.
-fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
-    if !cloud_llm_egress_enabled(state) {
-        return Err(cloud_llm_disabled());
-    }
-    let inner = state.llm().ok_or_else(llm_unavailable)?;
-    Ok(Arc::new(
-        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
-    ))
-}
-
-fn cloud_vlm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn VlmProvider>> {
-    if !cloud_llm_egress_enabled(state) {
-        return Err(cloud_llm_disabled());
-    }
-    state.vlm().ok_or_else(vlm_unavailable)
+/// Image attachments are not covered by the text redactor. Until there is a
+/// pixel-level redaction boundary, document routes may use only a provider that
+/// proves its payload remains on a local/private destination.
+fn local_vlm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn VlmProvider>> {
+    let inner = state.vlm().ok_or_else(vlm_unavailable)?;
+    require_local_vlm(inner)
 }
 
 fn is_paid(state: &SharedState) -> bool {
@@ -362,12 +357,13 @@ pub async fn compare_docs(
     enforce_gate(is_tier3_compare(&body.mode) || needs_vlm, is_paid(&state))?;
 
     let vlm = if needs_vlm {
-        Some(cloud_vlm_or_refuse(&state)?)
+        Some(local_vlm_or_refuse(&state)?)
     } else {
         None
     };
     let left = resolve_doc(&state, &body.left, vlm.as_deref())?;
     let right = resolve_doc(&state, &body.right, vlm.as_deref())?;
+    let contains_l0 = left.contains_l0 || right.contains_l0;
 
     // §3.5 default = marked; structured override accepted.
     let output_mode = match body.output_mode.as_deref() {
@@ -376,17 +372,15 @@ pub async fn compare_docs(
     };
 
     let router = router_from_state(&state);
-    // Only the semantic (tier-3) path sends content to the cloud LLM. Privacy-gate + redact only
-    // then (I1/I2); structural/textual compare is local and needs no cloud consent —
+    // Only the semantic (tier-3) path invokes an LLM. Apply the shared local/cloud privacy
+    // boundary only then (I1/I2); structural/textual compare is local and needs no consent —
     // `compare::compare` short-circuits before touching the provider for those modes.
     let llm = if is_tier3_compare(&body.mode) {
-        cloud_llm_or_refuse(&state)?
+        crate::routes::privacy::governed_llm(&state, contains_l0)?
     } else {
-        // Local modes: the provider is never invoked. Wrap the configured one (redaction is a
-        // no-op here) so the StageLlms shape is satisfied; 503 only if none is configured at all,
-        // matching the prior contract.
-        let inner = state.llm().ok_or_else(llm_unavailable)?;
-        Arc::new(attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner))
+        // Structural/textual modes never invoke the provider. Use the explicit
+        // no-op handle rather than requiring an unrelated LLM configuration.
+        attune_core::llm::noop_llm()
     };
     let llms = compare::StageLlms {
         cheap: llm.as_ref(),
@@ -394,8 +388,8 @@ pub async fn compare_docs(
     };
 
     let report: DiffReport = compare::compare(
-        &left,
-        &right,
+        &left.text,
+        &right.text,
         mode,
         output_mode,
         is_paid(&state),
@@ -428,12 +422,12 @@ pub async fn summarize_doc(
     enforce_gate(true, is_paid(&state))?;
     let level = parse_level(&body.level)?;
     let vlm = if body.source.needs_vlm() {
-        Some(cloud_vlm_or_refuse(&state)?)
+        Some(local_vlm_or_refuse(&state)?)
     } else {
         None
     };
-    let full_text = resolve_doc(&state, &body.source, vlm.as_deref())?;
-    if full_text.trim().is_empty() {
+    let resolved = resolve_doc(&state, &body.source, vlm.as_deref())?;
+    if resolved.text.trim().is_empty() {
         return Err(doc_err(
             axum::http::StatusCode::BAD_REQUEST,
             "empty-document",
@@ -444,7 +438,7 @@ pub async fn summarize_doc(
 
     let router = router_from_state(&state);
     // summarize is always tier-3 → privacy-gate (I2) + redact (I1).
-    let llm = cloud_llm_or_refuse(&state)?;
+    let llm = crate::routes::privacy::governed_llm(&state, resolved.contains_l0)?;
     let llms = deep_summary::StageLlms {
         cheap: llm.as_ref(),
         reasoning: llm.as_ref(),
@@ -455,7 +449,7 @@ pub async fn summarize_doc(
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
     let cfg = DeepSummaryConfig::default();
     let (summary, bill): (Summary, TokenBill) = deep_summary::summarize(
-        &full_text,
+        &resolved.text,
         level,
         &item_id,
         &router,
@@ -505,15 +499,15 @@ pub async fn chapters_doc(
         is_paid(&state),
     )?;
     let vlm = if needs_vlm {
-        Some(cloud_vlm_or_refuse(&state)?)
+        Some(local_vlm_or_refuse(&state)?)
     } else {
         None
     };
-    let full_text = resolve_doc(&state, &doc_ref, vlm.as_deref())?;
+    let resolved = resolve_doc(&state, &doc_ref, vlm.as_deref())?;
 
     match body.action.as_str() {
         "list" => {
-            let entries = chapters::list(&full_text, 0.5);
+            let entries = chapters::list(&resolved.text, 0.5);
             Ok(Json(DocEnvelope {
                 output_mode: "structured".into(),
                 result: json!({ "chapters": entries }),
@@ -526,10 +520,10 @@ pub async fn chapters_doc(
             let idx = body
                 .chapter_idx
                 .ok_or_else(|| invalid_input("chapter_idx is required"))?;
-            let chs = chapters::split_chapters(&full_text);
+            let chs = chapters::split_chapters(&resolved.text);
             let router = router_from_state(&state);
             // chapter summarize/ask are tier-3 → privacy-gate (I2) + redact (I1).
-            let llm = cloud_llm_or_refuse(&state)?;
+            let llm = crate::routes::privacy::governed_llm(&state, resolved.contains_l0)?;
             let structured = matches!(body.output_mode.as_deref(), Some("structured"));
             let om = if structured {
                 chapters::OutputMode::Structured
@@ -601,6 +595,22 @@ fn map_core_err(e: attune_core::error::VaultError) -> AppError {
 mod tests {
     use super::*;
 
+    struct LocalityVlm(bool);
+
+    impl VlmProvider for LocalityVlm {
+        fn caption(&self, _image_path: &Path) -> attune_core::error::Result<String> {
+            Ok("caption".into())
+        }
+
+        fn vqa(&self, _image_path: &Path, _question: &str) -> attune_core::error::Result<String> {
+            Ok("answer".into())
+        }
+
+        fn is_local(&self) -> bool {
+            self.0
+        }
+    }
+
     #[test]
     fn test_gate_tier3_classification() {
         assert!(is_tier3_compare("semantic"));
@@ -644,6 +654,24 @@ mod tests {
             name: None,
         };
         assert!(!non_image.needs_vlm());
+    }
+
+    #[test]
+    fn cloud_vlm_is_refused_before_raw_image_egress() {
+        let cloud: Arc<dyn VlmProvider> = Arc::new(LocalityVlm(false));
+        let err = match require_local_vlm(cloud) {
+            Ok(_) => panic!("cloud VLM must be refused"),
+            Err(err) => err,
+        };
+        if let AppError::Detailed { status, body } = err {
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+            assert_eq!(body["code"], "cloud-vlm-unsafe");
+        } else {
+            panic!("expected Detailed cloud-vlm-unsafe");
+        }
+
+        let local: Arc<dyn VlmProvider> = Arc::new(LocalityVlm(true));
+        assert!(require_local_vlm(local).is_ok());
     }
 
     #[test]

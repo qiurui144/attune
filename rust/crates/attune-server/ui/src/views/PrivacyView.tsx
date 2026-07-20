@@ -18,6 +18,8 @@ import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { api, ApiError } from '../store/api';
 import { vaultState } from '../store/signals';
+import { loadMemberState, loadSettingsLocks } from '../hooks/useMember';
+import { loadSettings } from '../hooks/useSettings';
 import { t } from '../i18n';
 import { toast } from '../components/Toast';
 import { useConfirm } from '../components/ConfirmModal';
@@ -69,6 +71,7 @@ const DESC_KEY_FOR: Record<OutboundKey, string> = {
 export function PrivacyView(): JSX.Element {
   const status = useSignal<PrivacyStatus | null>(null);
   const busyKey = useSignal<OutboundKey | null>(null);
+  const wipingCloud = useSignal(false);
   const { confirm, confirmModal } = useConfirm();
 
   // INT-2 doc-export panel interactive state.
@@ -156,12 +159,15 @@ export function PrivacyView(): JSX.Element {
 
   async function wipeCloud(): Promise<void> {
     if (!(await confirm({ title: t('confirm.title.wipeCloud'), message: t('privacy.confirm.wipeCloud'), danger: true }))) return;
+    wipingCloud.value = true;
     try {
       await api.post('/privacy/wipe-cloud-session');
-      await refresh();
+      await Promise.all([refresh(), loadMemberState(), loadSettingsLocks(), loadSettings()]);
       toast('success', t('privacy.success.cloudWiped'));
     } catch {
       toast('error', t('privacy.errors.wipeFailed'));
+    } finally {
+      wipingCloud.value = false;
     }
   }
 
@@ -344,7 +350,7 @@ export function PrivacyView(): JSX.Element {
             size="sm"
             data-testid="wipe-cloud-session-button"
             onClick={() => void wipeCloud()}
-            disabled={!s.outbound.cloud_saas.enabled}
+            disabled={wipingCloud.value}
           >
             {t('privacy.actions.wipeCloudSession')}
           </Button>
@@ -582,4 +588,3 @@ function Panel({
     </section>
   );
 }
-

@@ -15,8 +15,10 @@ import type {
   AcpFlowStatus,
   LocalSchedulerInfo,
 } from '../store/signals';
-import { drawerContent } from '../store/signals';
+import { drawerContent, settings } from '../store/signals';
 import { t } from '../i18n';
+import { ttsRequestText } from '../ttsText';
+import { TtsPlayer } from './TtsPlayer';
 
 export type ChatMessageProps = {
   message: Message;
@@ -93,6 +95,8 @@ function AssistantBubble({
 
   const displayed = m.content.slice(0, revealedLen);
   const streaming = revealedLen < m.content.length;
+  const ttsEnabled = (settings.value?.tts as { enabled?: boolean } | undefined)?.enabled !== false;
+  const ttsText = ttsRequestText(m.content);
 
   return (
     <div
@@ -137,6 +141,7 @@ function AssistantBubble({
           {displayed}
           {streaming && <TypingCaret />}
         </div>
+        {!streaming && ttsEnabled && ttsText !== null && <TtsPlayer text={ttsText} />}
         {m.local_scheduler && !streaming && <LocalSchedulerPanel info={m.local_scheduler} />}
         {m.citations && m.citations.length > 0 && !streaming && (
           <CitationRow citations={m.citations} />

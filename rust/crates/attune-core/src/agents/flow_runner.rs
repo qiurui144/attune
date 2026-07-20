@@ -87,11 +87,26 @@ impl StepRunner for GovernedStepRunner<'_> {
     fn run(
         &mut self,
         agent: &AgentSpec,
-        _decision: &ScheduleDecision,
+        decision: &ScheduleDecision,
         input: &Payload,
     ) -> Result<Payload, StepError> {
         match agent.kind {
             Kind::LlmJudge => {
+                let route_matches_provider = match decision {
+                    ScheduleDecision::Local { .. } => self.provider.is_local(),
+                    ScheduleDecision::Cloud => !self.provider.is_local(),
+                    _ => false,
+                };
+                if !route_matches_provider {
+                    return Err(StepError {
+                        kind: StepFailKind::AgentError,
+                        message: format!(
+                            "scheduled route {decision:?} does not match configured {} provider for {}",
+                            if self.provider.is_local() { "local" } else { "cloud" },
+                            agent.id
+                        ),
+                    });
+                }
                 let messages = Self::build_messages(agent, input);
                 // ACP-4: cost governance (cache + cap + CoT budget) + ACP-3
                 // telemetry are all inside governed_chat.

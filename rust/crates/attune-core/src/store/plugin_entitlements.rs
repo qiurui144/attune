@@ -231,6 +231,14 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Remove every cached membership entitlement during account teardown.
+    ///
+    /// This deliberately does not depend on the in-memory cache: a row may
+    /// exist on disk before hydration or after a partial startup.
+    pub fn clear_entitlements(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM plugin_entitlements", [])?)
+    }
 }
 
 #[cfg(test)]
@@ -362,6 +370,21 @@ mod tests {
             .unwrap();
         store.delete_entitlement("law-pro").unwrap();
         assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_removes_rows_even_without_runtime_cache() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "active"))
+            .unwrap();
+        store
+            .upsert_entitlement(&dek, &row("med-pro", "trial"))
+            .unwrap();
+        assert_eq!(store.clear_entitlements().unwrap(), 2);
+        assert!(store.list_entitlements(&dek).unwrap().is_empty());
+        assert_eq!(store.clear_entitlements().unwrap(), 0);
     }
 
     #[test]

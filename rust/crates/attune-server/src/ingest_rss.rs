@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document_with_options, DocumentSink, FeedHttpResponse, IngestOutcome, RawDocument,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    retryable_degraded_marker, DocumentSink, FeedHttpResponse, IngestOutcome, RawDocument,
     RssConnector, RssFeedFetch, SourceConnector,
 };
 
@@ -96,12 +97,27 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
 
         // indexed_files 短路：同 source_ref 已记录 → 跳过 ingest（content_hash 短路是
         // ingest_document 内的第二层防护）。
-        if store.get_indexed_file(&source_ref).ok().flatten().is_some() {
+        let existing = store.get_indexed_file(&source_ref).ok().flatten();
+        if existing
+            .as_ref()
+            .is_some_and(|row| row.file_hash == guid && !guid.is_empty())
+        {
             skipped += 1;
             continue;
         }
 
-        match ingest_document_with_options(store, &dek, &doc, &ingest_options) {
+        let old_item_id = existing.as_ref().and_then(|row| row.item_id.clone());
+        if let Some(old) = old_item_id.as_deref() {
+            let _ = store.delete_item(old);
+            let _ = store.enqueue_reindex(old, "purge");
+        }
+        let outcome = match old_item_id.as_deref() {
+            Some(old) => {
+                ingest_document_replacing_with_options(store, &dek, &doc, old, &ingest_options)
+            }
+            None => ingest_document_with_options(store, &dek, &doc, &ingest_options),
+        };
+        match outcome {
             Ok(IngestOutcome::Inserted { item_id, .. }) => {
                 let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
                 if newest_ingested_guid.is_none() {
@@ -122,6 +138,15 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
                     newest_ingested_guid = Some(guid.clone());
                 }
                 skipped += 1;
+            }
+            Ok(IngestOutcome::Degraded {
+                item_id, reason, ..
+            }) => {
+                let retry_marker = retryable_degraded_marker(&guid);
+                let _ = store.upsert_indexed_file(feed_id, &source_ref, &retry_marker, &item_id);
+                errors.push(format!(
+                    "{source_ref}: retryable degraded extraction: {reason}"
+                ));
             }
             Ok(IngestOutcome::Skipped { .. }) => {
                 skipped += 1;
