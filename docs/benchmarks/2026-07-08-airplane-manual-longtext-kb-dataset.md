@@ -339,8 +339,12 @@ cutoff (`ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS=0`; non-zero overrides are
 clamped to at least 180s), 180s async job polling per rendered page
 (`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`, clamped to 30-180s), and a 30s
 per-DPI render budget (`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`, clamped to
-10-60s) so high-DPI render failures, oversized images, and scheduler
-layout/line-limit terminal errors can fall through to lower-DPI candidates.
+10-60s) so high-DPI render failures and oversized images can fall through to
+lower-DPI candidates. If scheduler OCR returns a layout/line-limit terminal
+error for a whole rendered page, Attune first retries that same page as bounded
+vertical PNG strips through `/kb/tasks/kb.document.ocr_recognize:async`
+(`ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS`, default 16 for background ingest) and
+only then continues to lower-DPI candidates.
 Background ingest also uses an async page coverage policy: known page counts
 default to full-document coverage (`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`),
 unknown page counts fall back to 16 pages, image-size retries may drop as low as
@@ -465,8 +469,8 @@ flowchart TD
 - Scheduler PDF OCR never uploads raw PDFs to `kb.document.ocr_recognize`; it
   renders bounded page images and submits the semantic image contract. Page OCR
   is enabled by default and bounded by page count, per-page async job polling,
-  DPI, render timeout, and explicit failure limits. Operators can disable it
-  with `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0`.
+  DPI, render timeout, layout-limit strip fallback, and explicit failure
+  limits. Operators can disable it with `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0`.
 - If page rendering, Scheduler availability, or OCR output still fails after
   the long async OCR policy reaches terminal state, scanned PDFs fall back
   honestly to metadata-only entries instead of fabricating content.

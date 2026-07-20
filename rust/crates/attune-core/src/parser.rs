@@ -35,6 +35,8 @@ const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS: usize = 30_000;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
 const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 72;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI: usize = 24;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_STRIPS: usize = 4;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_STRIPS: usize = 16;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 const SCHEDULER_TASK_HTTP_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEDULER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -47,6 +49,7 @@ const OCRMYPDF_SIDECAR_MAX_BYTES: usize = 32 * 1024 * 1024;
 // pdftoppm therefore cannot materialize a page geometry that the next bounded
 // decode step would necessarily reject.
 const PDF_RENDER_MAX_DIMENSION: u32 = 4_000;
+const PDF_OCR_STRIP_OVERLAP_MAX_PX: u32 = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseQuality {
@@ -1826,6 +1829,50 @@ fn scheduler_pdf_ocr_render_timeout(
     Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX).max(1_000)).min(page_timeout)
 }
 
+fn scheduler_pdf_ocr_max_strips(options: &ParseOptions) -> usize {
+    let global_keys = [
+        "ATTUNE_SCHEDULER_PDF_OCR_MAX_STRIPS",
+        "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_STRIPS",
+        "ATTUNE_PDF_OCR_MAX_STRIPS",
+    ];
+    let configured = if options.background_ingest_ocr() {
+        env_usize_any_allow_zero_opt(&[
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_STRIPS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_STRIPS",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_STRIPS",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_STRIPS",
+        ])
+        .unwrap_or_else(|| {
+            env_usize_any_allow_zero(
+                &global_keys,
+                DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_STRIPS,
+            )
+        })
+    } else {
+        env_usize_any_allow_zero(&global_keys, DEFAULT_SCHEDULER_PDF_OCR_MAX_STRIPS)
+    };
+    configured.min(64)
+}
+
+fn scheduler_pdf_ocr_strip_counts(options: &ParseOptions) -> Vec<usize> {
+    let max_strips = scheduler_pdf_ocr_max_strips(options);
+    if max_strips < 2 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for count in [2usize, 4, 8, 16, 32, 64] {
+        let count = count.min(max_strips);
+        if count >= 2 && !candidates.contains(&count) {
+            candidates.push(count);
+        }
+        if count == max_strips {
+            break;
+        }
+    }
+    candidates
+}
+
 fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32, options: &ParseOptions) -> Vec<u32> {
     let max_dpi = env_usize_any(
         &[
@@ -2245,6 +2292,206 @@ fn read_rendered_page_png_bounded(path: &Path) -> Result<RenderedOcrPage> {
     )
 }
 
+#[derive(Debug)]
+struct RenderedOcrStrip {
+    png: Vec<u8>,
+    visually_blank: bool,
+    strip_index: usize,
+    strip_count: usize,
+}
+
+fn rendered_ocr_page_strips(data: &[u8], strip_count: usize) -> Result<Vec<RenderedOcrStrip>> {
+    use image_wire::ImageEncoder;
+
+    let image = image_wire::load_from_memory(data)
+        .map_err(|error| VaultError::InvalidInput(format!("OCR page strip decode failed: {error}")))?
+        .to_rgba8();
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return Err(VaultError::InvalidInput(
+            "OCR page strip image dimensions must be non-zero".to_string(),
+        ));
+    }
+
+    let strip_count = strip_count.min(height as usize);
+    if strip_count < 2 {
+        return Ok(Vec::new());
+    }
+    let overlap = (height / 100)
+        .max(1)
+        .min(PDF_OCR_STRIP_OVERLAP_MAX_PX)
+        .min(height.saturating_sub(1));
+    let max_png_bytes = scheduler_inline_raw_budget_with_copies(scheduler_max_body_bytes(), 3);
+    let mut strips = Vec::with_capacity(strip_count);
+    for index in 0..strip_count {
+        let base_top = ((height as u64 * index as u64) / strip_count as u64) as u32;
+        let base_bottom = ((height as u64 * (index + 1) as u64) / strip_count as u64) as u32;
+        let top = if index == 0 {
+            base_top
+        } else {
+            base_top.saturating_sub(overlap)
+        };
+        let bottom = if index + 1 == strip_count {
+            base_bottom
+        } else {
+            base_bottom.saturating_add(overlap).min(height)
+        };
+        if bottom <= top {
+            continue;
+        }
+
+        let crop = image_wire::imageops::crop_imm(&image, 0, top, width, bottom - top).to_image();
+        let mut encoded = Vec::new();
+        image_wire::codecs::png::PngEncoder::new(&mut encoded)
+            .write_image(
+                crop.as_raw(),
+                width,
+                bottom - top,
+                image_wire::ColorType::Rgba8,
+            )
+            .map_err(|error| {
+                VaultError::InvalidInput(format!("OCR page strip PNG encode failed: {error}"))
+            })?;
+        let canonical =
+            crate::ocr_image_codec::canonicalize_for_scheduler_with_analysis(&encoded, max_png_bytes)?;
+        strips.push(RenderedOcrStrip {
+            png: canonical.png,
+            visually_blank: canonical.visually_blank,
+            strip_index: index + 1,
+            strip_count,
+        });
+    }
+    Ok(strips)
+}
+
+fn try_scheduler_ocr_page_strips(
+    page_png: &[u8],
+    filename: &str,
+    page_number: usize,
+    page_count: Option<usize>,
+    dpi: u32,
+    page_deadline: Instant,
+    options: &ParseOptions,
+) -> Result<Option<String>> {
+    let strip_counts = scheduler_pdf_ocr_strip_counts(options);
+    if strip_counts.is_empty() {
+        return Ok(None);
+    }
+
+    for strip_count in strip_counts {
+        if Instant::now() >= page_deadline {
+            return Ok(None);
+        }
+        let strips = match rendered_ocr_page_strips(page_png, strip_count) {
+            Ok(strips) if !strips.is_empty() => strips,
+            Ok(_) => continue,
+            Err(error) => {
+                log::warn!(
+                    "scheduler PDF page OCR strip fallback could not split {filename} page {page_number} at {dpi}dpi into {strip_count} strips: {error}"
+                );
+                return Ok(None);
+            }
+        };
+
+        let mut parts = Vec::new();
+        let mut blank_strips = 0usize;
+        let mut submitted_strips = 0usize;
+        let mut failed = false;
+        for strip in strips {
+            if Instant::now() >= page_deadline {
+                failed = true;
+                break;
+            }
+            if strip.visually_blank {
+                blank_strips += 1;
+                continue;
+            }
+            if !scheduler_inline_file_fits_with_copies(
+                &format!(
+                    "{filename}#page={page_number}#strip={}-of-{}",
+                    strip.strip_index, strip.strip_count
+                ),
+                strip.png.len(),
+                "kb.document.ocr_recognize",
+                3,
+            ) {
+                log::warn!(
+                    "scheduler PDF page OCR strip fallback rendered {filename} page {page_number} strip {}/{} at {dpi}dpi above scheduler body budget ({} bytes)",
+                    strip.strip_index,
+                    strip.strip_count,
+                    strip.png.len()
+                );
+                failed = true;
+                break;
+            }
+            let poll_timeout = page_deadline.saturating_duration_since(Instant::now());
+            if poll_timeout <= SCHEDULER_TASK_CANCEL_RESERVE {
+                failed = true;
+                break;
+            }
+            submitted_strips += 1;
+            let strip_filename = format!(
+                "{filename}#page={page_number}#strip={}-of-{}",
+                strip.strip_index, strip.strip_count
+            );
+            match scheduler_ocr_image_bytes(
+                &strip.png,
+                &strip_filename,
+                page_number,
+                page_count,
+                dpi,
+                poll_timeout,
+                options,
+            ) {
+                Ok(Some(text)) if !text.trim().is_empty() => {
+                    parts.push(text.trim().to_string());
+                }
+                Ok(_) => {
+                    log::warn!(
+                        "scheduler PDF page OCR strip fallback returned empty text for {filename} page {page_number} strip {}/{} at {dpi}dpi",
+                        strip.strip_index,
+                        strip.strip_count
+                    );
+                    failed = true;
+                    break;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    log::warn!(
+                        "scheduler PDF page OCR strip fallback failed for {filename} page {page_number} strip {}/{} at {dpi}dpi: {message}",
+                        strip.strip_index,
+                        strip.strip_count
+                    );
+                    if scheduler_ocr_error_is_fatal(&message) {
+                        return Err(error);
+                    }
+                    failed = true;
+                    break;
+                }
+            }
+        }
+
+        if !failed {
+            let text = parts.join("\n");
+            if !text.trim().is_empty() {
+                log::info!(
+                    "scheduler PDF page OCR strip fallback recovered {filename} page {page_number} at {dpi}dpi with {strip_count} strips (submitted_strips={submitted_strips}, blank_strips={blank_strips})"
+                );
+                return Ok(Some(text));
+            }
+            if submitted_strips == 0 && blank_strips > 0 {
+                return Ok(Some(String::new()));
+            }
+        }
+        log::warn!(
+            "scheduler PDF page OCR strip fallback retrying {filename} page {page_number} at {dpi}dpi with more strips after {strip_count}-strip attempt failed"
+        );
+    }
+
+    Ok(None)
+}
+
 fn try_scheduler_pdf_page_ocr_from_path_with_budget(
     path: &Path,
     requested_dpi: u32,
@@ -2415,6 +2662,35 @@ fn try_scheduler_pdf_page_ocr_from_path_with_budget(
                         break;
                     }
                     if scheduler_ocr_error_should_retry_lower_dpi(&message) {
+                        match try_scheduler_ocr_page_strips(
+                            &data,
+                            &filename,
+                            page,
+                            page_count,
+                            *dpi,
+                            page_deadline,
+                            options,
+                        ) {
+                            Ok(Some(text)) => {
+                                page_failed = false;
+                                page_text = Some(text);
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(strip_error) => {
+                                page_failed = true;
+                                let strip_message = strip_error.to_string();
+                                if scheduler_ocr_error_is_fatal(&strip_message) {
+                                    log::warn!(
+                                        "scheduler PDF page OCR stopping for {} after fatal strip OCR error on page {}",
+                                        path.display(),
+                                        page
+                                    );
+                                    stopped_on_fatal_error = true;
+                                    break;
+                                }
+                            }
+                        }
                         log::warn!(
                             "scheduler PDF page OCR retrying {} page {} at lower DPI after scheduler OCR terminal error",
                             path.display(),
@@ -5714,6 +5990,7 @@ mod tests {
             "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
             "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS",
             "ATTUNE_SCHEDULER_OCR_ENABLED",
             "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
         ]);
@@ -5736,6 +6013,7 @@ mod tests {
         std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES", "1");
         std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "200");
         std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS", "0");
         std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
         std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
 
@@ -5816,6 +6094,129 @@ mod tests {
             requests
                 .iter()
                 .any(|line| line.starts_with("POST /jobs/ocr-layout-high:cancel ")),
+            "requests={requests:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_splits_page_after_layout_limit_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 1'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        install_test_pdftoppm(&pdftoppm, dir.path());
+        for exe in [&pdfinfo, &pdftoppm] {
+            let mut perms = std::fs::metadata(exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(exe, perms).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "16777216");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "200");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI", "200");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS", "2");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("layout-limit-strip-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let whole_job = "ocr-layout-whole";
+        let strip_one_job = "ocr-layout-strip-one";
+        let strip_two_job = "ocr-layout-strip-two";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(whole_job), Duration::ZERO),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": whole_job,
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "done",
+                    "phase": "done",
+                    "outputs": {
+                        "schema_version": "ocr_result.v1",
+                        "task": "kb.document.ocr_recognize",
+                        "status": "error",
+                        "text": "",
+                        "pages": [{"page_index": 1, "text": ""}],
+                        "layout": [],
+                        "lines": [],
+                        "error": {
+                            "code": "ocr_layout_limit_exceeded",
+                            "detail": "OCR detector line limit exceeded"
+                        }
+                    }
+                }),
+            ),
+            scheduler_cancel_reply(whole_job, 200),
+            scheduler_async_submit(Some(strip_one_job), Duration::ZERO),
+            scheduler_done_reply(
+                strip_one_job,
+                scheduler_native_ocr_outputs(1, "upper strip recovered text"),
+            ),
+            scheduler_async_submit(Some(strip_two_job), Duration::ZERO),
+            scheduler_done_reply(
+                strip_two_job,
+                scheduler_native_ocr_outputs(1, "lower strip recovered text"),
+            ),
+        ]);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000)
+            .with_background_ingest_ocr();
+
+        let result =
+            try_scheduler_pdf_page_ocr_from_path_with_budget(
+                &pdf,
+                300,
+                &options,
+                SchedulerPdfOcrBudget::new(&options),
+            )
+            .expect("layout-limit OCR error should split the page and recover text");
+        assert!(result.complete, "result={result:?}");
+        assert!(
+            result.text.contains("upper strip recovered text"),
+            "text={}",
+            result.text
+        );
+        assert!(
+            result.text.contains("lower strip recovered text"),
+            "text={}",
+            result.text
+        );
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        let submissions = requests
+            .iter()
+            .filter(|line| line.starts_with("POST /kb/tasks/kb.document.ocr_recognize:async "))
+            .count();
+        assert_eq!(submissions, 3, "requests={requests:?}");
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.starts_with("POST /jobs/ocr-layout-whole:cancel ")),
             "requests={requests:?}"
         );
     }

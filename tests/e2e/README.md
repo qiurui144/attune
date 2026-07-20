@@ -69,9 +69,12 @@ fatal payload/schema 错误，Attune 会在第一页后直接停止该 PDF 的 p
 默认尝试全页（`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`），未知页数兜底 16 页；
 交互/同步路径仍默认 4 页。每个 DPI render 另有 deadline，默认 `30000ms`（
 `ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`，范围 `10000..60000`），高 DPI render
-超时、输出图像过大，或 scheduler 返回 layout/line limit 类终态错误时，会继续尝试低
-DPI 候选，后台路径默认最低降到 24dpi。后台失败页和连续失败阈值默认等于本次 page
-limit，只有 background/async 专用环境变量会收紧它们。
+超时或输出图像过大时，会继续尝试低 DPI 候选；scheduler 返回 layout/line limit
+类终态错误时，Attune 会先把该页 PNG 切成纵向 strip 继续走
+`/kb/tasks/kb.document.ocr_recognize:async`，后台默认最多 16 strips
+（`ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS`），仍失败才继续低 DPI 候选。后台路径默认最低降到
+24dpi。后台失败页和连续失败阈值默认等于本次 page limit，只有 background/async
+专用环境变量会收紧它们。
 
 云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
 
