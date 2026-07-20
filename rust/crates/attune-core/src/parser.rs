@@ -41,6 +41,8 @@ const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 const SCHEDULER_TASK_HTTP_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEDULER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCHEDULER_TASK_CANCEL_RESERVE: Duration = Duration::from_millis(250);
+const SCHEDULER_OCR_TRANSIENT_RETRY_INITIAL: Duration = Duration::from_millis(500);
+const SCHEDULER_OCR_TRANSIENT_RETRY_MAX: Duration = Duration::from_secs(5);
 const PDF_TEXT_OUTPUT_MAX_BYTES: usize = 32 * 1024 * 1024;
 const PDFINFO_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
 const POPPLER_DIAGNOSTIC_MAX_BYTES: usize = 64 * 1024;
@@ -675,6 +677,70 @@ fn scheduler_ocr_image_bytes(
         .map(str::to_string))
 }
 
+fn scheduler_ocr_image_bytes_with_transient_retries(
+    data: &[u8],
+    filename: &str,
+    page_number: usize,
+    page_count: Option<usize>,
+    dpi: u32,
+    page_deadline: Instant,
+    options: &ParseOptions,
+    context: &str,
+) -> Result<Option<String>> {
+    let mut attempt = 0usize;
+    loop {
+        let poll_timeout = page_deadline.saturating_duration_since(Instant::now());
+        if poll_timeout <= SCHEDULER_TASK_CANCEL_RESERVE {
+            return Err(VaultError::LlmUnavailable(format!(
+                "scheduler OCR page budget exhausted before {context}"
+            )));
+        }
+        match scheduler_ocr_image_bytes(
+            data,
+            filename,
+            page_number,
+            page_count,
+            dpi,
+            poll_timeout,
+            options,
+        ) {
+            Ok(text) => return Ok(text),
+            Err(error) => {
+                let message = error.to_string();
+                if !scheduler_ocr_error_should_retry_same_page(&message) {
+                    return Err(error);
+                }
+                let remaining = page_deadline.saturating_duration_since(Instant::now());
+                if remaining <= SCHEDULER_TASK_CANCEL_RESERVE {
+                    return Err(error);
+                }
+                let delay = scheduler_ocr_transient_retry_delay(attempt)
+                    .min(remaining.saturating_sub(SCHEDULER_TASK_CANCEL_RESERVE));
+                if delay.is_zero() {
+                    return Err(error);
+                }
+                attempt = attempt.saturating_add(1);
+                log::warn!(
+                    "scheduler OCR retrying {context} after transient scheduler error (attempt={}, delay_ms={}, remaining_ms={}): {message}",
+                    attempt,
+                    delay.as_millis(),
+                    remaining.as_millis()
+                );
+                thread::sleep(delay);
+            }
+        }
+    }
+}
+
+fn scheduler_ocr_transient_retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1u64 << attempt.min(4);
+    let millis = u64::try_from(SCHEDULER_OCR_TRANSIENT_RETRY_INITIAL.as_millis())
+        .unwrap_or(500)
+        .saturating_mul(multiplier)
+        .min(u64::try_from(SCHEDULER_OCR_TRANSIENT_RETRY_MAX.as_millis()).unwrap_or(5_000));
+    Duration::from_millis(millis)
+}
+
 fn scheduler_asr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
     let base = options.scheduler_base.as_deref()?;
     if !scheduler_inline_file_fits(filename, data.len(), "kb.meeting.asr_frontend") {
@@ -1065,6 +1131,37 @@ fn scheduler_ocr_error_should_retry_lower_dpi(message: &str) -> bool {
     ]
     .iter()
     .any(|needle| normalized.contains(needle))
+}
+
+fn scheduler_ocr_error_should_retry_same_page(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    if [
+        " request failed:",
+        "error sending request",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "broken pipe",
+        "unexpected eof",
+        "timed out",
+        "operation timed out",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+    {
+        return true;
+    }
+
+    if [" returned 408", " returned 429", " returned 502", " returned 503", " returned 504"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+    {
+        return true;
+    }
+
+    normalized.contains("local scheduler /jobs/")
+        && (normalized.contains(" returned 404") || normalized.contains(" returned 410"))
 }
 
 fn scheduler_array_text(value: &Value) -> Option<String> {
@@ -2435,14 +2532,19 @@ fn try_scheduler_ocr_page_strips(
                 "{filename}#page={page_number}#strip={}-of-{}",
                 strip.strip_index, strip.strip_count
             );
-            match scheduler_ocr_image_bytes(
+            let strip_context = format!(
+                "{filename} page {page_number} strip {}/{} at {dpi}dpi",
+                strip.strip_index, strip.strip_count
+            );
+            match scheduler_ocr_image_bytes_with_transient_retries(
                 &strip.png,
                 &strip_filename,
                 page_number,
                 page_count,
                 dpi,
-                poll_timeout,
+                page_deadline,
                 options,
+                &strip_context,
             ) {
                 Ok(Some(text)) if !text.trim().is_empty() => {
                     parts.push(text.trim().to_string());
@@ -2625,14 +2727,16 @@ fn try_scheduler_pdf_page_ocr_from_path_with_budget(
                 page_failed = true;
                 break;
             }
-            match scheduler_ocr_image_bytes(
+            let page_context = format!("{} page {} at {}dpi", path.display(), page, dpi);
+            match scheduler_ocr_image_bytes_with_transient_retries(
                 &data,
                 &filename,
                 page,
                 page_count,
                 *dpi,
-                poll_timeout,
+                page_deadline,
                 options,
+                &page_context,
             ) {
                 Ok(Some(text)) if !text.trim().is_empty() => {
                     page_text = Some(text);
@@ -5975,6 +6079,86 @@ mod tests {
         let log = std::fs::read_to_string(render_log).unwrap();
         assert!(log.contains("dpi=200"), "log={log}");
         assert!(log.contains("dpi=120"), "log={log}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_retries_transient_scheduler_submit_error_on_same_page() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 1'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        install_test_pdftoppm(&pdftoppm, dir.path());
+        for exe in [&pdfinfo, &pdftoppm] {
+            let mut perms = std::fs::metadata(exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(exe, perms).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "16777216");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "200");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI", "200");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("scheduler-restart-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let recovered_job = "ocr-recovered-after-503";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            SchedulerSequenceReply::json(
+                503,
+                serde_json::json!({"detail": "scheduler restarting"}),
+            ),
+            scheduler_async_submit(Some(recovered_job), Duration::ZERO),
+            scheduler_done_reply(
+                recovered_job,
+                scheduler_native_ocr_outputs(1, "same page recovered after restart"),
+            ),
+        ]);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000)
+            .with_background_ingest_ocr();
+
+        let result =
+            try_scheduler_pdf_page_ocr_from_path_with_budget(
+                &pdf,
+                300,
+                &options,
+                SchedulerPdfOcrBudget::new(&options),
+            )
+            .expect("transient scheduler submit error should retry the same page");
+        assert!(result.complete, "result={result:?}");
+        assert!(
+            result.text.contains("same page recovered after restart"),
+            "text={}",
+            result.text
+        );
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        let submissions = requests
+            .iter()
+            .filter(|line| line.starts_with("POST /kb/tasks/kb.document.ocr_recognize:async "))
+            .count();
+        assert_eq!(submissions, 2, "requests={requests:?}");
     }
 
     #[cfg(unix)]

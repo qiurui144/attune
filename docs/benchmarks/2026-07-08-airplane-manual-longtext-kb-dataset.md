@@ -344,7 +344,10 @@ lower-DPI candidates. If scheduler OCR returns a layout/line-limit terminal
 error for a whole rendered page, Attune first retries that same page as bounded
 vertical PNG strips through `/kb/tasks/kb.document.ocr_recognize:async`
 (`ATTUNE_BACKGROUND_PDF_OCR_MAX_STRIPS`, default 16 for background ingest) and
-only then continues to lower-DPI candidates.
+only then continues to lower-DPI candidates. Transient scheduler transport
+errors, 408/429/502/503/504 admission/status responses, and scheduler-restart
+job-status misses are retried against the same rendered page until the page
+budget is exhausted; they are not immediate metadata-only decisions.
 Background ingest also uses an async page coverage policy: known page counts
 default to full-document coverage (`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`),
 unknown page counts fall back to 16 pages, image-size retries may drop as low as
@@ -370,9 +373,10 @@ Attune-side defaults for this gate are intentionally platform-neutral:
   `ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES`, `ATTUNE_ASYNC_PDF_OCR_MAX_PAGES`, or
   the scheduler-prefixed variants; `0` means all detected pages.
   Background ingest polls each scheduler OCR job to terminal state under the
-  long async budget before recording metadata-only fallback. Fatal
-  payload/schema errors such as `unsupported_payload` still fail closed early
-  because retrying later pages cannot make that payload contract valid.
+  long async budget and retries transient scheduler availability errors on the
+  same page before recording metadata-only fallback. Fatal payload/schema errors
+  such as `unsupported_payload` still fail closed early because retrying later
+  pages cannot make that payload contract valid.
 - Web UI scheduler answer jobs poll every 250ms, matching the Python/browser
   long-text UI gates, so the browser surface does not lose the 10s answer SLA
   to coarse job-poll latency after the scheduler has already completed.

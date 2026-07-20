@@ -117,8 +117,11 @@ flowchart LR
   including full detected-page coverage by default, no default document-level
   hard cutoff, 180s per-page job polling, a 30s render budget, an unknown-page
   fallback cap, lower-DPI retries for image-size failures, and vertical strip
-  retries for scheduler layout/line-limit terminal errors; interactive PDF OCR
-  keeps the shorter bounded defaults.
+  retries for scheduler layout/line-limit terminal errors. Transient scheduler
+  transport errors, retryable HTTP admission/status errors, and lost job-status
+  handles after a scheduler restart are retried on the same rendered page within
+  the page budget before Attune can mark the page as OCR-failed. Interactive PDF
+  OCR keeps the shorter bounded defaults.
 - `/api/v1/ai-stack`, `/api/v1/status`, and edge-scheduler readiness routes report scheduler
   capability only; they do not inspect concrete local runtimes.
 - Scheduler contract fixtures, runtime profile cache/TTL, and classified

@@ -51,7 +51,9 @@ runner 并复用它做 UI gate。
   answer budget、multiturn 和 UI。
 - `ATTUNE_K3_LONGTEXT_PDF_OCR=1` 是默认综合策略；设置为 `0` 才是显式 CI 隔离策略。
   开启 OCR 时要把 PDF OCR 卡顿、scheduler OCR timeout、layout/line-limit strip fallback
-  和 metadata-only degradation 单独归档，不和向量/search/chat 性能混算。
+  和 metadata-only degradation 单独归档，不和向量/search/chat 性能混算。scheduler
+  transport/unavailable 或重启导致的 job-status miss 应先由 Attune 在单页长预算内同页重试；
+  若仍失败，需要在报告中作为 scheduler 可用性因素暴露，而不是归因为文档不可 OCR。
 - 如果 Attune server 跑在 NAS/K3 上，long-text API gate 必须在 NAS/K3 本机执行，或使用明确的
   NAS/K3 server-side corpus path；不能把 runner 本地路径传给 `/api/v1/index/bind`。
 
