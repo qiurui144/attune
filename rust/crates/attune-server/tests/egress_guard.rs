@@ -174,13 +174,48 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Count egress-client constructions in a file, skipping `//` comment lines.
 fn count_egress_points(path: &Path) -> usize {
     let src = std::fs::read_to_string(path).expect("read source");
-    src.lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            !t.starts_with("//") && !t.starts_with('*')
-        })
-        .map(|line| PATTERNS.iter().filter(|pat| line.contains(*pat)).count())
-        .sum()
+    let mut count = 0usize;
+    let mut cfg_test_pending = false;
+    let mut brace_depth = 0isize;
+    let mut skip_until_depth: Option<isize> = None;
+
+    for line in src.lines() {
+        let t = line.trim_start();
+        let opens = line.chars().filter(|c| *c == '{').count() as isize;
+        let closes = line.chars().filter(|c| *c == '}').count() as isize;
+
+        if skip_until_depth.is_some() {
+            brace_depth += opens - closes;
+            if skip_until_depth.is_some_and(|target| brace_depth <= target) {
+                skip_until_depth = None;
+            }
+            continue;
+        }
+
+        if t.starts_with("#[cfg(test)]") {
+            cfg_test_pending = true;
+            continue;
+        }
+
+        if cfg_test_pending {
+            let start_depth = brace_depth;
+            brace_depth += opens - closes;
+            if opens > closes {
+                skip_until_depth = Some(start_depth);
+            }
+            cfg_test_pending = false;
+            continue;
+        }
+
+        if !t.starts_with("//") && !t.starts_with('*') {
+            count += PATTERNS
+                .iter()
+                .filter(|pat| line.contains(*pat))
+                .count();
+        }
+        brace_depth += opens - closes;
+    }
+    count
 }
 
 #[test]
