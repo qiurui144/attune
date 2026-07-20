@@ -339,8 +339,11 @@ long-budget async OCR policy by default: 120s per document
 scheduler page OCR (`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`, clamped to
 30-60s), and an 8s per-DPI render budget
 (`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`) so high-DPI render failures can
-fall through to lower-DPI candidates. The OCR page loop itself remains bounded
-by Attune-side stop conditions below.
+fall through to lower-DPI candidates. Background ingest also uses an async page
+coverage policy: known page counts default to full-document coverage
+(`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`), unknown page counts fall back to 16
+pages, and image-size retries may drop as low as 48dpi. Interactive/synchronous
+PDF OCR keeps the shorter page and DPI defaults below.
 
 Attune-side defaults for this gate are intentionally platform-neutral:
 
@@ -356,6 +359,9 @@ Attune-side defaults for this gate are intentionally platform-neutral:
   `ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES` defaults to 4,
   `ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` defaults to 12000ms, and consecutive
   empty OCR pages count toward `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`.
+  Background ingest can override the page budget with
+  `ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES`, `ATTUNE_ASYNC_PDF_OCR_MAX_PAGES`, or
+  the scheduler-prefixed variants; `0` means all detected pages.
   If OCR produces no usable text, or returns fatal payload/schema errors such as
   `unsupported_payload`, ingest falls back to metadata-only indexing instead of
   blocking the full bind on one scanned PDF.

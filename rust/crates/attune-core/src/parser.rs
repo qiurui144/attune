@@ -27,11 +27,14 @@ const DEFAULT_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES: usize = 2;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES: usize = 2;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_TOTAL_MS: usize = 12_000;
 const DEFAULT_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 4_000;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_PAGES: usize = 0;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES: usize = 16;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS: usize = 120_000;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 45_000;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS: usize = 8_000;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
 const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 72;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI: usize = 48;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 const SCHEDULER_TASK_HTTP_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEDULER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -430,14 +433,25 @@ fn env_usize_any_clamped(keys: &[&str], default: usize, min: usize, max: usize) 
     env_usize_any(keys, default).clamp(min, max)
 }
 
+fn env_usize_any_opt(keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+    })
+}
+
+fn env_usize_any_allow_zero_opt(keys: &[&str]) -> Option<usize> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    })
+}
+
 fn env_usize_any_allow_zero(keys: &[&str], default: usize) -> usize {
-    keys.iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.trim().parse::<usize>().ok())
-        })
-        .unwrap_or(default)
+    env_usize_any_allow_zero_opt(keys).unwrap_or(default)
 }
 
 fn env_bool_any(keys: &[&str], default: bool) -> bool {
@@ -1589,18 +1603,38 @@ fn try_ocr_from_bytes_with_dpi_and_budget_detailed(
     }
 }
 
-fn scheduler_pdf_ocr_page_limit(page_count: Option<usize>) -> usize {
-    let configured = env_usize_any_allow_zero(
-        &[
-            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
-            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
-            "ATTUNE_PDF_OCR_MAX_PAGES",
-        ],
-        DEFAULT_SCHEDULER_PDF_OCR_MAX_PAGES,
-    );
+fn scheduler_pdf_ocr_page_limit(options: &ParseOptions, page_count: Option<usize>) -> usize {
+    let global_keys = [
+        "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+        "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
+        "ATTUNE_PDF_OCR_MAX_PAGES",
+    ];
+    let (configured, unknown_default) = if options.background_ingest_ocr() {
+        let background_keys = [
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_PAGES",
+        ];
+        (
+            env_usize_any_allow_zero_opt(&background_keys).unwrap_or_else(|| {
+                env_usize_any_allow_zero(
+                    &global_keys,
+                    DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_PAGES,
+                )
+            }),
+            DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES,
+        )
+    } else {
+        (
+            env_usize_any_allow_zero(&global_keys, DEFAULT_SCHEDULER_PDF_OCR_MAX_PAGES),
+            DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES,
+        )
+    };
     match (configured, page_count) {
         (0, Some(count)) => count,
-        (0, None) => DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES,
+        (0, None) => unknown_default,
         (limit, Some(count)) => limit.min(count),
         (limit, None) => limit,
     }
@@ -1724,7 +1758,7 @@ fn scheduler_pdf_ocr_render_timeout(
     Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX).max(1_000)).min(page_timeout)
 }
 
-fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
+fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32, options: &ParseOptions) -> Vec<u32> {
     let max_dpi = env_usize_any(
         &[
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
@@ -1733,14 +1767,31 @@ fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
         DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI,
     )
     .clamp(72, 1200) as u32;
-    let min_dpi = env_usize_any(
-        &[
-            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
-            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
-        ],
-        DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI,
-    )
-    .clamp(72, max_dpi as usize) as u32;
+    let min_dpi_keys = [
+        "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+        "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+    ];
+    let (default_min_dpi, min_floor) = if options.background_ingest_ocr() {
+        let background_min_dpi_keys = [
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_ASYNC_PDF_OCR_MIN_DPI",
+        ];
+        (
+            env_usize_any_opt(&background_min_dpi_keys).unwrap_or_else(|| {
+                env_usize_any(&min_dpi_keys, DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI)
+            }),
+            DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI,
+        )
+    } else {
+        (
+            env_usize_any(&min_dpi_keys, DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI),
+            DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI,
+        )
+    };
+    let min_dpi = default_min_dpi.clamp(min_floor, max_dpi as usize) as u32;
     let base = env_usize_any(
         &[
             "ATTUNE_SCHEDULER_PDF_OCR_DPI",
@@ -1748,10 +1799,10 @@ fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
         ],
         requested_dpi.min(max_dpi) as usize,
     )
-    .clamp(72, 1200) as u32;
+    .clamp(min_dpi as usize, 1200) as u32;
 
     let mut candidates = Vec::new();
-    for dpi in [base, max_dpi, 200, 180, 150, 120, 96, min_dpi] {
+    for dpi in [base, max_dpi, 200, 180, 150, 120, 96, 72, 60, min_dpi] {
         let dpi = dpi.clamp(min_dpi, max_dpi);
         if !candidates.contains(&dpi) {
             candidates.push(dpi);
@@ -2155,13 +2206,13 @@ fn try_scheduler_pdf_page_ocr_from_path_with_budget(
     let page_timeout = scheduler_pdf_ocr_page_timeout(options);
     let render_timeout = scheduler_pdf_ocr_render_timeout(options, page_timeout);
     let page_count = pdf_page_count(path, budget.operation_deadline(page_timeout));
-    let page_limit = scheduler_pdf_ocr_page_limit(page_count);
+    let page_limit = scheduler_pdf_ocr_page_limit(options, page_count);
     if page_limit == 0 {
         return None;
     }
     let max_failed = scheduler_pdf_ocr_max_failed_pages(page_limit);
     let max_consecutive_failed = scheduler_pdf_ocr_max_consecutive_failures();
-    let dpi_candidates = scheduler_pdf_ocr_dpi_candidates(requested_dpi);
+    let dpi_candidates = scheduler_pdf_ocr_dpi_candidates(requested_dpi, options);
     let tmp = tempfile::TempDir::new().ok()?;
 
     let mut all = String::with_capacity(page_limit.min(32) * 1024);
@@ -3769,6 +3820,11 @@ mod tests {
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_DPI",
             "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_ASYNC_PDF_OCR_MIN_DPI",
             "ATTUNE_SCHEDULER_PDF_OCR_DPI",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_DPI",
         ]);
@@ -3777,17 +3833,31 @@ mod tests {
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_DPI",
             "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_ASYNC_PDF_OCR_MIN_DPI",
             "ATTUNE_SCHEDULER_PDF_OCR_DPI",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_DPI",
         ] {
             std::env::remove_var(key);
         }
 
-        let candidates = scheduler_pdf_ocr_dpi_candidates(300);
+        let options = ParseOptions::default();
+        let candidates = scheduler_pdf_ocr_dpi_candidates(300, &options);
         assert_eq!(candidates.first().copied(), Some(200));
         assert!(candidates.contains(&120), "candidates={candidates:?}");
         assert!(candidates.contains(&96), "candidates={candidates:?}");
         assert!(candidates.contains(&72), "candidates={candidates:?}");
+        assert!(!candidates.contains(&48), "candidates={candidates:?}");
+
+        let background = options.with_background_ingest_ocr();
+        let background_candidates = scheduler_pdf_ocr_dpi_candidates(300, &background);
+        assert!(
+            background_candidates.contains(&48),
+            "candidates={background_candidates:?}"
+        );
     }
 
     #[test]
@@ -3898,33 +3968,57 @@ mod tests {
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
             "ATTUNE_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_PAGES",
         ]);
         for key in [
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
             "ATTUNE_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_PAGES",
         ] {
             std::env::remove_var(key);
         }
 
+        let interactive = ParseOptions::default();
+        let background = ParseOptions::default().with_background_ingest_ocr();
         assert_eq!(
-            scheduler_pdf_ocr_page_limit(Some(10_000)),
+            scheduler_pdf_ocr_page_limit(&interactive, Some(10_000)),
             DEFAULT_SCHEDULER_PDF_OCR_MAX_PAGES
         );
         assert_eq!(
-            scheduler_pdf_ocr_page_limit(None),
+            scheduler_pdf_ocr_page_limit(&interactive, None),
             DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES
+        );
+        assert_eq!(scheduler_pdf_ocr_page_limit(&background, Some(37)), 37);
+        assert_eq!(
+            scheduler_pdf_ocr_page_limit(&background, None),
+            DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES
         );
 
         std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "0");
-        assert_eq!(scheduler_pdf_ocr_page_limit(Some(7)), 7);
+        assert_eq!(scheduler_pdf_ocr_page_limit(&interactive, Some(7)), 7);
         assert_eq!(
-            scheduler_pdf_ocr_page_limit(None),
+            scheduler_pdf_ocr_page_limit(&interactive, None),
             DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES
         );
 
         std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "3");
-        assert_eq!(scheduler_pdf_ocr_page_limit(Some(10)), 3);
+        assert_eq!(scheduler_pdf_ocr_page_limit(&interactive, Some(10)), 3);
+        assert_eq!(scheduler_pdf_ocr_page_limit(&background, Some(10)), 3);
+
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES", "0");
+        assert_eq!(scheduler_pdf_ocr_page_limit(&background, Some(10)), 10);
+
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES", "6");
+        assert_eq!(scheduler_pdf_ocr_page_limit(&background, Some(10)), 6);
     }
 
     #[test]
