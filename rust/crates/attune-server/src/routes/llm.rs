@@ -225,7 +225,7 @@ pub async fn probe_local_scheduler(
         let ep = endpoint.clone();
         let client = client.clone();
         set.spawn(async move {
-            let ok = probe_openai_compat_models(&client, &ep).await;
+            let ok = probe_scheduler_models(&client, &ep).await;
             (ep, ok)
         });
     }
@@ -393,6 +393,20 @@ fn scheduler_ports_label() -> String {
         .join(", ")
 }
 
+fn scheduler_native_probe_endpoint(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or_else(|| endpoint.trim().trim_end_matches('/'))
+        .to_string()
+}
+
+async fn probe_scheduler_models(client: &reqwest::Client, endpoint: &str) -> bool {
+    probe_openai_compat_models(client, endpoint).await
+        || probe_scheduler_native_models(client, &scheduler_native_probe_endpoint(endpoint)).await
+}
+
 async fn probe_openai_compat_models(client: &reqwest::Client, endpoint: &str) -> bool {
     let url = format!("{endpoint}/models");
     let res = match client.get(url).send().await {
@@ -411,6 +425,29 @@ async fn probe_openai_compat_models(client: &reqwest::Client, endpoint: &str) ->
 
     value
         .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false)
+}
+
+async fn probe_scheduler_native_models(client: &reqwest::Client, endpoint: &str) -> bool {
+    let url = format!("{endpoint}/models");
+    let res = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    if !res.status().is_success() {
+        return false;
+    }
+
+    let value = match res.json::<serde_json::Value>().await {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    value
+        .get("models")
         .and_then(|v| v.as_array())
         .map(|arr| !arr.is_empty())
         .unwrap_or(false)
@@ -546,6 +583,43 @@ fn scheduler_managed_install_plan(base_url: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn scheduler_native_probe_endpoint_strips_v1_suffix() {
+        assert_eq!(
+            scheduler_native_probe_endpoint("http://127.0.0.1:8090/v1"),
+            "http://127.0.0.1:8090"
+        );
+        assert_eq!(
+            scheduler_native_probe_endpoint("http://127.0.0.1:8090"),
+            "http://127.0.0.1:8090"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_scheduler_models_accepts_scheduler_native_models_without_v1() {
+        let app = axum::Router::new().route(
+            "/models",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "models": [{"name": "llm-summary", "state": "ready"}]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        assert!(
+            probe_scheduler_models(&client, &format!("http://{addr}/v1")).await,
+            "scheduler-native /models should be accepted after stripping /v1"
+        );
+    }
     // normalize_probe_endpoint: 已有 http:// → 加 /v1
     #[test]
     fn normalize_adds_v1_suffix() {

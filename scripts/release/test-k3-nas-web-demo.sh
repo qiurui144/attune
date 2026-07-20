@@ -19,6 +19,8 @@ CONFIGURE_SCHEDULER_AI="${ATTUNE_K3_CONFIGURE_SCHEDULER_AI:-}"
 REQUIRE_SCHEDULER_CHAT="${ATTUNE_K3_REQUIRE_SCHEDULER_CHAT:-}"
 CHAT_JOB_TIMEOUT="${ATTUNE_K3_CHAT_JOB_TIMEOUT:-60}"
 RVV_REQUIRE_PERF="${ATTUNE_K3_RVV_REQUIRE_PERF:-0}"
+API_CONTRACT="${ATTUNE_K3_API_CONTRACT:-1}"
+API_CONTRACT_BIND_DIR="${ATTUNE_K3_API_CONTRACT_BIND_DIR:-}"
 SKIP_DEB_CHECK=0
 SKIP_INSTALL=0
 SKIP_UI=0
@@ -97,6 +99,15 @@ Options:
 Environment:
   ATTUNE_K3_RVV_REQUIRE_PERF=1  Make scheduler latency thresholds block this Attune demo.
                                 Defaults to 0 because scheduler performance is validated by scheduler.
+  ATTUNE_K3_SERVER_SCHEDULER_BASE
+                                Scheduler URL as seen by attune-server on the NAS host.
+                                Usually http://127.0.0.1:8090 when scheduler is co-located.
+  ATTUNE_K3_SCHEDULER_URL       Scheduler URL as seen by this CI runner.
+                                Use a runner-side SSH tunnel when scheduler is loopback-only.
+  ATTUNE_K3_API_CONTRACT=0      Skip the strict NAS Web API contract probe.
+  ATTUNE_K3_LONGTEXT_MANIFEST   Local JSON manifest for the optional long-text UI gate.
+                                The corpus must already be materialized and indexed
+                                on the NAS host before the UI-only gate runs.
 HELP
       exit 0
       ;;
@@ -120,6 +131,9 @@ fi
 if [ -z "$BIND_DIR" ]; then
   BIND_DIR="$REMOTE_TMP/background-bind-smoke"
 fi
+if [ -z "$API_CONTRACT_BIND_DIR" ]; then
+  API_CONTRACT_BIND_DIR="$REMOTE_TMP/api-contract-bind"
+fi
 if [ -z "$CONFIGURE_SCHEDULER_AI" ]; then
   if [ -n "$SCHEDULER_URL" ]; then
     CONFIGURE_SCHEDULER_AI=1
@@ -141,6 +155,10 @@ esac
 case "$RVV_REQUIRE_PERF" in
   0|1) ;;
   *) echo "ATTUNE_K3_RVV_REQUIRE_PERF must be 0 or 1, got: $RVV_REQUIRE_PERF" >&2; exit 2 ;;
+esac
+case "$API_CONTRACT" in
+  0|1) ;;
+  *) echo "ATTUNE_K3_API_CONTRACT must be 0 or 1, got: $API_CONTRACT" >&2; exit 2 ;;
 esac
 
 mkdir -p "$REPORTS_DIR"
@@ -172,15 +190,25 @@ report_header() {
     echo "- Scheduler chat model: $SCHEDULER_CHAT_MODEL"
     echo "- Remote tmp: $REMOTE_TMP"
     echo "- Server-side bind dir: $BIND_DIR"
+    echo "- API contract bind dir: $API_CONTRACT_BIND_DIR"
     echo "- Configure scheduler AI: $CONFIGURE_SCHEDULER_AI"
     echo "- Require scheduler chat metadata: $REQUIRE_SCHEDULER_CHAT"
     echo "- Require scheduler performance thresholds: $RVV_REQUIRE_PERF"
+    echo "- Run NAS Web API contract: $API_CONTRACT"
+    echo "- Long-text manifest: ${LONGTEXT_MANIFEST:-<none>}"
     echo "- Skip RVV performance gate: $SKIP_RVV_PERFORMANCE"
     echo "- Dry run: $DRY_RUN"
     echo
     echo "## Package Boundary"
     echo
     echo "This validation expects Attune to provide NAS Web/API/control-plane behavior. ORT, Sherpa, model weights, and inference runtimes are scheduler package responsibilities."
+    echo
+    echo "## Remote CI topology"
+    echo
+    echo "- Base URL is reached by the CI runner/browser."
+    echo "- Scheduler URL is reached by the CI runner; use an SSH tunnel for loopback-only scheduler endpoints."
+    echo "- Server scheduler base is persisted into Attune settings and is reached by attune-server on the NAS host."
+    echo "- Bind directories are server-side paths on the NAS host, never runner-local paths."
   } > "$REPORT"
 }
 
@@ -220,9 +248,10 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- Probe scheduler contract when scheduler URL is provided."
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
+  append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, export, and chat scheduler metadata."
   append_report "- Use K3/NAS-local bind path for knowledge-base import."
   append_report "- Require local scheduler chat metadata and poll async answer jobs when scheduler chat is required."
-  append_report "- Run optional Playwright UI gate when manifest and driver are available."
+  append_report "- Run optional Playwright UI gate when ATTUNE_K3_LONGTEXT_MANIFEST points to a local long-text manifest and the NAS-side corpus is already indexed."
   log "dry-run report: $REPORT"
   exit 0
 fi
@@ -409,10 +438,45 @@ with urllib.request.urlopen(req, timeout=60) as resp:
 print(f"diagnostics status=200 keys={sorted(data.keys())}")
 PY
 
-if [ -n "$HOST" ] && [ "$SKIP_INSTALL" != "1" ]; then
+append_report "## NAS Web API Contract Gate"
+if [ "$API_CONTRACT" = "1" ]; then
+  API_CONTRACT_JSON="$REPORTS_DIR/k3-nas-web-api-contract-$TS.json"
+  if [ -n "$HOST" ]; then
+    remote "rm -rf '$API_CONTRACT_BIND_DIR' && mkdir -p '$API_CONTRACT_BIND_DIR' && printf '# Attune NAS Web API contract\n\nattune-nas-web-api-bind-token\n' > '$API_CONTRACT_BIND_DIR/nas-web-api-contract.md'"
+  else
+    rm -rf "$API_CONTRACT_BIND_DIR"
+    mkdir -p "$API_CONTRACT_BIND_DIR"
+    printf '# Attune NAS Web API contract\n\nattune-nas-web-api-bind-token\n' > "$API_CONTRACT_BIND_DIR/nas-web-api-contract.md"
+  fi
+  API_CONTRACT_ARGS=(
+    "$ROOT/scripts/release/probe-nas-web-api-contract.py"
+    --base-url "$BASE_URL"
+    --password "$PASSWORD"
+    --token "$TOKEN"
+    --bind-dir "$API_CONTRACT_BIND_DIR"
+    --server-scheduler-base "$SERVER_SCHEDULER_BASE"
+    --scheduler-chat-model "$SCHEDULER_CHAT_MODEL"
+    --job-timeout "$CHAT_JOB_TIMEOUT"
+    --out "$API_CONTRACT_JSON"
+  )
+  if [ -n "$SCHEDULER_URL" ]; then
+    API_CONTRACT_ARGS+=(--scheduler-url "$SCHEDULER_URL")
+  fi
+  if [ "$REQUIRE_SCHEDULER_CHAT" = "1" ]; then
+    API_CONTRACT_ARGS+=(--require-scheduler-chat)
+  fi
+  run python3 "${API_CONTRACT_ARGS[@]}"
+  append_report "- API contract JSON: $API_CONTRACT_JSON"
+else
+  append_report "Skipped because ATTUNE_K3_API_CONTRACT=0."
+fi
+
+if [ -n "$HOST" ]; then
   remote "rm -rf '$BIND_DIR' && mkdir -p '$BIND_DIR' && printf '# Attune K3 NAS Web gate\n\nattune-k3-nas-web-bind-token\n' > '$BIND_DIR/k3-nas-web-gate.md'"
 else
-  append_report "Server-side fixture creation skipped; provide --host without --skip-install for full bind setup."
+  rm -rf "$BIND_DIR"
+  mkdir -p "$BIND_DIR"
+  printf '# Attune K3 NAS Web gate\n\nattune-k3-nas-web-bind-token\n' > "$BIND_DIR/k3-nas-web-gate.md"
 fi
 
 python3 - "$BASE_URL" "$TOKEN" "$BIND_DIR" <<'PY' | tee -a "$REPORT"

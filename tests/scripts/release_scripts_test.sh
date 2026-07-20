@@ -15,9 +15,18 @@ required=(
   "$ROOT/scripts/maintenance/clean-workspace.sh"
 )
 
+required_python=(
+  "$ROOT/scripts/release/probe-nas-web-api-contract.py"
+)
+
 for script in "${required[@]}"; do
   test -f "$script"
   bash -n "$script"
+done
+
+for script in "${required_python[@]}"; do
+  test -f "$script"
+  python3 -m py_compile "$script"
 done
 
 desktop_hooks=(
@@ -127,6 +136,30 @@ grep -q "worker_benchmark_gate.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_RVV_REQUIRE_PERF=1" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "Configure Attune scheduler-native AI settings" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "Require local scheduler chat metadata" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "NAS Web API Contract Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "ATTUNE_K3_LONGTEXT_MANIFEST" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "Remote CI topology" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+
+python3 "$ROOT/scripts/release/probe-nas-web-api-contract.py" \
+  --dry-run \
+  --base-url http://127.0.0.1:18900 \
+  --password e2e-pass-2026 \
+  --bind-dir "$TMP/nas-web-bind" \
+  --scheduler-url http://127.0.0.1:8090 \
+  --server-scheduler-base http://127.0.0.1:8090 \
+  --out "$TMP/reports/nas-web-api-contract-dry-run.json" > "$TMP/nas-web-api-contract-dry-run.txt"
+test -f "$TMP/reports/nas-web-api-contract-dry-run.json"
+grep -q "api_contract" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "vault" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "settings_scheduler" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "index_bind" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "chat_scheduler" "$TMP/nas-web-api-contract-dry-run.txt"
+
+test -f "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
+grep -q "ATTUNE_K3_LONGTEXT_MANIFEST" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
+grep -q "ATTUNE_K3_SERVER_SCHEDULER_BASE" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
+grep -q "scheduler self-test" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
+grep -q "cross-host" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 
 bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
   --dry-run \
