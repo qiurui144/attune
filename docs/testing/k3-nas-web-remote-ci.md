@@ -96,7 +96,8 @@ CI 分层：
 - UI backing reads: status、diagnostics、ai-stack、index status、items、background、member、
   privacy、plugins、marketplace、skills、skill-runtime、projects、tags、clusters、jobs、
   folder-links、audit、suggestions、accounts、scenarios、diagnostics capabilities。
-- write/download paths: multipart upload、server-side folder bind、search、export CSV。
+- write/download paths: multipart upload、server-side folder bind、search、embedding/vector queue drain、
+  export CSV。
 - chat: `/api/v1/chat`，需要 scheduler 时校验 `local_scheduler` metadata 并 polling job 到 terminal success。
 
 报告根对象包含 `scheduler_observations`。这里集中暴露 Attune 在 scheduler 接入链路上观测到的

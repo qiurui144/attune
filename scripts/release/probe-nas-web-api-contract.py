@@ -207,6 +207,16 @@ def require_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
     require(not missing, f"{label} missing keys: {missing}")
 
 
+def int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def ensure_token(args: argparse.Namespace, base_url: str) -> str:
     if args.token:
         return args.token
@@ -498,6 +508,42 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         require(marker in result_text, "server-side bind content was not searchable")
         return {"dir_id": dir_id, "search_results": len(results)}
 
+    def vector_indexing_snapshot() -> dict[str, Any]:
+        _, status = request_json(base_url, "GET", "/api/v1/status", token=token(), timeout=args.timeout)
+        _, index_status = request_json(base_url, "GET", "/api/v1/index/status", token=token(), timeout=args.timeout)
+        status_obj = require_json_object(status, "status")
+        index_obj = require_json_object(index_status, "index status")
+        status_pending = int_value(status_obj.get("pending_embeddings"))
+        index_pending = int_value(index_obj.get("pending_embeddings"))
+        pending_values = [value for value in (status_pending, index_pending) if value is not None]
+        require(pending_values, "status/index status did not expose pending_embeddings")
+        return {
+            "status_pending_embeddings": status_pending,
+            "index_pending_embeddings": index_pending,
+            "pending_embeddings": max(pending_values),
+            "vector_ready": status_obj.get("vector_index", status_obj.get("vector_ready")),
+            "fulltext_ready": status_obj.get("fulltext_index", status_obj.get("fulltext_ready")),
+        }
+
+    def vector_indexing_gate() -> dict[str, Any]:
+        started = time.perf_counter()
+        deadline = time.monotonic() + args.job_timeout
+        polls = 1
+        first = vector_indexing_snapshot()
+        last = first
+        while int_value(last.get("pending_embeddings")) != 0:
+            if time.monotonic() >= deadline:
+                raise ProbeError(f"embedding/vector queue did not drain within {args.job_timeout}s: {last}")
+            time.sleep(0.5)
+            polls += 1
+            last = vector_indexing_snapshot()
+        return {
+            "initial": first,
+            "final": last,
+            "polls": polls,
+            "drain_elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+        }
+
     def export_gate() -> dict[str, Any]:
         artifact = {
             "type": "table",
@@ -576,6 +622,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         ("core_reads", core_reads_gate),
         ("upload", upload_gate),
         ("index_bind", index_bind_gate),
+        ("vector_indexing", vector_indexing_gate),
         ("export", export_gate),
         ("chat_scheduler", chat_scheduler_gate),
     ]
@@ -615,6 +662,7 @@ def dry_run(args: argparse.Namespace) -> dict[str, Any]:
             "core_reads",
             "upload",
             "index_bind",
+            "vector_indexing",
             "export",
             "chat_scheduler",
             "cleanup",

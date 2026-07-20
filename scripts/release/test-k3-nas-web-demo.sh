@@ -248,7 +248,7 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- Probe scheduler contract when scheduler URL is provided."
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
-  append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, export, and chat scheduler metadata."
+  append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, and chat scheduler metadata."
   append_report "- Use K3/NAS-local bind path for knowledge-base import."
   append_report "- Require local scheduler chat metadata and poll async answer jobs when scheduler chat is required."
   append_report "- Run optional Playwright UI gate when ATTUNE_K3_LONGTEXT_MANIFEST points to a local long-text manifest and the NAS-side corpus is already indexed."
