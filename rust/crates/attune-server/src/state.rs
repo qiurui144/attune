@@ -16,6 +16,7 @@ use attune_core::vlm::{LlmVlmProvider, VlmProvider};
 use attune_core::web_search::WebSearchProvider;
 use lru::LruCache;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -150,6 +151,23 @@ impl CachedSearch {
 
 pub type SharedState = Arc<AppState>;
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BackgroundScanTaskStatus {
+    pub task_id: String,
+    pub dir_id: String,
+    pub path: String,
+    pub status: String,
+    pub progress: f32,
+    pub message: String,
+    pub total: Option<usize>,
+    pub new: Option<usize>,
+    pub updated: Option<usize>,
+    pub skipped: Option<usize>,
+    pub degraded: Option<usize>,
+    pub errors: Option<usize>,
+    pub elapsed_ms: Option<u128>,
+}
+
 /// A bearer token that was successfully verified immediately before the vault
 /// was locked. Vault locking deliberately invalidates normal sessions, but the
 /// privacy dashboard must still let that same authenticated caller inspect the
@@ -255,6 +273,9 @@ pub struct AppState {
     /// 把 LOCKED 期间暂存的 inbound 文档补跑进 ingest pipeline,跑完即退出。
     pub staging_drain_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
+    /// Latest in-process folder bind scans, exposed through /api/v1/index/status
+    /// so long-running background imports are observable without a WebSocket.
+    pub background_scan_tasks: Mutex<HashMap<String, BackgroundScanTaskStatus>>,
     /// G5 (2026-06-11): durable job queue store handle. Replaces the in-memory
     /// `office_jobs: JobRegistry` — jobs now persist in the `job_queue` table and
     /// survive restart (Running→Queued requeue for idempotent kinds). Like the
@@ -613,6 +634,7 @@ impl AppState {
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY)
                     .expect("SEARCH_CACHE_CAPACITY is non-zero const"),
             )),
+            background_scan_tasks: Mutex::new(HashMap::new()),
             job_store: Mutex::new(None),
             job_worker_running: AtomicBool::new(false),
             embedding_is_local: AtomicBool::new(false),

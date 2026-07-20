@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::state::SharedState;
+use crate::state::{BackgroundScanTaskStatus, SharedState};
 use attune_core::crypto::Key32;
 use attune_core::ingest::IngestOptions;
 use attune_core::scanner;
@@ -238,6 +238,25 @@ fn spawn_background_bind_scan(
     ingest_options: IngestOptions,
 ) {
     let task_id = format!("bind-scan-{dir_id}");
+    let path = canonical.display().to_string();
+    record_background_scan_status(
+        &state,
+        BackgroundScanTaskStatus {
+            task_id: task_id.clone(),
+            dir_id: dir_id.clone(),
+            path: path.clone(),
+            status: "running".to_string(),
+            progress: 0.05,
+            message: format!("正在后台扫描 {path}"),
+            total: None,
+            new: None,
+            updated: None,
+            skipped: None,
+            degraded: None,
+            errors: None,
+            elapsed_ms: None,
+        },
+    );
     send_background_scan_progress(
         &state,
         &task_id,
@@ -258,6 +277,27 @@ fn spawn_background_bind_scan(
         ) {
             Ok(scan) => {
                 let elapsed_ms = started.elapsed().as_millis();
+                record_background_scan_status(
+                    &state,
+                    BackgroundScanTaskStatus {
+                        task_id: task_id.clone(),
+                        dir_id: dir_id.clone(),
+                        path: canonical.display().to_string(),
+                        status: "done".to_string(),
+                        progress: 1.0,
+                        message: format!(
+                            "后台索引完成：{} 个文件，{} 新增，{} 更新，{} 跳过",
+                            scan.total_files, scan.new_files, scan.updated_files, scan.skipped_files
+                        ),
+                        total: Some(scan.total_files),
+                        new: Some(scan.new_files),
+                        updated: Some(scan.updated_files),
+                        skipped: Some(scan.skipped_files),
+                        degraded: Some(scan.degraded_files),
+                        errors: Some(scan.errors),
+                        elapsed_ms: Some(elapsed_ms),
+                    },
+                );
                 tracing::info!(
                     target: "access",
                     "background bind scan completed dir_id={dir_id} path={} total={} new={} updated={} skipped={} degraded={} errors={} elapsed_ms={elapsed_ms}",
@@ -281,6 +321,24 @@ fn spawn_background_bind_scan(
                 );
             }
             Err(e) => {
+                record_background_scan_status(
+                    &state,
+                    BackgroundScanTaskStatus {
+                        task_id: task_id.clone(),
+                        dir_id: dir_id.clone(),
+                        path: canonical.display().to_string(),
+                        status: "failed".to_string(),
+                        progress: 1.0,
+                        message: format!("后台扫描失败：{e}"),
+                        total: None,
+                        new: None,
+                        updated: None,
+                        skipped: None,
+                        degraded: None,
+                        errors: None,
+                        elapsed_ms: Some(started.elapsed().as_millis()),
+                    },
+                );
                 tracing::error!(
                     target: "access",
                     "background bind scan failed dir_id={dir_id} path={}: {e}",
@@ -296,6 +354,17 @@ fn spawn_background_bind_scan(
             }
         }
     });
+}
+
+fn record_background_scan_status(state: &SharedState, status: BackgroundScanTaskStatus) {
+    let mut tasks = state
+        .background_scan_tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if tasks.len() > 128 {
+        tasks.retain(|_, task| task.status == "running");
+    }
+    tasks.insert(status.task_id.clone(), status);
 }
 
 fn run_background_bind_scan(
@@ -448,9 +517,17 @@ pub async fn index_status(
             Json(serde_json::json!({"error": e.to_string()})),
         )
     })?;
+    let background_scans: Vec<_> = state
+        .background_scan_tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
 
     Ok(Json(serde_json::json!({
         "directories": dirs,
         "pending_embeddings": pending,
+        "background_scans": background_scans,
     })))
 }

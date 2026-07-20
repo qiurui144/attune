@@ -329,9 +329,12 @@ required for this gate. The runner defaults edge scheduler to `llm-summary`,
 `embedding-int8`, 512 dimensions, and `kb.query.embed`; override with
 `ATTUNE_E2E_LLM_MODEL`, `ATTUNE_E2E_EMBEDDING_MODEL`,
 `ATTUNE_E2E_EMBEDDING_DIMS`, or `ATTUNE_E2E_EMBEDDING_TASK` when testing a new
-contract. New tests should use `ATTUNE_E2E_LOCAL_SCHEDULER`. For very large OCR
-runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; the OCR page loop itself remains
-bounded by Attune-side stop conditions below.
+contract. New tests should use `ATTUNE_E2E_LOCAL_SCHEDULER`. Longtext binds run
+in background mode by default and are observed through
+`/api/v1/index/status.background_scans`; set `ATTUNE_LONGTEXT_BIND_BACKGROUND=0`
+only when explicitly validating the legacy synchronous response. For very large
+OCR runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; the OCR page loop itself
+remains bounded by Attune-side stop conditions below.
 
 Attune-side defaults for this gate are intentionally platform-neutral:
 

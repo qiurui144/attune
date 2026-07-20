@@ -215,16 +215,25 @@ def corpus_is_bound(corpus_dir: Path, token: str) -> bool:
 
 
 def bind_corpus(corpus_dir: Path, token: str) -> None:
+    background = env_bool("ATTUNE_LONGTEXT_BIND_BACKGROUND", True)
     body = {
         "path": str(corpus_dir),
         "recursive": True,
         "file_types": ["pdf", "md", "txt"],
         "corpus_domain": "aviation",
+        "background": background,
     }
     timeout = env_int("ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC", 7200)
-    print(f"[longtext] binding corpus via /api/v1/index/bind timeout={timeout}s")
+    mode = "background" if background else "synchronous"
+    print(f"[longtext] binding corpus via /api/v1/index/bind mode={mode} timeout={timeout}s")
     try:
-        _, data = request_json("POST", "/api/v1/index/bind", body, token=token, timeout=timeout)
+        _, data = request_json(
+            "POST",
+            "/api/v1/index/bind",
+            body,
+            token=token,
+            timeout=30 if background else timeout,
+        )
     except Exception as exc:
         text = str(exc).lower()
         if "already" in text or "已绑定" in text:
@@ -234,11 +243,59 @@ def bind_corpus(corpus_dir: Path, token: str) -> None:
             print(f"[longtext] bind request ended with {exc!r}, but corpus is bound; continuing")
             return
         raise
+    if background:
+        if data.get("status") != "accepted" or data.get("background") is not True:
+            raise SystemExit(f"background corpus bind did not return accepted/background response: {data}")
+        dir_id = str(data.get("dir_id") or "")
+        if not dir_id:
+            raise SystemExit(f"background corpus bind response missing dir_id: {data}")
+        scan = wait_for_background_scan(token, dir_id, timeout)
+        total = scan.get("total", 0)
+        print(
+            "[longtext] background bind scan: "
+            f"total={total} new={scan.get('new')} updated={scan.get('updated')} "
+            f"skipped={scan.get('skipped')} degraded={scan.get('degraded')} "
+            f"errors={scan.get('errors')} elapsed_ms={scan.get('elapsed_ms')}"
+        )
+        if not isinstance(total, int) or total <= 0:
+            raise SystemExit(f"background bind scan found no files: {scan}")
+        return
     scan = data.get("scan", {})
     total = scan.get("total", 0)
     print(f"[longtext] bind scan: total={total} new={scan.get('new')} updated={scan.get('updated')} skipped={scan.get('skipped')}")
     if not isinstance(total, int) or total <= 0:
         raise SystemExit(f"bind scan found no files: {data}")
+
+
+def wait_for_background_scan(token: str, dir_id: str, timeout: int) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    task_id = f"bind-scan-{dir_id}"
+    tick = 0
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        _, status = request_json("GET", "/api/v1/index/status", token=token, timeout=30)
+        scans = status.get("background_scans", [])
+        if not isinstance(scans, list):
+            raise SystemExit(f"index status background_scans is not a list: {status}")
+        task = None
+        for candidate in scans:
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("dir_id") == dir_id or candidate.get("task_id") == task_id:
+                task = candidate
+                break
+        if task:
+            last = task
+            state = task.get("status")
+            if state == "done":
+                return task
+            if state == "failed":
+                raise SystemExit(f"background bind scan failed: {task}")
+        tick += 1
+        if tick == 1 or tick % 30 == 0:
+            print(f"[longtext] waiting for background bind scan: dir_id={dir_id} last={json_compact(last or {})}")
+        time.sleep(2)
+    raise SystemExit(f"background bind scan did not finish within {timeout}s; last={last}")
 
 
 def run_background_bind_ux_gate(token: str) -> None:

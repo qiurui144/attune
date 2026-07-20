@@ -58,7 +58,10 @@ OCR，可用 `ATTUNE_SCHEDULER_OCR_ENABLED=0/1` 显式覆盖。PDF page OCR 独�
 `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`，到阈值后诚实降级为
 metadata-only；如果 scheduler OCR 返回 `unsupported_payload` 等不会随页变化的
 fatal payload/schema 错误，Attune 会在第一页后直接停止该 PDF 的 page OCR，而不是
-继续扫完整本 PDF。
+继续扫完整本 PDF。airplane longtext runner 对大语料 `/api/v1/index/bind`
+默认使用后台扫描，随后等待 `/api/v1/index/status.background_scans` 进入 `done`
+并继续执行 embedding drain、search、chat；如需兼容旧同步语义，可设置
+`ATTUNE_LONGTEXT_BIND_BACKGROUND=0`。
 
 云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
 
