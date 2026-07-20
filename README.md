@@ -222,7 +222,7 @@ Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.
 - **Chat**: RAG with citation chips · session history · typing-stream rendering · Token Chip cost estimator (local free / cloud $ live)
 - **Reader + Annotations**: full-text reading with 5 preset tags × 4 colors, plus AI 4-angle analysis (risk / outdated / highlights / questions)
 - **Items**: search, source-type filter, delete · drawer-based reading
-- **Remote directories**: bind local folders or WebDAV with credentials
+- **Sources**: local folders, WebDAV, Email IMAP, RSS/Atom, and GitConnector imports
 - **Settings**: theme (light / dark / auto) · language (zh / en) · LLM config · export `.vault-profile`
 - **Cmd+K global palette**: jump between views, sessions, and items
 - **Stability**: connection state machine · retry matrix · WebSocket auto-reconnect

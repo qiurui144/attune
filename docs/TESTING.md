@@ -255,7 +255,9 @@ PyMuPDF 内置 CJK 字体的 `UniGB-UTF16-H` / 子集 CMap 会让 `pdf-extract` 
 clone → glob → 入库 → BM25/向量可检索 + tantivy-jieba 中文分词）。CI 默认走**本地 bare-repo
 fixture**（`crates/attune-core/tests/git_connector.rs`，git2 程序化建仓，无网络、确定性），覆盖
 happy/edge（空仓/全二进制/subdir/超长路径）/error（无效 URL/404/ref）/adversarial（SSRF 全表 +
-path traversal）/资源耗尽（限额）/i18n（中文 .md）。SSRF + 错误码契约端到端见
+path traversal）/资源耗尽（限额）/i18n（中文 .md）。`ingest::git` 内联测试额外覆盖
+full tree vs incremental diff 契约：只有 full tree 可用 seen_refs 做删除对账，incremental
+只能消费 cloner 明确返回且已转成 source_ref 的 deleted 列表。SSRF + 错误码契约端到端见
 `crates/attune-server/tests/git_route_subprocess.rs`。
 
 #### 运行
@@ -826,6 +828,7 @@ Email IMAP 采集源与 `SourceConnector` 统一抽象（`ingest/connector.rs`�
 |----|------|------|
 | Unit — connector | `ingest/connector.rs` 内联 | `SourceKind::as_str` 稳定字符串；`RawDocument` 字段构造；`SourceConnector` trait 驱动 sink 回调 |
 | Unit — email parse | `ingest/email.rs` 内联 | `html_to_text` 剥 HTML 标签；style/script block 过滤 |
+| Unit — email store | `tests/email_accounts_test.rs` | add/get/list/delete 全流程；密码加密落盘 + 解密回明文；UID cursor 幂等；删除账号清理 `email_folder_uids` 与 `indexed_files` tracking，但保留已入库 item |
 | Unit — pipeline enum | `ingest/pipeline.rs` 内联 | `IngestOutcome` derive 特征（Debug/Clone/PartialEq/Eq）四 variant 全覆盖 |
 | Integration — email | `tests/ingest_email_test.rs` | `parse_email_bytes`（plain/HTML/attachment/invalid）；`EmailConnector` mock fetcher；UID 增量游标；attachment RawDocument 独立产出；正文 RawDocument 可过 `ingest_document` |
 | Integration — pipeline | `tests/ingest_pipeline_test.rs` | `ingest_document` 四态（Inserted/Duplicate/Updated/Skipped）；domain/tags 透传；corpus_domain 前缀；`ingest_document_replacing` + 第三方 hash 防护；`ingest_document_with_profile` 命名 profile；raw.title 优先于 parser title |
@@ -836,6 +839,7 @@ Email IMAP 采集源与 `SourceConnector` 统一抽象（`ingest/connector.rs`�
 ```bash
 cd rust
 cargo test -p attune-core --lib ingest                      # unit tests
+cargo test -p attune-core --test email_accounts_test        # 7 个 encrypted store CRUD/cursor test
 cargo test -p attune-core --test ingest_email_test          # email integration
 cargo test -p attune-core --test ingest_pipeline_test       # pipeline integration
 ```
@@ -870,7 +874,7 @@ npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 
 | 层 | 文件 | 覆盖 |
 |----|------|------|
 | Unit — connector | `ingest/rss.rs` 内联 | RSS 2.0 + Atom 解析；HTML body 剥标签；entry dedup（last_entry_guid 命中即 break）；304 路径不 emit；200 last_response 透出 ETag/Last-Modified；垃圾 XML 拒绝 |
-| Unit — store CRUD | `tests/rss_feeds_test.rs` | add/get/list/delete 全流程；URL 加密落盘 + 解密回明文；明文 URL 绝不在 BLOB 里；update_etag_lastmod / touch_polled_at / update_last_entry / update_feed_settings 幂等性 |
+| Unit — store CRUD | `tests/rss_feeds_test.rs` | add/get/list/delete 全流程；URL 加密落盘 + 解密回明文；明文 URL 绝不在 BLOB 里；update_etag_lastmod / touch_polled_at / update_last_entry / update_feed_settings 幂等性；RSS 非 `bound_dirs` source 可写入 `indexed_files`，删除 feed 清理 tracking 但保留 item |
 | Integration — connector | `tests/ingest_rss_test.rs` | 端到端 first-poll → 全 emit；conditional-GET 透传 ETag；dedup invariant（cursor 推进后二次 poll → 0 新条目）；fetch Err 传播；空 entry 跳过；RawDocument 真正过 ingest_document |
 | Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "RSS 订阅采集源"（待补） | 添加真实 LWN / GitHub releases RSS；poll-now；周期 worker 到期触发；304 路径；删除订阅；禁用订阅 |
 
@@ -879,7 +883,7 @@ npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 
 ```bash
 cd rust
 cargo test -p attune-core --lib ingest::rss          # 8 个内联 connector unit test
-cargo test -p attune-core --test rss_feeds_test      # 10 个 store CRUD test
+cargo test -p attune-core --test rss_feeds_test      # 11 个 store CRUD test
 cargo test -p attune-core --test ingest_rss_test     # 8 个端到端 integration test
 ```
 

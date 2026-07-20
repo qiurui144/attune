@@ -86,6 +86,8 @@ pub fn sync_git_source(
         return Err(format!("{e}"));
     }
     let commit_sha = connector.take_last_commit().unwrap_or_default();
+    let fetch_was_full = connector.take_last_full().unwrap_or(true);
+    let deleted_refs: HashSet<String> = connector.take_deleted().into_iter().collect();
 
     // 阶段 2：逐文档短暂持锁 dedup + ingest；记录本次出现的 source_ref 供删除检测。
     let mut total = 0usize;
@@ -114,25 +116,71 @@ pub fn sync_git_source(
         let store = vault.store();
 
         // 增量短路：同 source_ref 已记录且内容 SHA 未变 → 跳过。
-        let existing = store.get_indexed_file(&source_ref).ok().flatten();
+        let existing = store
+            .get_indexed_file_for_dir(dir_id, &source_ref)
+            .ok()
+            .flatten();
+        let had_existing_tracking = existing.is_some();
+        let existing_item_active = match existing.as_ref() {
+            Some(row) => match store.indexed_file_points_to_active_item(row) {
+                Ok(active) => active,
+                Err(e) => {
+                    errors.push(format!("{source_ref}: check active tracking item {e}"));
+                    continue;
+                }
+            },
+            None => false,
+        };
+        if !existing_item_active {
+            if let Some(stale_item_id) = existing.as_ref().and_then(|row| row.item_id.as_ref()) {
+                if let Err(e) = store.enqueue_reindex(stale_item_id, "purge") {
+                    errors.push(format!(
+                        "{source_ref}: enqueue stale tracking purge {e}"
+                    ));
+                    continue;
+                }
+            }
+        }
         if let Some(ref ex) = existing {
-            if ex.file_hash == marker && !marker.is_empty() {
+            if ex.file_hash == marker && !marker.is_empty() && existing_item_active {
                 skipped_files += 1;
                 continue;
+            } else if ex.file_hash == marker && !marker.is_empty() {
+                tracing::warn!(
+                    "sync_git_source: tracking for {source_ref} matches marker but points to a missing/deleted item; re-ingesting"
+                );
             }
         }
 
-        // 内容已变（或首入）：删旧 item + 入队 purge + 信号。
-        let old_item_id: Option<String> = existing.as_ref().and_then(|ex| {
-            ex.item_id.as_ref().map(|id| {
-                let _ = store.delete_item(id);
-                if let Err(e) = store.enqueue_reindex(id, "purge") {
-                    tracing::warn!("sync_git_source: enqueue_reindex(purge) failed for {id}: {e}");
+        // 内容已变（或首入）：只有旧 item 没有其它 source ref 时才 purge。
+        let mut old_item_id: Option<String> = None;
+        if let Some(id) = existing
+            .as_ref()
+            .filter(|_| existing_item_active)
+            .and_then(|ex| ex.item_id.as_ref())
+        {
+            match store.indexed_file_has_other_refs(id, dir_id, &source_ref) {
+                Ok(true) => {
+                    tracing::info!(
+                        "sync_git_source: source {source_ref} moved off shared item {id}; keeping old item"
+                    );
                 }
-                let _ = store.record_signal_event("doc_update", id, None);
-                id.clone()
-            })
-        });
+                Ok(false) => {
+                    let _ = store.delete_item(id);
+                    if let Err(e) = store.enqueue_reindex(id, "purge") {
+                        tracing::warn!(
+                            "sync_git_source: enqueue_reindex(purge) failed for {id}: {e}"
+                        );
+                    }
+                    let _ = store.record_signal_event("doc_update", id, None);
+                    old_item_id = Some(id.clone());
+                }
+                Err(e) => {
+                    errors.push(format!("{source_ref}: check shared item refs {e}"));
+                    continue;
+                }
+            }
+        }
 
         let outcome = if let Some(ref old_id) = old_item_id {
             ingest_document_replacing_with_options(store, &dek, &doc, old_id, &ingest_options)
@@ -142,29 +190,39 @@ pub fn sync_git_source(
 
         match outcome {
             Ok(IngestOutcome::Inserted { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id);
-                if old_item_id.is_some() {
-                    updated_files += 1;
-                } else {
-                    new_files += 1;
+                match store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id) {
+                    Ok(_) if had_existing_tracking => updated_files += 1,
+                    Ok(_) => new_files += 1,
+                    Err(e) => errors.push(format!("{source_ref}: persist tracking {e}")),
                 }
             }
             Ok(IngestOutcome::Updated { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id);
-                updated_files += 1;
+                match store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id) {
+                    Ok(_) => updated_files += 1,
+                    Err(e) => errors.push(format!("{source_ref}: persist tracking {e}")),
+                }
             }
             Ok(IngestOutcome::Degraded {
                 item_id, reason, ..
             }) => {
                 let retry_marker = retryable_degraded_marker(&marker);
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &retry_marker, &item_id);
-                errors.push(format!(
-                    "{source_ref}: retryable degraded extraction: {reason}"
-                ));
+                if let Err(e) =
+                    store.upsert_indexed_file(dir_id, &source_ref, &retry_marker, &item_id)
+                {
+                    errors.push(format!("{source_ref}: persist retry marker {e}"));
+                } else {
+                    errors.push(format!(
+                        "{source_ref}: retryable degraded extraction: {reason}"
+                    ));
+                }
             }
-            Ok(IngestOutcome::Duplicate { .. }) | Ok(IngestOutcome::Skipped { .. }) => {
-                skipped_files += 1;
+            Ok(IngestOutcome::Duplicate { item_id }) => {
+                match store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id) {
+                    Ok(_) => skipped_files += 1,
+                    Err(e) => errors.push(format!("{source_ref}: persist duplicate tracking {e}")),
+                }
             }
+            Ok(IngestOutcome::Skipped { .. }) => skipped_files += 1,
             Err(e) => {
                 errors.push(format!("{source_ref}: ingest {e}"));
             }
@@ -172,34 +230,60 @@ pub fn sync_git_source(
         // vault guard 隐式 drop。
     }
 
-    // 删除检测：indexed_files 里属于本 dir 但本次未出现的 source_ref = 上游已删。
+    // 删除检测：全量 tree 用 seen_refs 对账；增量 diff 只相信 connector 明确给出的 D 列表。
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let store = vault.store();
         if let Ok(prev) = store.list_indexed_files_for_dir(dir_id) {
             for row in prev {
-                if !seen_refs.contains(&row.path) {
+                let removed = if fetch_was_full {
+                    !seen_refs.contains(&row.path)
+                } else {
+                    deleted_refs.contains(&row.path)
+                };
+                if removed {
                     if let Some(item_id) = &row.item_id {
-                        let _ = store.delete_item(item_id);
-                        if let Err(e) = store.enqueue_reindex(item_id, "purge") {
-                            tracing::warn!("sync_git_source: purge deleted {item_id}: {e}");
+                        match store.indexed_file_has_other_refs(item_id, dir_id, &row.path) {
+                            Ok(true) => {
+                                tracing::info!(
+                                    "sync_git_source: deleted source {} detached from shared item {item_id}",
+                                    row.path
+                                );
+                            }
+                            Ok(false) => {
+                                let _ = store.delete_item(item_id);
+                                if let Err(e) = store.enqueue_reindex(item_id, "purge") {
+                                    tracing::warn!(
+                                        "sync_git_source: purge deleted {item_id}: {e}"
+                                    );
+                                }
+                                let _ = store.record_signal_event("doc_delete", item_id, None);
+                            }
+                            Err(e) => {
+                                errors.push(format!("{}: check shared item refs {e}", row.path));
+                                continue;
+                            }
                         }
-                        let _ = store.record_signal_event("doc_delete", item_id, None);
                     }
-                    let _ = store.delete_indexed_file(&row.path);
+                    let _ = store.delete_indexed_file_for_dir(dir_id, &row.path);
                     deleted_files += 1;
                 }
             }
         }
     }
 
-    // 终态：推进 commit 游标 + last_scan（成功才推进）。
+    // 终态：只有全文件处理无错误才推进 commit 游标；否则保留旧 cursor，避免未来增量
+    // diff 跳过本轮 ingest/tracking 失败的文件。
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let store = vault.store();
-        let _ = store.update_dir_last_scan(dir_id);
-        if !commit_sha.is_empty() {
-            let _ = store.update_git_cursor(dir_id, &commit_sha);
+        if errors.is_empty() {
+            let _ = store.update_dir_last_scan(dir_id);
+            if !commit_sha.is_empty() {
+                let _ = store.update_git_cursor(dir_id, &commit_sha);
+            } else {
+                let _ = store.touch_git_synced(dir_id);
+            }
         } else {
             let _ = store.touch_git_synced(dir_id);
         }

@@ -97,19 +97,78 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
 
         // indexed_files 短路：同 source_ref 已记录 → 跳过 ingest（content_hash 短路是
         // ingest_document 内的第二层防护）。
-        let existing = store.get_indexed_file(&source_ref).ok().flatten();
+        let existing = store
+            .get_indexed_file_for_dir(feed_id, &source_ref)
+            .ok()
+            .flatten();
+        let existing_item_active = match existing.as_ref() {
+            Some(row) => match store.indexed_file_points_to_active_item(row) {
+                Ok(active) => active,
+                Err(e) => {
+                    errors.push(format!("{source_ref}: check active tracking item {e}"));
+                    continue;
+                }
+            },
+            None => false,
+        };
+        if !existing_item_active {
+            if let Some(stale_item_id) = existing.as_ref().and_then(|row| row.item_id.as_ref()) {
+                if let Err(e) = store.enqueue_reindex(stale_item_id, "purge") {
+                    errors.push(format!(
+                        "{source_ref}: enqueue stale tracking purge {e}"
+                    ));
+                    continue;
+                }
+            }
+        }
         if existing
             .as_ref()
-            .is_some_and(|row| row.file_hash == guid && !guid.is_empty())
+            .is_some_and(|row| row.file_hash == guid && !guid.is_empty() && existing_item_active)
         {
             skipped += 1;
             continue;
+        } else if existing
+            .as_ref()
+            .is_some_and(|row| row.file_hash == guid && !guid.is_empty())
+        {
+            tracing::warn!(
+                "sync_rss_feed: tracking for {source_ref} matches guid but points to a missing/deleted item; re-ingesting"
+            );
         }
 
-        let old_item_id = existing.as_ref().and_then(|row| row.item_id.clone());
-        if let Some(old) = old_item_id.as_deref() {
-            let _ = store.delete_item(old);
-            let _ = store.enqueue_reindex(old, "purge");
+        let mut old_item_id: Option<String> = None;
+        if let Some(old) = existing
+            .as_ref()
+            .filter(|_| existing_item_active)
+            .and_then(|row| row.item_id.as_ref())
+        {
+            match store.indexed_file_has_other_refs(old, feed_id, &source_ref) {
+                Ok(true) => {
+                    tracing::info!(
+                        "sync_rss_feed: source {source_ref} moved off shared item {old}; keeping old item"
+                    );
+                }
+                Ok(false) => {
+                    if let Err(e) = store.delete_item(old) {
+                        errors.push(format!("{source_ref}: delete old item {e}"));
+                        continue;
+                    }
+                    if let Err(e) = store.enqueue_reindex(old, "purge") {
+                        errors.push(format!("{source_ref}: enqueue purge {e}"));
+                        continue;
+                    }
+                    if let Err(e) = store.record_signal_event("doc_update", old, None) {
+                        tracing::debug!(
+                            "sync_rss_feed: record_signal_event failed for {old}: {e}"
+                        );
+                    }
+                    old_item_id = Some(old.clone());
+                }
+                Err(e) => {
+                    errors.push(format!("{source_ref}: check shared item refs {e}"));
+                    continue;
+                }
+            }
         }
         let outcome = match old_item_id.as_deref() {
             Some(old) => {
@@ -119,34 +178,51 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
         };
         match outcome {
             Ok(IngestOutcome::Inserted { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
-                if newest_ingested_guid.is_none() {
-                    newest_ingested_guid = Some(guid.clone());
+                match store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id) {
+                    Ok(_) => {
+                        if newest_ingested_guid.is_none() {
+                            newest_ingested_guid = Some(guid.clone());
+                        }
+                        new_entries += 1;
+                    }
+                    Err(e) => errors.push(format!("{source_ref}: persist tracking {e}")),
                 }
-                new_entries += 1;
             }
             Ok(IngestOutcome::Updated { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
-                if newest_ingested_guid.is_none() {
-                    newest_ingested_guid = Some(guid.clone());
+                match store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id) {
+                    Ok(_) => {
+                        if newest_ingested_guid.is_none() {
+                            newest_ingested_guid = Some(guid.clone());
+                        }
+                        new_entries += 1;
+                    }
+                    Err(e) => errors.push(format!("{source_ref}: persist tracking {e}")),
                 }
-                new_entries += 1;
             }
             Ok(IngestOutcome::Duplicate { item_id }) => {
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
-                if newest_ingested_guid.is_none() {
-                    newest_ingested_guid = Some(guid.clone());
+                match store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id) {
+                    Ok(_) => {
+                        if newest_ingested_guid.is_none() {
+                            newest_ingested_guid = Some(guid.clone());
+                        }
+                        skipped += 1;
+                    }
+                    Err(e) => errors.push(format!("{source_ref}: persist duplicate tracking {e}")),
                 }
-                skipped += 1;
             }
             Ok(IngestOutcome::Degraded {
                 item_id, reason, ..
             }) => {
                 let retry_marker = retryable_degraded_marker(&guid);
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &retry_marker, &item_id);
-                errors.push(format!(
-                    "{source_ref}: retryable degraded extraction: {reason}"
-                ));
+                if let Err(e) =
+                    store.upsert_indexed_file(feed_id, &source_ref, &retry_marker, &item_id)
+                {
+                    errors.push(format!("{source_ref}: persist retry marker {e}"));
+                } else {
+                    errors.push(format!(
+                        "{source_ref}: retryable degraded extraction: {reason}"
+                    ));
+                }
             }
             Ok(IngestOutcome::Skipped { .. }) => {
                 skipped += 1;

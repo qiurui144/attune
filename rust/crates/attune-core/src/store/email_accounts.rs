@@ -172,11 +172,16 @@ impl Store {
     }
 
     /// 删除一条 Email 账户配置（email_folder_uids 经 ON DELETE CASCADE 一并清）。
+    ///
+    /// 已入库 items 保留；indexed_files 仅是该账号的增量 tracking，随账号删除。
     pub fn delete_email_account(&self, dir_id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM email_accounts WHERE dir_id = ?1",
             params![dir_id],
         )?;
+        tx.execute("DELETE FROM indexed_files WHERE dir_id = ?1", params![dir_id])?;
+        tx.commit()?;
         Ok(())
     }
 

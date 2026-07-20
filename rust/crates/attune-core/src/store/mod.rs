@@ -100,6 +100,10 @@ fn sqlite_synchronous_mode() -> &'static str {
     }
 }
 
+fn sqlite_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 fn apply_connection_pragmas(conn: &Connection, on_disk: bool) -> Result<()> {
     let busy_timeout_ms = env_u64_clamped("ATTUNE_SQLITE_BUSY_TIMEOUT_MS", 5_000, 1_000, 60_000);
     let cache_kib = env_u64_clamped("ATTUNE_SQLITE_CACHE_KIB", 32 * 1024, 2 * 1024, 256 * 1024);
@@ -235,8 +239,11 @@ CREATE TABLE IF NOT EXISTS bound_dirs (
 
 CREATE TABLE IF NOT EXISTS indexed_files (
     id         TEXT PRIMARY KEY,
-    dir_id     TEXT NOT NULL REFERENCES bound_dirs(id),
-    path       TEXT UNIQUE NOT NULL,
+    -- Source-scoped owner id. For local/Git/WebDAV/Email this is a bound_dirs
+    -- id; RSS feeds intentionally use rss_feeds.id and do not have a bound_dirs
+    -- parent row. Keep this as an opaque source id, not a FK.
+    dir_id     TEXT NOT NULL,
+    path       TEXT NOT NULL,
     file_hash  TEXT NOT NULL,
     item_id    TEXT REFERENCES items(id),
     file_size     INTEGER,
@@ -244,9 +251,11 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     file_ctime_ns INTEGER,
     file_inode    INTEGER,
     file_dev      INTEGER,
-    indexed_at TEXT NOT NULL
+    indexed_at TEXT NOT NULL,
+    UNIQUE(dir_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id);
+CREATE INDEX IF NOT EXISTS idx_if_path ON indexed_files(path);
 
 -- 决策 4：WebDAV remote 配置持久化。bound_dirs(webdav:* path) 只记 URL；
 -- 认证凭据要让周期同步 worker 自动复用 → 此表存完整配置。
@@ -979,6 +988,7 @@ impl Store {
         Self::migrate_corpus_domain(conn)?;
         Self::migrate_items_content_hash(conn)?;
         Self::migrate_indexed_file_stat_marker(conn)?;
+        Self::migrate_indexed_files_source_scope(conn)?;
         Self::migrate_job_queue_backoff(conn)?;
         Self::migrate_skill_signals_v07(conn)?;
         Self::migrate_memories_multilayer(conn)?;
@@ -1003,6 +1013,7 @@ impl Store {
         Self::migrate_corpus_domain(&conn)?;
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_indexed_file_stat_marker(&conn)?;
+        Self::migrate_indexed_files_source_scope(&conn)?;
         Self::migrate_job_queue_backoff(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
@@ -1450,6 +1461,122 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// Knowledge-source tracking must be scoped by source id.
+    ///
+    /// Older vaults modeled `indexed_files.dir_id` as a FK to `bound_dirs(id)`
+    /// and made `path` globally unique. That worked for local/Git/WebDAV/Email
+    /// bindings, but RSS feeds live in `rss_feeds` and therefore could not
+    /// persist their incremental tracking rows. The global path uniqueness also
+    /// lets two sources with the same `source_ref` overwrite each other. Rebuild
+    /// the table in place to make `dir_id` an opaque source id and uniqueness
+    /// `(dir_id, path)`.
+    fn migrate_indexed_files_source_scope(conn: &Connection) -> Result<()> {
+        if !Self::indexed_files_needs_source_scope_rebuild(conn)? {
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id)", [])?;
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_if_path ON indexed_files(path)", [])?;
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS indexed_files_source_scope_new;
+             CREATE TABLE indexed_files_source_scope_new (
+                id         TEXT PRIMARY KEY,
+                dir_id     TEXT NOT NULL,
+                path       TEXT NOT NULL,
+                file_hash  TEXT NOT NULL,
+                item_id    TEXT REFERENCES items(id),
+                file_size     INTEGER,
+                file_mtime_ns INTEGER,
+                file_ctime_ns INTEGER,
+                file_inode    INTEGER,
+                file_dev      INTEGER,
+                indexed_at TEXT NOT NULL,
+                UNIQUE(dir_id, path)
+             );",
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO indexed_files_source_scope_new
+                (id, dir_id, path, file_hash, item_id,
+                 file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev, indexed_at)
+             SELECT
+                id,
+                dir_id,
+                path,
+                file_hash,
+                CASE
+                  WHEN item_id IS NOT NULL
+                   AND EXISTS (SELECT 1 FROM items WHERE items.id = indexed_files.item_id)
+                  THEN item_id
+                  ELSE NULL
+                END,
+                file_size,
+                file_mtime_ns,
+                file_ctime_ns,
+                file_inode,
+                file_dev,
+                indexed_at
+             FROM indexed_files
+             ORDER BY indexed_at, id",
+            [],
+        )?;
+        conn.execute_batch(
+            "DROP TABLE indexed_files;
+             ALTER TABLE indexed_files_source_scope_new RENAME TO indexed_files;
+             CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id);
+             CREATE INDEX IF NOT EXISTS idx_if_path ON indexed_files(path);",
+        )?;
+        Ok(())
+    }
+
+    fn indexed_files_needs_source_scope_rebuild(conn: &Connection) -> Result<bool> {
+        let bound_dir_fk_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('indexed_files') WHERE \"table\" = 'bound_dirs'",
+            [],
+            |row| row.get(0),
+        )?;
+        if bound_dir_fk_count > 0 {
+            return Ok(true);
+        }
+        if Self::indexed_files_has_unique_index(conn, &["path"])? {
+            return Ok(true);
+        }
+        Ok(!Self::indexed_files_has_unique_index(conn, &["dir_id", "path"])?)
+    }
+
+    fn indexed_files_has_unique_index(conn: &Connection, expected_columns: &[&str]) -> Result<bool> {
+        let mut stmt = conn.prepare("PRAGMA index_list('indexed_files')")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+        })?;
+        for row in rows {
+            let (index_name, unique) = row?;
+            if !unique {
+                continue;
+            }
+            let columns = Self::indexed_file_index_columns(conn, &index_name)?;
+            if columns.len() == expected_columns.len()
+                && columns
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected_columns.iter().copied())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn indexed_file_index_columns(conn: &Connection, index_name: &str) -> Result<Vec<String>> {
+        let sql = format!("PRAGMA index_info({})", sqlite_ident(index_name));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(2))?;
+        let mut columns = Vec::new();
+        for row in rows {
+            columns.push(row?);
+        }
+        Ok(columns)
     }
 
     /// G5 迁移：job_queue 新增 next_attempt_ms 列（自动退避重试，幂等）。
@@ -2537,6 +2664,156 @@ mod tests_indexed_files {
             .unwrap();
         assert_eq!(row.file_hash, "abc123");
         assert_eq!(row.stat, Some(stat));
+    }
+
+    #[test]
+    fn test_indexed_file_points_to_active_item_rejects_soft_deleted_item() {
+        let store = open_store();
+        let dir_id = store.bind_directory("/tmp/docs", false, &["md"]).unwrap();
+        let item_id = insert_test_item(&store);
+        store
+            .upsert_indexed_file(&dir_id, "/tmp/docs/note.md", "abc123", &item_id)
+            .unwrap();
+
+        let row = store
+            .get_indexed_file_for_dir(&dir_id, "/tmp/docs/note.md")
+            .unwrap()
+            .unwrap();
+        assert!(store.indexed_file_points_to_active_item(&row).unwrap());
+
+        assert!(store.delete_item(&item_id).unwrap());
+
+        let row = store
+            .get_indexed_file_for_dir(&dir_id, "/tmp/docs/note.md")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !store.indexed_file_points_to_active_item(&row).unwrap(),
+            "incremental sync must re-ingest when tracking points to a deleted item"
+        );
+    }
+
+    #[test]
+    fn test_indexed_file_accepts_rss_feed_source_without_bound_dir() {
+        let store = open_store();
+        let item_id = insert_test_item(&store);
+
+        store
+            .upsert_indexed_file(
+                "rss-feed-1",
+                "rss-feed-1#tag:example.com,2026:entry.txt",
+                "guid-1",
+                &item_id,
+            )
+            .unwrap();
+
+        let row = store
+            .get_indexed_file_for_dir(
+                "rss-feed-1",
+                "rss-feed-1#tag:example.com,2026:entry.txt",
+            )
+            .unwrap()
+            .expect("RSS tracking row should be persisted");
+        assert_eq!(row.dir_id, "rss-feed-1");
+        assert_eq!(row.file_hash, "guid-1");
+    }
+
+    #[test]
+    fn test_indexed_file_source_scope_allows_same_ref_in_two_sources() {
+        let store = open_store();
+        let dir_a = store.bind_directory("/tmp/source-a", false, &["md"]).unwrap();
+        let dir_b = store.bind_directory("/tmp/source-b", false, &["md"]).unwrap();
+        let item_a = insert_test_item(&store);
+        let item_b = insert_test_item(&store);
+
+        store
+            .upsert_indexed_file(&dir_a, "shared/ref.md", "hash-a", &item_a)
+            .unwrap();
+        store
+            .upsert_indexed_file(&dir_b, "shared/ref.md", "hash-b", &item_b)
+            .unwrap();
+
+        let row_a = store
+            .get_indexed_file_for_dir(&dir_a, "shared/ref.md")
+            .unwrap()
+            .unwrap();
+        let row_b = store
+            .get_indexed_file_for_dir(&dir_b, "shared/ref.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row_a.file_hash, "hash-a");
+        assert_eq!(row_b.file_hash, "hash-b");
+        assert_ne!(row_a.item_id, row_b.item_id);
+    }
+
+    #[test]
+    fn test_migrate_indexed_files_source_scope_drops_bound_dir_fk_and_path_unique() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE bound_dirs (
+                id TEXT PRIMARY KEY,
+                path TEXT UNIQUE NOT NULL,
+                recursive INTEGER NOT NULL DEFAULT 1,
+                file_types TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                last_scan TEXT
+             );
+             CREATE TABLE items (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content BLOB NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'note',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE indexed_files (
+                id TEXT PRIMARY KEY,
+                dir_id TEXT NOT NULL REFERENCES bound_dirs(id),
+                path TEXT UNIQUE NOT NULL,
+                file_hash TEXT NOT NULL,
+                item_id TEXT REFERENCES items(id),
+                indexed_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+
+        Store::migrate_indexed_file_stat_marker(&conn).unwrap();
+        Store::migrate_indexed_files_source_scope(&conn).unwrap();
+
+        let bound_dir_fk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('indexed_files') WHERE \"table\" = 'bound_dirs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound_dir_fk_count, 0, "source tracking must not require bound_dirs parent rows");
+
+        conn.execute(
+            "INSERT INTO indexed_files
+                (id, dir_id, path, file_hash, item_id, indexed_at)
+             VALUES ('row-rss', 'rss-feed-1', 'same/ref.txt', 'guid-1', NULL, 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO indexed_files
+                (id, dir_id, path, file_hash, item_id, indexed_at)
+             VALUES ('row-local', 'local-dir-1', 'same/ref.txt', 'hash-1', NULL, 'now')",
+            [],
+        )
+        .unwrap();
+
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM indexed_files WHERE path = 'same/ref.txt'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2);
     }
 
     #[test]

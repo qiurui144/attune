@@ -144,7 +144,7 @@ RAG Chat 是主界面。每个回答都带可点的 citation chip 在侧栏打�
 - **混合搜索** — usearch HNSW 向量 + tantivy BM25（jieba 中文分词 + LowerCaser/Stemmer 多语言）+ RRF 融合；本地未命中时浏览器自动化网搜（驱动系统 Chrome，零 API 费）
 - **多层记忆** — L0 原始 chunk / L1 摘要 / L2 情景 / L3 语义，tier-aware 上下文装配按最省 tier 答题
 - **Reader + 批注** — 全文阅读 + 用户批注（5 标签 × 4 色）+ AI 4 视角分析，批注影响 RAG 权重
-- **采集来源** — 本地文件夹 · WebDAV · Email IMAP · GitConnector（Git 仓库导入）
+- **采集来源** — 本地文件夹 · WebDAV · Email IMAP · RSS/Atom · GitConnector（Git 仓库导入）
 - **Office Helper** — 结构化 OCR（document/receipt/table/card/id_card 等场景 + GB/Luhn 校验位）+ whisper.cpp 异步会议转写
 - **Agent / Skill / Workflow** — ACP agent 治理 + WASM 跨平台分发 + SkillClaw 风格自进化 + workflow DAG
 - **隐私优先** — 加密 vault（Argon2id + AES-256-GCM + Device Secret）+ OutboundGate 出网门 + L0 永不出网 + PII 脱敏 + DSAR/审计
@@ -241,6 +241,11 @@ curl -X POST http://localhost:18900/api/v1/index/bind \
 
 # 查看索引状态
 curl http://localhost:18900/api/v1/index/status
+
+# 手动快速重扫已绑定目录
+curl -X POST http://localhost:18900/api/v1/index/rescan \
+  -H "Content-Type: application/json" \
+  -d '{"dir_id": "<dir_id>", "background": true}'
 ```
 
 支持：`.md` `.txt` `.py` `.js` `.ts` `.go` `.rs` `.java` `.pdf` `.docx`
@@ -313,7 +318,7 @@ ingest:
 | GET | `/search?q=&top_k=` | 混合搜索 |
 | POST | `/search/relevant` | 相关知识搜索（注入用，层级检索 + 动态预算） |
 | GET/PATCH/DELETE | `/items[/{id}]` | 知识条目 CRUD |
-| POST/DELETE/GET | `/index/bind\|unbind\|status` | 目录索引管理 |
+| POST/DELETE/GET | `/index/bind\|rescan\|unbind\|status` | 目录索引管理 |
 | GET | `/status` | 系统状态 |
 | GET/PATCH | `/settings` | 配置管理 |
 | GET | `/models` | 模型列表 + 设备检测 |

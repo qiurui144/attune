@@ -115,12 +115,34 @@ impl Store {
 
     // --- indexed_files ---
 
-    /// 查询已索引文件
+    /// 查询某 source 下的已索引文件。
+    pub fn get_indexed_file_for_dir(
+        &self,
+        dir_id: &str,
+        path: &str,
+    ) -> Result<Option<IndexedFileRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, dir_id, path, file_hash, item_id,
+                    file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev
+             FROM indexed_files WHERE dir_id = ?1 AND path = ?2",
+        )?;
+        let result = stmt.query_row(params![dir_id, path], indexed_file_row_from_sql);
+        match result {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 查询已索引文件（legacy path-only helper）。
+    ///
+    /// New ingestion paths should use [`Store::get_indexed_file_for_dir`] so two
+    /// sources with the same `source_ref` cannot overwrite each other.
     pub fn get_indexed_file(&self, path: &str) -> Result<Option<IndexedFileRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, dir_id, path, file_hash, item_id,
                     file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev
-             FROM indexed_files WHERE path = ?1",
+             FROM indexed_files WHERE path = ?1 ORDER BY indexed_at DESC LIMIT 1",
         )?;
         let result = stmt.query_row(params![path], indexed_file_row_from_sql);
         match result {
@@ -153,15 +175,26 @@ impl Store {
     pub fn list_item_ids_under_path(&self, prefix: &str) -> Result<Vec<String>> {
         // ESCAPE '\\': 用户路径可能含 LIKE 元字符 % / _,转义后按字面匹配,
         // 避免 "/a_b" 误命中 "/axb"。前缀已转义,再拼通配 '%'。
-        let escaped = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("{escaped}%");
+        let (exact, slash_child, backslash_child) = path_prefix_like_patterns(prefix);
         let mut stmt = self.conn.prepare_cached(
-            "SELECT DISTINCT item_id FROM indexed_files WHERE path LIKE ?1 ESCAPE '\\'",
+            "SELECT DISTINCT indexed_files.item_id
+             FROM indexed_files
+             JOIN bound_dirs ON bound_dirs.id = indexed_files.dir_id
+             JOIN items ON items.id = indexed_files.item_id
+             WHERE (
+                   indexed_files.path = ?1
+                OR indexed_files.path LIKE ?2 ESCAPE '\\'
+                OR indexed_files.path LIKE ?3 ESCAPE '\\'
+             )
+               AND bound_dirs.is_active = 1
+               AND bound_dirs.path NOT LIKE 'webdav:%'
+               AND bound_dirs.path NOT LIKE 'git:%'
+               AND bound_dirs.path NOT LIKE 'email:%'
+               AND items.is_deleted = 0",
         )?;
-        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![exact, slash_child, backslash_child], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut ids = Vec::new();
         for r in rows {
             ids.push(r?);
@@ -169,7 +202,62 @@ impl Store {
         Ok(ids)
     }
 
-    /// 删除一条 indexed_files 记录（按 path）。git 增量删除上游消失文件时调。
+    /// 删除一条 indexed_files 记录（按 source id + path）。
+    pub fn delete_indexed_file_for_dir(&self, dir_id: &str, path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM indexed_files WHERE dir_id = ?1 AND path = ?2",
+            params![dir_id, path],
+        )?;
+        Ok(())
+    }
+
+    /// 删除某 source 下全部 indexed_files tracking 行。用于 RSS feed 等非目录源删除
+    /// 配置时清理增量元数据，同时保留已经入库的 items。
+    pub fn delete_indexed_files_for_dir(&self, dir_id: &str) -> Result<usize> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM indexed_files WHERE dir_id = ?1", params![dir_id])?;
+        Ok(deleted)
+    }
+
+    /// True when another indexed source row still references the same item.
+    ///
+    /// Content-hash dedup means several source files/entries can point to one
+    /// item. Update/delete of one source must not purge the shared item until
+    /// this source row is the last remaining reference.
+    pub fn indexed_file_has_other_refs(
+        &self,
+        item_id: &str,
+        dir_id: &str,
+        path: &str,
+    ) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM indexed_files
+             WHERE item_id = ?1
+               AND NOT (dir_id = ?2 AND path = ?3)",
+            params![item_id, dir_id, path],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// True when an indexed_files row still points at an active item.
+    ///
+    /// Incremental sync must not skip solely on marker equality when the
+    /// tracking row points to a missing or soft-deleted item. That state can
+    /// happen after interrupted purge/reindex flows and must self-heal by
+    /// re-ingesting the source.
+    pub fn indexed_file_points_to_active_item(&self, row: &IndexedFileRow) -> Result<bool> {
+        match row.item_id.as_deref() {
+            Some(item_id) => self.item_exists(item_id),
+            None => Ok(false),
+        }
+    }
+
+    /// 删除 indexed_files 记录（legacy path-only helper）。
+    ///
+    /// New source-sync code should call [`Store::delete_indexed_file_for_dir`].
     pub fn delete_indexed_file(&self, path: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM indexed_files WHERE path = ?1", params![path])?;
@@ -202,8 +290,7 @@ impl Store {
                 (id, dir_id, path, file_hash, item_id,
                  file_size, file_mtime_ns, file_ctime_ns, file_inode, file_dev, indexed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(path) DO UPDATE SET
-               dir_id = excluded.dir_id,
+             ON CONFLICT(dir_id, path) DO UPDATE SET
                file_hash = excluded.file_hash,
                item_id = excluded.item_id,
                file_size = excluded.file_size,
@@ -251,6 +338,26 @@ fn indexed_file_row_from_sql(row: &Row<'_>) -> rusqlite::Result<IndexedFileRow> 
         item_id: row.get(4)?,
         stat,
     })
+}
+
+fn path_prefix_like_patterns(prefix: &str) -> (String, String, String) {
+    let trimmed = prefix.trim_end_matches(['/', '\\']);
+    let base = if trimmed.is_empty() { prefix } else { trimmed };
+    let escaped = escape_like_literal(base);
+    let slash_child = if base == "/" {
+        "/%".to_string()
+    } else {
+        format!("{escaped}/%")
+    };
+    let backslash_child = format!("{escaped}\\\\%");
+    (escaped, slash_child, backslash_child)
+}
+
+fn escape_like_literal(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 #[cfg(test)]
@@ -309,6 +416,68 @@ mod tests {
             vec![id_underscore],
             "underscore is escaped, /axb not matched"
         );
+    }
+
+    #[test]
+    fn list_item_ids_under_path_excludes_inactive_bound_dirs() {
+        let s = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let dir_id = s.bind_directory("/docs", true, &["txt"]).unwrap();
+        let item_id = s
+            .insert_item(&dek, "inactive", "body", None, "file", None, None)
+            .unwrap();
+        s.upsert_indexed_file(&dir_id, "/docs/stale.txt", "h", &item_id)
+            .unwrap();
+        s.unbind_directory(&dir_id).unwrap();
+
+        let got = s.list_item_ids_under_path("/docs").unwrap();
+
+        assert!(
+            got.is_empty(),
+            "ByPath organize must not include rows from inactive source bindings"
+        );
+    }
+
+    #[test]
+    fn list_item_ids_under_path_excludes_remote_source_refs() {
+        let s = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let webdav_id = s
+            .bind_directory("webdav:https://nas.example.com/docs", false, &["txt"])
+            .unwrap();
+        let item_id = s
+            .insert_item(&dek, "remote", "body", None, "webdav", None, None)
+            .unwrap();
+        s.upsert_indexed_file(&webdav_id, "/docs/remote.txt", "etag", &item_id)
+            .unwrap();
+
+        let got = s.list_item_ids_under_path("/docs").unwrap();
+
+        assert!(
+            got.is_empty(),
+            "ByPath organize is local-folder scoped and must not match remote hrefs"
+        );
+    }
+
+    #[test]
+    fn list_item_ids_under_path_respects_directory_boundary() {
+        let s = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let dir_id = s.bind_directory("/docs", true, &["txt"]).unwrap();
+        let wanted = s
+            .insert_item(&dek, "wanted", "body", None, "file", None, None)
+            .unwrap();
+        s.upsert_indexed_file(&dir_id, "/docs/a.txt", "h1", &wanted)
+            .unwrap();
+        let decoy = s
+            .insert_item(&dek, "decoy", "body", None, "file", None, None)
+            .unwrap();
+        s.upsert_indexed_file(&dir_id, "/docs2/b.txt", "h2", &decoy)
+            .unwrap();
+
+        let got = s.list_item_ids_under_path("/docs").unwrap();
+
+        assert_eq!(got, vec![wanted], "prefix /docs must not match /docs2");
     }
 
     #[test]

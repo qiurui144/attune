@@ -343,6 +343,8 @@ pub struct GitConnector {
     cloner: Box<dyn GitCloner>,
     /// fetch 后回填的 HEAD commit（caller 取作游标）。
     last_commit: std::cell::RefCell<Option<String>>,
+    /// fetch 后回填的 tree 形态：true=全量，false=增量 diff。
+    last_full: std::cell::RefCell<Option<bool>>,
     /// fetch 后回填的删除列表（增量 D）。
     deleted: std::cell::RefCell<Vec<String>>,
 }
@@ -362,6 +364,7 @@ impl GitConnector {
             repo,
             cloner,
             last_commit: std::cell::RefCell::new(None),
+            last_full: std::cell::RefCell::new(None),
             deleted: std::cell::RefCell::new(Vec::new()),
         })
     }
@@ -379,6 +382,11 @@ impl GitConnector {
     /// fetch 后取 HEAD commit SHA（游标）。
     pub fn take_last_commit(&self) -> Option<String> {
         self.last_commit.borrow_mut().take()
+    }
+
+    /// fetch 后取 tree 形态：true=全量，false=增量 diff。
+    pub fn take_last_full(&self) -> Option<bool> {
+        self.last_full.borrow_mut().take()
     }
 
     /// fetch 后取删除文件列表（增量 D）。
@@ -445,9 +453,20 @@ impl SourceConnector for GitConnector {
     fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
         let tree = self.cloner.fetch(&self.repo, &self.config)?;
         *self.last_commit.borrow_mut() = Some(tree.commit_sha.clone());
-        *self.deleted.borrow_mut() = tree.deleted.clone();
+        *self.last_full.borrow_mut() = Some(tree.full);
 
         let (include, exclude) = self.build_globs()?;
+        let deleted_refs = tree
+            .deleted
+            .iter()
+            .filter(|rel| self.in_subdir(rel))
+            .filter(|rel| {
+                let path = Path::new(rel);
+                include.is_match(path) && !exclude.is_match(path)
+            })
+            .map(|rel| format!("{}/{}", self.repo.slug, rel))
+            .collect();
+        *self.deleted.borrow_mut() = deleted_refs;
         let mut emitted = 0u64;
 
         for (rel, bytes) in tree.files {
@@ -641,6 +660,27 @@ mod tests {
         assert_eq!(conn.take_last_commit().as_deref(), Some("deadbeefcafebabe"));
         // commit SHA 进 metadata（marker 改用 per-file 内容 SHA）。
         assert_eq!(docs[0].metadata.get("commit").unwrap(), "deadbeefcafebabe");
+    }
+
+    #[test]
+    fn connector_exposes_incremental_full_flag_and_deleted_source_refs() {
+        let tree = FetchedTree {
+            commit_sha: "feedface".into(),
+            files: vec![("changed.md".into(), b"# changed".to_vec())],
+            deleted: vec!["deleted.md".into(), "skip.bin".into()],
+            full: false,
+        };
+        let conn = GitConnector::with_cloner(
+            GitSourceConfig::new("https://github.com/o/r"),
+            Box::new(MockCloner { tree }),
+        )
+        .unwrap();
+
+        let docs = drain(&conn);
+
+        assert_eq!(docs.len(), 1);
+        assert_eq!(conn.take_last_full(), Some(false));
+        assert_eq!(conn.take_deleted(), vec!["o/r/deleted.md"]);
     }
 
     #[test]

@@ -98,12 +98,34 @@ fn delete_email_account_removes_row() {
     let (dir_id, input) = make_account(&store, "del");
     store.upsert_email_account(&dek, &input).unwrap();
     store.set_folder_uid(&dir_id, "INBOX", 999).unwrap();
+    let item_id = store
+        .insert_item(
+            &dek,
+            "Email item",
+            "Email body",
+            Some("imap://imap.gmail.com/INBOX/999"),
+            "email",
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .upsert_indexed_file(&dir_id, "email:imap.gmail.com/INBOX/999", "INBOX:999", &item_id)
+        .unwrap();
     store.delete_email_account(&dir_id).unwrap();
     assert!(store.get_email_account(&dek, &dir_id).unwrap().is_none());
     assert_eq!(
         store.get_folder_uid(&dir_id, "INBOX").unwrap(),
         0,
         "email_folder_uids 应随账户级联删除"
+    );
+    assert!(
+        store.list_indexed_files_for_dir(&dir_id).unwrap().is_empty(),
+        "indexed_files 只是账号增量 tracking，删除账号时应清理"
+    );
+    assert!(
+        store.item_exists(&item_id).unwrap(),
+        "删除账号只清 tracking，不回收已入库知识项"
     );
 }
 

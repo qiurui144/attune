@@ -86,6 +86,29 @@ fn delete_removes_row() {
 }
 
 #[test]
+fn delete_feed_removes_incremental_tracking_but_keeps_items() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let id = store
+        .add_rss_feed(&dek, &sample_input("tmp", "https://ex.com/feed.xml"))
+        .unwrap();
+    let item_id = store
+        .insert_item(&dek, "entry", "body", None, "rss", None, None)
+        .unwrap();
+    store
+        .upsert_indexed_file(&id, "feed#entry.txt", "guid-1", &item_id)
+        .unwrap();
+
+    store.delete_rss_feed(&id).unwrap();
+
+    assert!(store.list_indexed_files_for_dir(&id).unwrap().is_empty());
+    assert!(
+        store.get_item(&dek, &item_id).unwrap().is_some(),
+        "deleting a subscription only stops future sync; already-ingested knowledge remains"
+    );
+}
+
+#[test]
 fn update_etag_lastmod_persists_and_touches_polled_at() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
