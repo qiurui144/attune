@@ -29,9 +29,9 @@ const DEFAULT_SCHEDULER_PDF_OCR_MAX_TOTAL_MS: usize = 12_000;
 const DEFAULT_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 4_000;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_PAGES: usize = 0;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES: usize = 16;
-const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS: usize = 120_000;
-const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 45_000;
-const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS: usize = 8_000;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS: usize = 0;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 180_000;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS: usize = 30_000;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
 const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 72;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI: usize = 48;
@@ -121,20 +121,17 @@ impl PdfOcrText {
 #[derive(Clone, Copy)]
 struct SchedulerPdfOcrBudget {
     started_at: Instant,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl SchedulerPdfOcrBudget {
     fn new(options: &ParseOptions) -> Self {
         let started_at = Instant::now();
-        // `MAX_TOTAL_MS=0` historically disabled the short multi-page budget.
-        // Keep that override useful while retaining a hard upper bound from
-        // the caller's scheduler timeout so Poppler can never wait forever.
-        let duration = scheduler_pdf_ocr_max_total_duration(options)
-            .unwrap_or_else(|| options.scheduler_timeout());
-        let deadline = started_at
-            .checked_add(duration)
-            .unwrap_or_else(|| started_at + options.scheduler_timeout());
+        let deadline = scheduler_pdf_ocr_max_total_duration(options).map(|duration| {
+            started_at
+                .checked_add(duration)
+                .unwrap_or_else(|| started_at + options.scheduler_timeout())
+        });
         Self {
             started_at,
             deadline,
@@ -142,14 +139,19 @@ impl SchedulerPdfOcrBudget {
     }
 
     fn remaining(self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::MAX)
     }
 
     fn operation_deadline(self, max_duration: Duration) -> Instant {
-        Instant::now()
+        let now = Instant::now();
+        let operation_deadline = now
             .checked_add(max_duration)
-            .map(|deadline| deadline.min(self.deadline))
-            .unwrap_or(self.deadline)
+            .unwrap_or_else(|| now + Duration::from_secs(24 * 60 * 60));
+        self.deadline
+            .map(|deadline| operation_deadline.min(deadline))
+            .unwrap_or(operation_deadline)
     }
 }
 
@@ -1200,7 +1202,9 @@ fn parse_pdf_bytes_detailed(
     let dpi = crate::ocr::dpi_for_profile(options.profile_id());
     let budget = SchedulerPdfOcrBudget::new(options);
 
-    if let Some(pdftotext) = try_pdftotext_from_bytes(data, budget.deadline) {
+    if let Some(pdftotext) =
+        try_pdftotext_from_bytes(data, budget.operation_deadline(options.scheduler_timeout()))
+    {
         if pdf_text_layer_is_usable(&pdftotext) {
             let title = first_line_title(&pdftotext, &stem);
             return Ok(ParsedDocument::complete(title, pdftotext));
@@ -1290,7 +1294,10 @@ pub fn parse_bytes_with_options(
             // 上传路径走内存，但 OCR 需要磁盘文件（pdftoppm 读文件）。
             // Poppler 的 pdftotext 对大型飞行手册更稳，先用它取文字层；失败后再退回
             // pdf_extract，最后才走 OCR。
-            if let Some(pdftotext) = try_pdftotext_from_bytes(data, budget.deadline) {
+            if let Some(pdftotext) = try_pdftotext_from_bytes(
+                data,
+                budget.operation_deadline(options.scheduler_timeout()),
+            ) {
                 if pdf_text_layer_is_usable(&pdftotext) {
                     let title = first_line_title(&pdftotext, &stem);
                     return Ok((title, pdftotext));
@@ -1517,7 +1524,9 @@ fn try_ocr_from_pdf_path_with_dpi_and_budget(
     {
         return Some(result.text);
     }
-    if let Some(text) = try_ocrmypdf_sidecar_from_path(path, budget.deadline) {
+    if let Some(text) =
+        try_ocrmypdf_sidecar_from_path(path, budget.operation_deadline(options.scheduler_timeout()))
+    {
         return Some(text);
     }
     if options.scheduler_base.is_some() && !scheduler_local_ocr_provider_fallback_enabled() {
@@ -1583,7 +1592,10 @@ fn try_ocr_from_bytes_with_dpi_and_budget_detailed(
     {
         return Some(result);
     }
-    if let Some(text) = try_ocrmypdf_sidecar_from_path(tmp.path(), budget.deadline) {
+    if let Some(text) = try_ocrmypdf_sidecar_from_path(
+        tmp.path(),
+        budget.operation_deadline(options.scheduler_timeout()),
+    ) {
         return Some(PdfOcrText::complete(text));
     }
     if options.scheduler_base.is_some() && !scheduler_local_ocr_provider_fallback_enabled() {
@@ -1640,7 +1652,24 @@ fn scheduler_pdf_ocr_page_limit(options: &ParseOptions, page_count: Option<usize
     }
 }
 
-fn scheduler_pdf_ocr_max_failed_pages(page_limit: usize) -> usize {
+fn scheduler_pdf_ocr_max_failed_pages(options: &ParseOptions, page_limit: usize) -> usize {
+    let page_limit = page_limit.max(1);
+    if options.background_ingest_ocr() {
+        let configured = env_usize_any_allow_zero_opt(&[
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_FAILED_PAGES",
+        ])
+        .unwrap_or(0);
+        return if configured == 0 {
+            page_limit
+        } else {
+            configured.min(page_limit).max(1)
+        };
+    }
+
     env_usize_any(
         &[
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
@@ -1649,10 +1678,31 @@ fn scheduler_pdf_ocr_max_failed_pages(page_limit: usize) -> usize {
         ],
         DEFAULT_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES,
     )
-    .min(page_limit.max(1))
+    .min(page_limit)
+    .max(1)
 }
 
-fn scheduler_pdf_ocr_max_consecutive_failures() -> usize {
+fn scheduler_pdf_ocr_max_consecutive_failures(
+    options: &ParseOptions,
+    page_limit: usize,
+) -> usize {
+    let page_limit = page_limit.max(1);
+    if options.background_ingest_ocr() {
+        let configured = env_usize_any_allow_zero_opt(&[
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+        ])
+        .unwrap_or(0);
+        return if configured == 0 {
+            page_limit
+        } else {
+            configured.min(page_limit).max(1)
+        };
+    }
+
     env_usize_any(
         &[
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
@@ -1661,12 +1711,13 @@ fn scheduler_pdf_ocr_max_consecutive_failures() -> usize {
         ],
         DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES,
     )
+    .min(page_limit)
     .max(1)
 }
 
 fn scheduler_pdf_ocr_max_total_duration(options: &ParseOptions) -> Option<Duration> {
     if options.background_ingest_ocr() {
-        let ms = env_usize_any_clamped(
+        let ms = env_usize_any_allow_zero(
             &[
                 "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
                 "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
@@ -1675,9 +1726,11 @@ fn scheduler_pdf_ocr_max_total_duration(options: &ParseOptions) -> Option<Durati
                 "ATTUNE_ASYNC_PDF_OCR_MAX_TOTAL_MS",
             ],
             DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS,
-            90_000,
-            180_000,
         );
+        if ms == 0 {
+            return None;
+        }
+        let ms = ms.clamp(180_000, 24 * 60 * 60 * 1000);
         return Some(Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)));
     }
 
@@ -1708,10 +1761,9 @@ fn scheduler_pdf_ocr_page_timeout(options: &ParseOptions) -> Duration {
             ],
             DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS,
             30_000,
-            60_000,
+            180_000,
         );
-        return Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))
-            .min(options.scheduler_timeout());
+        return Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX));
     }
 
     let ms = env_usize_any(
@@ -1740,8 +1792,8 @@ fn scheduler_pdf_ocr_render_timeout(
                 "ATTUNE_ASYNC_PDF_OCR_RENDER_TIMEOUT_MS",
             ],
             DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS,
-            2_000,
-            15_000,
+            10_000,
+            60_000,
         );
         return Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)).min(page_timeout);
     }
@@ -1802,7 +1854,7 @@ fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32, options: &ParseOptions) 
     .clamp(min_dpi as usize, 1200) as u32;
 
     let mut candidates = Vec::new();
-    for dpi in [base, max_dpi, 200, 180, 150, 120, 96, 72, 60, min_dpi] {
+    for dpi in [base, max_dpi, 200, 180, 160, 150, 120, 96, 72, 60, min_dpi] {
         let dpi = dpi.clamp(min_dpi, max_dpi);
         if !candidates.contains(&dpi) {
             candidates.push(dpi);
@@ -2210,8 +2262,8 @@ fn try_scheduler_pdf_page_ocr_from_path_with_budget(
     if page_limit == 0 {
         return None;
     }
-    let max_failed = scheduler_pdf_ocr_max_failed_pages(page_limit);
-    let max_consecutive_failed = scheduler_pdf_ocr_max_consecutive_failures();
+    let max_failed = scheduler_pdf_ocr_max_failed_pages(options, page_limit);
+    let max_consecutive_failed = scheduler_pdf_ocr_max_consecutive_failures(options, page_limit);
     let dpi_candidates = scheduler_pdf_ocr_dpi_candidates(requested_dpi, options);
     let tmp = tempfile::TempDir::new().ok()?;
 
@@ -2516,7 +2568,9 @@ fn parse_pdf_file_with_dpi(
     let budget = SchedulerPdfOcrBudget::new(options);
     // 1. 本地文件优先走 Poppler。大型手册上 pdf_extract 可能产生海量日志或 panic，
     //    pdftotext 的流式外部进程路径更适合批量索引。
-    if let Some(pdftotext) = try_pdftotext_from_path(path, budget.deadline) {
+    if let Some(pdftotext) =
+        try_pdftotext_from_path(path, budget.operation_deadline(options.scheduler_timeout()))
+    {
         if pdf_text_layer_is_usable(&pdftotext) {
             let title = first_line_title(&pdftotext, stem);
             return Ok((title, pdftotext));
@@ -3902,10 +3956,21 @@ mod tests {
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_PDF_OCR_MAX_TOTAL_MS",
-            "ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
-            "ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_ASYNC_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_ASYNC_PDF_OCR_RENDER_TIMEOUT_MS",
             "ATTUNE_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
             "ATTUNE_PDF_OCR_PAGE_TIMEOUT_MS",
@@ -3914,10 +3979,21 @@ mod tests {
             "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_PDF_OCR_MAX_TOTAL_MS",
-            "ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
-            "ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_TOTAL_MS",
             "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_ASYNC_PDF_OCR_PAGE_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS",
+            "ATTUNE_ASYNC_PDF_OCR_RENDER_TIMEOUT_MS",
             "ATTUNE_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
             "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS",
             "ATTUNE_PDF_OCR_PAGE_TIMEOUT_MS",
@@ -3938,26 +4014,123 @@ mod tests {
         );
 
         let background = ParseOptions::default()
-            .with_scheduler_timeout_ms(180_000)
+            .with_scheduler_timeout_ms(120_000)
             .with_background_ingest_ocr();
         assert_eq!(
             scheduler_pdf_ocr_max_total_duration(&background),
-            Some(Duration::from_millis(120_000))
+            None,
+            "background ingest must not impose a document-level hard cutoff by default"
         );
         assert_eq!(
             scheduler_pdf_ocr_page_timeout(&background),
-            Duration::from_millis(45_000)
+            Duration::from_millis(180_000)
+        );
+        assert_eq!(
+            scheduler_pdf_ocr_render_timeout(
+                &background,
+                scheduler_pdf_ocr_page_timeout(&background)
+            ),
+            Duration::from_millis(30_000)
         );
 
         std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS", "1");
         std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS", "1");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS", "1");
         assert_eq!(
             scheduler_pdf_ocr_max_total_duration(&background),
-            Some(Duration::from_millis(90_000))
+            Some(Duration::from_millis(180_000))
         );
         assert_eq!(
             scheduler_pdf_ocr_page_timeout(&background),
             Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            scheduler_pdf_ocr_render_timeout(
+                &background,
+                scheduler_pdf_ocr_page_timeout(&background)
+            ),
+            Duration::from_millis(10_000)
+        );
+    }
+
+    #[test]
+    fn scheduler_pdf_ocr_failure_limits_are_mode_aware() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+        ]);
+        for key in [
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_LOCAL_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_ASYNC_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_ASYNC_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let interactive = ParseOptions::default();
+        assert_eq!(
+            scheduler_pdf_ocr_max_failed_pages(&interactive, 44),
+            DEFAULT_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES
+        );
+        assert_eq!(
+            scheduler_pdf_ocr_max_consecutive_failures(&interactive, 44),
+            DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES
+        );
+
+        let background = ParseOptions::default().with_background_ingest_ocr();
+        assert_eq!(scheduler_pdf_ocr_max_failed_pages(&background, 44), 44);
+        assert_eq!(
+            scheduler_pdf_ocr_max_consecutive_failures(&background, 44),
+            44
+        );
+
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES", "3");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES", "4");
+        assert_eq!(
+            scheduler_pdf_ocr_max_failed_pages(&background, 44),
+            44,
+            "interactive/global failure limits must not make background ingest degrade early"
+        );
+        assert_eq!(
+            scheduler_pdf_ocr_max_consecutive_failures(&background, 44),
+            44,
+            "interactive/global consecutive limits must not stop background ingest early"
+        );
+
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_FAILED_PAGES", "5");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_CONSECUTIVE_FAILURES", "6");
+        assert_eq!(scheduler_pdf_ocr_max_failed_pages(&background, 44), 5);
+        assert_eq!(
+            scheduler_pdf_ocr_max_consecutive_failures(&background, 44),
+            6
         );
     }
 

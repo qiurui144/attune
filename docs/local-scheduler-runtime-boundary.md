@@ -112,9 +112,10 @@ flowchart LR
   first, then render one PDF page at a time with Poppler and submit bounded
   `image_base64` page payloads to `kb.document.ocr_recognize`. Attune does not
   inline whole large PDFs, does not render all pages into memory at once, and
-  stops on configured failure thresholds instead of silently falling back to a
-  concrete local OCR worker. Background ingest uses the long-budget async OCR
-  profile, including full detected-page coverage by default, an unknown-page
+  polls the scheduler async job to terminal state before deciding whether OCR
+  truly failed. Background ingest uses the long-budget async OCR profile,
+  including full detected-page coverage by default, no default document-level
+  hard cutoff, 180s per-page job polling, a 30s render budget, an unknown-page
   fallback cap, and lower-DPI image-size retries; interactive PDF OCR keeps the
   shorter bounded defaults.
 - `/api/v1/ai-stack`, `/api/v1/status`, and edge-scheduler readiness routes report scheduler

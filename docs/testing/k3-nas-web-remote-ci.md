@@ -18,12 +18,12 @@ materialize、server-side bind、embedding/vector drain、search、chat、multit
 阻断门；如果需要把每个非安全类 chat query 都强制要求走 scheduler 生成，显式设置
 `ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1`。
 
-airplane long-text gate 默认设置 `ATTUNE_K3_LONGTEXT_PDF_OCR=0`，脚本会在运行
-airplane bind 前重启 NAS 侧 `attune-server` 并禁用 server-side PDF OCR。这样该门只验证
-Attune 的 bind、向量生成、检索、grounded chat、多轮和 UI，不让扫描版 PDF OCR 的 scheduler
-波动把整条长文本演示阻塞。OCR 正确性/性能应由 scheduler 的 `kb.document.ocr_recognize`
-self-test 和 Attune OCR 专项门覆盖；需要把 airplane 也作为 OCR 压测时，显式设置
-`ATTUNE_K3_LONGTEXT_PDF_OCR=1`。
+airplane long-text gate 默认保留 server-side PDF OCR
+（`ATTUNE_K3_LONGTEXT_PDF_OCR=1`），用于同时覆盖 Attune 的 bind、OCR 摄入、
+向量生成、检索、grounded chat、多轮和 UI。只想隔离向量/search/chat 行为时，
+显式设置 `ATTUNE_K3_LONGTEXT_PDF_OCR=0`；脚本会在运行 airplane bind 前重启 NAS
+侧 `attune-server` 并禁用 server-side PDF OCR。OCR 正确性/性能仍应同时由 scheduler
+的 `kb.document.ocr_recognize` self-test 和 Attune OCR 专项门归档。
 
 `ATTUNE_K3_LONGTEXT_MANIFEST` 指向 CI runner 本地可读的 long-text benchmark JSON，
 用于可选 UI gate。现有标准样例是 `tests/e2e/airplane_manual_longtext_cases.json`。
@@ -49,8 +49,9 @@ runner 并复用它做 UI gate。
 - UI gate 假设 long-text API gate 已经把语料 materialize、bind、drain embedding queue。
 - scheduler 生成覆盖率不归 Attune 默认阻断；Attune 默认阻断 search、chat grounding/safety、
   answer budget、multiturn 和 UI。
-- `ATTUNE_K3_LONGTEXT_PDF_OCR=0` 是默认 CI 隔离策略；开启 OCR 时要把 PDF OCR 卡顿、
-  scheduler OCR timeout、metadata-only degradation 单独归档，不和向量/search/chat 性能混算。
+- `ATTUNE_K3_LONGTEXT_PDF_OCR=1` 是默认综合策略；设置为 `0` 才是显式 CI 隔离策略。
+  开启 OCR 时要把 PDF OCR 卡顿、scheduler OCR timeout、metadata-only degradation
+  单独归档，不和向量/search/chat 性能混算。
 - 如果 Attune server 跑在 NAS/K3 上，long-text API gate 必须在 NAS/K3 本机执行，或使用明确的
   NAS/K3 server-side corpus path；不能把 runner 本地路径传给 `/api/v1/index/bind`。
 

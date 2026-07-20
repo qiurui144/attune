@@ -333,16 +333,18 @@ contract. New tests should use `ATTUNE_E2E_LOCAL_SCHEDULER`. Longtext binds run
 in background mode by default and are observed through
 `/api/v1/index/status.background_scans`; set `ATTUNE_LONGTEXT_BIND_BACKGROUND=0`
 only when explicitly validating the legacy synchronous response. For very large
-OCR runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; background ingest uses a
-long-budget async OCR policy by default: 120s per document
-(`ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS`, clamped to 90-180s), 45s per
-scheduler page OCR (`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`, clamped to
-30-60s), and an 8s per-DPI render budget
-(`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`) so high-DPI render failures can
-fall through to lower-DPI candidates. Background ingest also uses an async page
-coverage policy: known page counts default to full-document coverage
-(`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`), unknown page counts fall back to 16
-pages, and image-size retries may drop as low as 48dpi. Interactive/synchronous
+OCR runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; background ingest follows
+the scheduler `ocr_ingest_contract.v1` shape by default: no document-level hard
+cutoff (`ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS=0`; non-zero overrides are
+clamped to at least 180s), 180s async job polling per rendered page
+(`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`, clamped to 30-180s), and a 30s
+per-DPI render budget (`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`, clamped to
+10-60s) so high-DPI render failures can fall through to lower-DPI candidates.
+Background ingest also uses an async page coverage policy: known page counts
+default to full-document coverage (`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`),
+unknown page counts fall back to 16 pages, image-size retries may drop as low as
+48dpi, and failed-page/consecutive-failure limits default to the current page
+limit unless a background/async-specific override is set. Interactive/synchronous
 PDF OCR keeps the shorter page and DPI defaults below.
 
 Attune-side defaults for this gate are intentionally platform-neutral:
@@ -362,9 +364,10 @@ Attune-side defaults for this gate are intentionally platform-neutral:
   Background ingest can override the page budget with
   `ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES`, `ATTUNE_ASYNC_PDF_OCR_MAX_PAGES`, or
   the scheduler-prefixed variants; `0` means all detected pages.
-  If OCR produces no usable text, or returns fatal payload/schema errors such as
-  `unsupported_payload`, ingest falls back to metadata-only indexing instead of
-  blocking the full bind on one scanned PDF.
+  Background ingest polls each scheduler OCR job to terminal state under the
+  long async budget before recording metadata-only fallback. Fatal
+  payload/schema errors such as `unsupported_payload` still fail closed early
+  because retrying later pages cannot make that payload contract valid.
 - Web UI scheduler answer jobs poll every 250ms, matching the Python/browser
   long-text UI gates, so the browser surface does not lose the 10s answer SLA
   to coarse job-poll latency after the scheduler has already completed.
@@ -460,11 +463,12 @@ flowchart TD
   embedding batches are running.
 - Scheduler PDF OCR never uploads raw PDFs to `kb.document.ocr_recognize`; it
   renders bounded page images and submits the semantic image contract. Page OCR
-  is enabled by default and bounded by page count, per-page timeout, total
-  timeout, DPI, and failure limits. Operators can disable it with
-  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0`.
-- If page rendering, Scheduler availability, or OCR output fails, scanned PDFs
-  still fall back honestly to metadata-only entries instead of blocking a bind.
+  is enabled by default and bounded by page count, per-page async job polling,
+  DPI, render timeout, and explicit failure limits. Operators can disable it
+  with `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0`.
+- If page rendering, Scheduler availability, or OCR output still fails after
+  the long async OCR policy reaches terminal state, scanned PDFs fall back
+  honestly to metadata-only entries instead of fabricating content.
 
 Scheduler-side gap resolution (2026-07-16):
 
