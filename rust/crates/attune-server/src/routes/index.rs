@@ -106,6 +106,11 @@ pub async fn bind_directory(
     Json(body): Json<BindRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let ingest_options = crate::local_scheduler::ingest_options_from_state(&state, None);
+    let ingest_options = if body.background {
+        ingest_options.with_background_ingest_ocr()
+    } else {
+        ingest_options
+    };
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
         (

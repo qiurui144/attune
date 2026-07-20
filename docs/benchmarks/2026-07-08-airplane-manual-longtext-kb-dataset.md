@@ -333,8 +333,14 @@ contract. New tests should use `ATTUNE_E2E_LOCAL_SCHEDULER`. Longtext binds run
 in background mode by default and are observed through
 `/api/v1/index/status.background_scans`; set `ATTUNE_LONGTEXT_BIND_BACKGROUND=0`
 only when explicitly validating the legacy synchronous response. For very large
-OCR runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; the OCR page loop itself
-remains bounded by Attune-side stop conditions below.
+OCR runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; background ingest uses a
+long-budget async OCR policy by default: 120s per document
+(`ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS`, clamped to 90-180s), 45s per
+scheduler page OCR (`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`, clamped to
+30-60s), and an 8s per-DPI render budget
+(`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`) so high-DPI render failures can
+fall through to lower-DPI candidates. The OCR page loop itself remains bounded
+by Attune-side stop conditions below.
 
 Attune-side defaults for this gate are intentionally platform-neutral:
 

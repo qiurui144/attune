@@ -61,7 +61,13 @@ fatal payload/schema 错误，Attune 会在第一页后直接停止该 PDF 的 p
 继续扫完整本 PDF。airplane longtext runner 对大语料 `/api/v1/index/bind`
 默认使用后台扫描，随后等待 `/api/v1/index/status.background_scans` 进入 `done`
 并继续执行 embedding drain、search、chat；如需兼容旧同步语义，可设置
-`ATTUNE_LONGTEXT_BIND_BACKGROUND=0`。
+`ATTUNE_LONGTEXT_BIND_BACKGROUND=0`。后台扫描会启用长预算 PDF OCR：文档级默认
+`120000ms`（可用 `ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS` 在 `90000..180000`
+内调整），单页 scheduler OCR 默认 `45000ms`（
+`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`，范围 `30000..60000`）。每个 DPI
+render 另有短 deadline，默认 `8000ms`（
+`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`），高 DPI render 超时或输出图像过大时
+会继续尝试低 DPI 候选。
 
 云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
 

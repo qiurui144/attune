@@ -92,6 +92,11 @@ impl IngestOptions {
         self.parser = self.parser.with_scheduler_timeout_ms(timeout_ms);
         self
     }
+
+    pub fn with_background_ingest_ocr(mut self) -> Self {
+        self.parser = self.parser.with_background_ingest_ocr();
+        self
+    }
 }
 
 pub fn enqueue_content_embeddings(
