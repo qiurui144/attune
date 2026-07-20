@@ -1048,6 +1048,22 @@ fn scheduler_ocr_error_is_fatal(message: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
+fn scheduler_ocr_error_should_retry_lower_dpi(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "ocr_layout_limit_exceeded",
+        "layout limit",
+        "layout_limit",
+        "line limit",
+        "max_lines",
+        "too many lines",
+        "output_too_large",
+        "result too large",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
 fn scheduler_array_text(value: &Value) -> Option<String> {
     let arr = value.as_array()?;
     let mut parts = Vec::new();
@@ -2395,6 +2411,14 @@ fn try_scheduler_pdf_page_ocr_from_path_with_budget(
                         );
                         stopped_on_fatal_error = true;
                         break;
+                    }
+                    if scheduler_ocr_error_should_retry_lower_dpi(&message) {
+                        log::warn!(
+                            "scheduler PDF page OCR retrying {} page {} at lower DPI after scheduler OCR terminal error",
+                            path.display(),
+                            page
+                        );
+                        continue;
                     }
                     break;
                 }
@@ -5665,6 +5689,125 @@ mod tests {
         let log = std::fs::read_to_string(render_log).unwrap();
         assert!(log.contains("dpi=200"), "log={log}");
         assert!(log.contains("dpi=120"), "log={log}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_retries_lower_dpi_after_layout_limit_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_ENABLED",
+            "ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 1'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        install_test_pdftoppm(&pdftoppm, dir.path());
+        for exe in [&pdfinfo, &pdftoppm] {
+            let mut perms = std::fs::metadata(exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(exe, perms).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "16777216");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "200");
+        std::env::set_var("ATTUNE_BACKGROUND_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("layout-limit-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let high_dpi_job = "ocr-layout-high";
+        let low_dpi_job = "ocr-layout-low";
+        let (base, requests, handle) = start_scheduler_sequence_mock(vec![
+            scheduler_async_submit(Some(high_dpi_job), Duration::ZERO),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": high_dpi_job,
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "done",
+                    "phase": "done",
+                    "outputs": {
+                        "schema_version": "ocr_result.v1",
+                        "task": "kb.document.ocr_recognize",
+                        "status": "error",
+                        "text": "",
+                        "pages": [{"page_index": 1, "text": ""}],
+                        "layout": [],
+                        "lines": [],
+                        "error": {
+                            "code": "ocr_layout_limit_exceeded",
+                            "detail": "OCR detector line limit exceeded"
+                        }
+                    }
+                }),
+            ),
+            scheduler_cancel_reply(high_dpi_job, 200),
+            scheduler_async_submit(Some(low_dpi_job), Duration::ZERO),
+            SchedulerSequenceReply::json(
+                200,
+                serde_json::json!({
+                    "schema_version": "job_status.v2",
+                    "job_id": low_dpi_job,
+                    "task": "kb.document.ocr_recognize",
+                    "model": "ocr-rec",
+                    "scheduled_as": "async",
+                    "status": "done",
+                    "phase": "done",
+                    "outputs": scheduler_native_ocr_outputs(1, "low DPI recovered text")
+                }),
+            ),
+        ]);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000)
+            .with_background_ingest_ocr();
+
+        let result =
+            try_scheduler_pdf_page_ocr_from_path_with_budget(
+                &pdf,
+                300,
+                &options,
+                SchedulerPdfOcrBudget::new(&options),
+            )
+            .expect("layout-limit OCR error should retry lower DPI and recover text");
+        assert!(result.complete, "result={result:?}");
+        assert!(
+            result.text.contains("low DPI recovered text"),
+            "text={}",
+            result.text
+        );
+        handle.join().unwrap();
+        let requests = requests.lock().unwrap();
+        let submissions = requests
+            .iter()
+            .filter(|line| line.starts_with("POST /kb/tasks/kb.document.ocr_recognize:async "))
+            .count();
+        assert_eq!(submissions, 2, "requests={requests:?}");
+        assert!(
+            requests
+                .iter()
+                .any(|line| line.starts_with("POST /jobs/ocr-layout-high:cancel ")),
+            "requests={requests:?}"
+        );
     }
 
     #[cfg(unix)]

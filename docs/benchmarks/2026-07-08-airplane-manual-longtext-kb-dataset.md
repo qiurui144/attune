@@ -339,7 +339,8 @@ cutoff (`ATTUNE_BACKGROUND_PDF_OCR_MAX_TOTAL_MS=0`; non-zero overrides are
 clamped to at least 180s), 180s async job polling per rendered page
 (`ATTUNE_BACKGROUND_PDF_OCR_PAGE_TIMEOUT_MS`, clamped to 30-180s), and a 30s
 per-DPI render budget (`ATTUNE_BACKGROUND_PDF_OCR_RENDER_TIMEOUT_MS`, clamped to
-10-60s) so high-DPI render failures can fall through to lower-DPI candidates.
+10-60s) so high-DPI render failures, oversized images, and scheduler
+layout/line-limit terminal errors can fall through to lower-DPI candidates.
 Background ingest also uses an async page coverage policy: known page counts
 default to full-document coverage (`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`),
 unknown page counts fall back to 16 pages, image-size retries may drop as low as

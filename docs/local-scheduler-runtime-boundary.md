@@ -116,8 +116,8 @@ flowchart LR
   truly failed. Background ingest uses the long-budget async OCR profile,
   including full detected-page coverage by default, no default document-level
   hard cutoff, 180s per-page job polling, a 30s render budget, an unknown-page
-  fallback cap, and lower-DPI image-size retries; interactive PDF OCR keeps the
-  shorter bounded defaults.
+  fallback cap, and lower-DPI retries for image-size and layout/line-limit
+  terminal errors; interactive PDF OCR keeps the shorter bounded defaults.
 - `/api/v1/ai-stack`, `/api/v1/status`, and edge-scheduler readiness routes report scheduler
   capability only; they do not inspect concrete local runtimes.
 - Scheduler contract fixtures, runtime profile cache/TTL, and classified
