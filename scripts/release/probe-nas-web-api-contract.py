@@ -297,6 +297,70 @@ def gate_result(name: str, fn) -> dict[str, Any]:
         }
 
 
+def scheduler_observations_from_gates(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Surface scheduler instability observed while probing Attune's contract."""
+    observations: list[dict[str, Any]] = []
+    by_name = {str(item.get("name")): item for item in results}
+
+    scheduler_probe = by_name.get("scheduler_probe")
+    if scheduler_probe:
+        if not scheduler_probe.get("pass"):
+            observations.append({
+                "severity": "error",
+                "source": "scheduler_probe",
+                "message": "scheduler instability: Attune could not validate scheduler discovery",
+                "error": scheduler_probe.get("error"),
+            })
+        else:
+            detail = scheduler_probe.get("detail") if isinstance(scheduler_probe.get("detail"), dict) else {}
+            if detail.get("found") is False:
+                observations.append({
+                    "severity": "warning",
+                    "source": "scheduler_probe",
+                    "message": "scheduler instability: scheduler discovery returned found=false",
+                    "checked": detail.get("checked"),
+                })
+
+    chat_scheduler = by_name.get("chat_scheduler")
+    if chat_scheduler:
+        if not chat_scheduler.get("pass"):
+            observations.append({
+                "severity": "error",
+                "source": "chat_scheduler",
+                "message": "scheduler instability: scheduler-backed chat gate failed",
+                "error": chat_scheduler.get("error"),
+            })
+        else:
+            detail = chat_scheduler.get("detail") if isinstance(chat_scheduler.get("detail"), dict) else {}
+            job = detail.get("job") if isinstance(detail.get("job"), dict) else None
+            if job:
+                observations.append({
+                    "severity": "info",
+                    "source": "chat_scheduler",
+                    "message": "scheduler job telemetry observed by Attune",
+                    "job_id": job.get("job_id"),
+                    "status": job.get("status"),
+                    "model": job.get("model"),
+                    "latency_ms": job.get("latency_ms"),
+                    "queue_wait_ms": job.get("queue_wait_ms"),
+                })
+                if job.get("latency_ms") is None or job.get("queue_wait_ms") is None:
+                    observations.append({
+                        "severity": "warning",
+                        "source": "chat_scheduler",
+                        "message": "scheduler instability: scheduler job omitted latency or queue telemetry",
+                        "job_id": job.get("job_id"),
+                    })
+            elif detail.get("scheduler_metadata") is False:
+                observations.append({
+                    "severity": "warning",
+                    "source": "chat_scheduler",
+                    "message": "scheduler instability: chat response did not expose scheduler metadata",
+                })
+
+    return observations
+
+
 def run_live(args: argparse.Namespace) -> dict[str, Any]:
     base_url = normalize_base(args.base_url)
     server_scheduler_base = normalize_scheduler_base(args.server_scheduler_base)
@@ -519,6 +583,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
     token_value = token_holder.get("token", "")
     results.append(gate_result("cleanup", cleanup_gate))
     failures = [item for item in results if not item["pass"]]
+    scheduler_observations = scheduler_observations_from_gates(results)
     return {
         "mode": "api_contract",
         "dry_run": False,
@@ -527,6 +592,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         "server_scheduler_base": server_scheduler_base,
         "token_len": len(token_value),
         "gates": results,
+        "scheduler_observations": scheduler_observations,
         "pass": not failures,
         "failures": failures,
     }
@@ -557,7 +623,9 @@ def dry_run(args: argparse.Namespace) -> dict[str, Any]:
             "bind_dir must be a server-side path visible to the Attune server",
             "server_scheduler_base is persisted into Attune settings and is evaluated from the NAS host",
             "scheduler_url is used only by the CI runner for scheduler probes or job polling",
+            "scheduler instability observations are emitted from scheduler_probe, chat_scheduler, and job telemetry",
         ],
+        "scheduler_observations": [],
         "pass": True,
     }
 

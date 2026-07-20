@@ -99,6 +99,10 @@ CI 分层：
 - write/download paths: multipart upload、server-side folder bind、search、export CSV。
 - chat: `/api/v1/chat`，需要 scheduler 时校验 `local_scheduler` metadata 并 polling job 到 terminal success。
 
+报告根对象包含 `scheduler_observations`。这里集中暴露 Attune 在 scheduler 接入链路上观测到的
+不稳定因素，例如 discovery 失败、scheduler-backed chat/job 失败、job 缺少 latency/queue telemetry，
+以及实际 job latency/queue_wait 样本。这里不设置 scheduler 性能阈值；阈值归 scheduler CI。
+
 不纳入默认强制门的接口：
 
 - 需要真实第三方凭据或外部服务的 Email/WebDAV/RSS/cloud account 登录。

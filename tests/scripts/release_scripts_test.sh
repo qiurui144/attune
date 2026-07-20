@@ -154,11 +154,14 @@ grep -q "vault" "$TMP/nas-web-api-contract-dry-run.txt"
 grep -q "settings_scheduler" "$TMP/nas-web-api-contract-dry-run.txt"
 grep -q "index_bind" "$TMP/nas-web-api-contract-dry-run.txt"
 grep -q "chat_scheduler" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "scheduler_observations" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "scheduler instability" "$TMP/nas-web-api-contract-dry-run.txt"
 
 test -f "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "ATTUNE_K3_LONGTEXT_MANIFEST" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "ATTUNE_K3_SERVER_SCHEDULER_BASE" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "scheduler self-test" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
+grep -q "scheduler_observations" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "cross-host" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 
 bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \

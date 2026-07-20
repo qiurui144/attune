@@ -303,7 +303,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-/etc/default/attune-server
 WorkingDirectory=/var/lib/attune
-ExecStart=/usr/bin/attune-server-headless --host ${ATTUNE_HOST} --port ${ATTUNE_PORT} ${ATTUNE_EXTRA_ARGS}
+ExecStart=/usr/bin/attune-server-headless --host ${ATTUNE_HOST} --port ${ATTUNE_PORT} $ATTUNE_EXTRA_ARGS
 Restart=on-failure
 RestartSec=5
 
