@@ -34,7 +34,7 @@ const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_PAGE_TIMEOUT_MS: usize = 180_000;
 const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_RENDER_TIMEOUT_MS: usize = 30_000;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
 const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 72;
-const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI: usize = 48;
+const DEFAULT_BACKGROUND_SCHEDULER_PDF_OCR_MIN_DPI: usize = 24;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 const SCHEDULER_TASK_HTTP_MAX_TIMEOUT: Duration = Duration::from_secs(10);
 const SCHEDULER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -1870,7 +1870,9 @@ fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32, options: &ParseOptions) 
     .clamp(min_dpi as usize, 1200) as u32;
 
     let mut candidates = Vec::new();
-    for dpi in [base, max_dpi, 200, 180, 160, 150, 120, 96, 72, 60, min_dpi] {
+    for dpi in [
+        base, max_dpi, 200, 180, 160, 150, 120, 96, 72, 60, 48, 36, min_dpi,
+    ] {
         let dpi = dpi.clamp(min_dpi, max_dpi);
         if !candidates.contains(&dpi) {
             candidates.push(dpi);
@@ -3934,6 +3936,14 @@ mod tests {
         let background_candidates = scheduler_pdf_ocr_dpi_candidates(300, &background);
         assert!(
             background_candidates.contains(&48),
+            "candidates={background_candidates:?}"
+        );
+        assert!(
+            background_candidates.contains(&36),
+            "candidates={background_candidates:?}"
+        );
+        assert!(
+            background_candidates.contains(&24),
             "candidates={background_candidates:?}"
         );
     }

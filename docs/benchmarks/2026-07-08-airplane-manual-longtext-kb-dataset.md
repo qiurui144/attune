@@ -344,7 +344,7 @@ layout/line-limit terminal errors can fall through to lower-DPI candidates.
 Background ingest also uses an async page coverage policy: known page counts
 default to full-document coverage (`ATTUNE_BACKGROUND_PDF_OCR_MAX_PAGES=0`),
 unknown page counts fall back to 16 pages, image-size retries may drop as low as
-48dpi, and failed-page/consecutive-failure limits default to the current page
+24dpi, and failed-page/consecutive-failure limits default to the current page
 limit unless a background/async-specific override is set. Interactive/synchronous
 PDF OCR keeps the shorter page and DPI defaults below.
 
