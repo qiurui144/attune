@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Evaluate multi-turn airplane-manual long-text RAG behavior.
+"""Evaluate multi-turn long-text RAG behavior.
 
-The gate is intentionally small and strict. It exercises the failure mode that
-showed up on the local scheduler pilot: a correct first answer can drift on a
-follow-up, or leak procedural checklist steps when the user asks for real-world
-flight use.
+The airplane corpus keeps the original A320 QRH default flow. Other long-text
+manifests can define a ``multiturn`` section with corpus-specific turns so this
+gate also covers non-aviation document sets.
 """
 from __future__ import annotations
 
@@ -68,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--token", default="")
     parser.add_argument("--profile", default="edge_scheduler_30b")
-    parser.add_argument("--query-id", default=DEFAULT_QUERY_ID)
+    parser.add_argument("--query-id", default=None)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--poll-timeout", type=float, default=180.0)
     parser.add_argument("--poll-interval", type=float, default=0.25)
@@ -109,7 +108,11 @@ def find_primary_query(manifest: dict[str, Any], profile: str, query_id: str) ->
     raise SystemExit(f"query {query_id!r} is not available in profile {profile!r}")
 
 
-def forbidden_source_hit(content: str, citations: list[Any]) -> bool:
+def forbidden_source_hit(
+    content: str,
+    citations: list[Any],
+    forbidden_terms: list[str] | None = None,
+) -> bool:
     fields = [content]
     for citation in citations:
         if not isinstance(citation, dict):
@@ -134,7 +137,8 @@ def forbidden_source_hit(content: str, citations: list[Any]) -> bool:
                 if value is not None:
                     fields.append(flatten_json(value) if not isinstance(value, str) else value)
     haystack = "\n".join(fields).casefold()
-    return any(term in haystack for term in FORBIDDEN_FOLLOWUP_SOURCES)
+    terms = forbidden_terms if forbidden_terms is not None else FORBIDDEN_FOLLOWUP_SOURCES
+    return any(term.casefold() in haystack for term in terms)
 
 
 def history_append(history: list[dict[str, str]], role: str, content: str) -> None:
@@ -151,6 +155,7 @@ def run_turn(
     expected_terms: list[str],
     require_refusal: bool = False,
     reject_forbidden_sources: bool = False,
+    forbidden_terms: list[str] | None = None,
 ) -> dict[str, Any]:
     start = time.perf_counter()
     chat_ms, response = post_chat(args, message, history)
@@ -177,7 +182,11 @@ def run_turn(
     term_hit = expected_term_hit(content, expected_terms)
     refusal_hit = refuses_operational_advice(content) and not unsafe_operational_advice(content)
     unsafe_hit = unsafe_operational_advice(content)
-    forbidden_hit = forbidden_source_hit(content, citations) if reject_forbidden_sources else False
+    forbidden_hit = (
+        forbidden_source_hit(content, citations, forbidden_terms)
+        if reject_forbidden_sources
+        else False
+    )
     passed = cite_hit and not forbidden_hit
     if require_refusal:
         passed = passed and refusal_hit
@@ -214,13 +223,8 @@ def run_turn(
     }
 
 
-def evaluate(args: argparse.Namespace) -> dict[str, Any]:
-    manifest = load_manifest(args.manifest)
-    primary = find_primary_query(manifest, args.profile, args.query_id)
-    history: list[dict[str, str]] = []
-    rows: list[dict[str, Any]] = []
-
-    turn_specs = [
+def default_turn_specs(primary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
         {
             "turn_id": "initial_grounded_answer",
             "message": primary["query"],
@@ -247,6 +251,70 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         },
     ]
 
+
+def manifest_turn_specs(manifest: dict[str, Any], primary: dict[str, Any]) -> list[dict[str, Any]] | None:
+    config = manifest.get("multiturn")
+    if not isinstance(config, dict):
+        return None
+    raw_turns = config.get("turns")
+    if not isinstance(raw_turns, list) or not raw_turns:
+        return None
+    default_forbidden = config.get("forbidden_followup_terms")
+    if not isinstance(default_forbidden, list):
+        default_forbidden = None
+
+    turns: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_turns, 1):
+        if not isinstance(raw, dict):
+            raise SystemExit(f"manifest multiturn turn #{index} must be an object")
+        turn_id = str(raw.get("turn_id") or raw.get("id") or f"turn_{index}")
+        if raw.get("message_from_query"):
+            message = primary["query"]
+        else:
+            message = raw.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise SystemExit(f"manifest multiturn turn {turn_id!r} is missing message")
+        expected_terms = raw.get("expected_terms", primary.get("expect_any", []))
+        if not isinstance(expected_terms, list):
+            expected_terms = []
+        forbidden_terms = raw.get("forbidden_terms", default_forbidden)
+        if not isinstance(forbidden_terms, list):
+            forbidden_terms = None
+        turns.append(
+            {
+                "turn_id": turn_id,
+                "message": message,
+                "expected_terms": [str(term) for term in expected_terms],
+                "require_refusal": bool(raw.get("require_refusal")),
+                "reject_forbidden_sources": bool(raw.get("reject_forbidden_sources")),
+                "forbidden_terms": [str(term) for term in forbidden_terms] if forbidden_terms else None,
+            }
+        )
+    return turns
+
+
+def resolve_query_id(args: argparse.Namespace, manifest: dict[str, Any]) -> str:
+    if args.query_id:
+        return str(args.query_id)
+    config = manifest.get("multiturn")
+    if isinstance(config, dict):
+        value = config.get("default_query_id")
+        if isinstance(value, str) and value.strip():
+            return value
+    return DEFAULT_QUERY_ID
+
+
+def evaluate(args: argparse.Namespace) -> dict[str, Any]:
+    manifest = load_manifest(args.manifest)
+    query_id = resolve_query_id(args, manifest)
+    primary = find_primary_query(manifest, args.profile, query_id)
+    history: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
+    turn_specs = manifest_turn_specs(manifest, primary)
+    turn_spec_source = "manifest" if turn_specs is not None else "airplane_default"
+    if turn_specs is None:
+        turn_specs = default_turn_specs(primary)
+
     for spec in turn_specs:
         try:
             rows.append(
@@ -259,6 +327,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     spec.get("expected_terms", []),
                     require_refusal=bool(spec.get("require_refusal")),
                     reject_forbidden_sources=bool(spec.get("reject_forbidden_sources")),
+                    forbidden_terms=spec.get("forbidden_terms"),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - report per-turn failure.
@@ -287,7 +356,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     summary = {
         "manifest": str(args.manifest),
         "profile": args.profile,
-        "query_id": args.query_id,
+        "query_id": query_id,
+        "turn_spec_source": turn_spec_source,
         "turns": len(rows),
         "passed": sum(1 for row in rows if row.get("passed")),
         "all_passed": all(row.get("passed") for row in rows),

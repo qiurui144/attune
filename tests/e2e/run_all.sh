@@ -226,7 +226,7 @@ SCRIPTS=(
   memory_moat_stress_loop_e2e.py
 )
 [ "$RUN_STANDARD_CHAT" = "1" ] && SCRIPTS+=(memory_moat_chat_e2e.py)
-[ "$WITH_LONGTEXT" = "1" ] && SCRIPTS+=(airplane_manual_longtext_e2e.py)
+[ "$WITH_LONGTEXT" = "1" ] && SCRIPTS+=(longtext_corpora_e2e.py)
 
 export ATTUNE_BASE_URL="http://localhost:$PORT"
 
@@ -237,7 +237,7 @@ for s in "${SCRIPTS[@]}"; do
   PYTHONUNBUFFERED=1 python3 "$REPO/tests/e2e/$s" > "$script_log" 2>&1
   rc=$?
   tail_lines="${ATTUNE_E2E_LOG_TAIL_LINES:-2}"
-  if [ "$s" = "airplane_manual_longtext_e2e.py" ]; then
+  if [ "$s" = "airplane_manual_longtext_e2e.py" ] || [ "$s" = "longtext_corpora_e2e.py" ]; then
     tail_lines="${ATTUNE_E2E_LONGTEXT_LOG_TAIL_LINES:-40}"
   fi
   tail -n "$tail_lines" "$script_log"

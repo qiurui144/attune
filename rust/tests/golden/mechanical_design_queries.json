@@ -1,0 +1,116 @@
+{
+  "_doc": "Golden retrieval queries generated from mechanical_design_longtext_cases.json.",
+  "_version": "2026-07-20",
+  "_corpus_pins": {
+    "mechanical-design-handbook": "commit:86832fd643cb1f9cfa1188d242d34b62dd52e41f"
+  },
+  "scenarios": [
+    {
+      "id": "MECH-LONG",
+      "name": "Mechanical design handbook / Chinese OCR long-text KB",
+      "corpus": "mechanical-design-handbook",
+      "queries": [
+        {
+          "id": "mdh_volume_1_overview",
+          "query": "机械设计手册第六版第1卷主要覆盖哪些基础设计资料、机械制图或工程材料内容？请给出引用。",
+          "difficulty": "easy",
+          "acceptable_hits": [
+            "mechanical_design_volume_1"
+          ],
+          "min_hit_in_top_k": 3
+        },
+        {
+          "id": "mdh_volume_2_connection_spring_bearing",
+          "query": "查找机械设计手册中连接、紧固件、弹簧、轴承或轴类零件的资料，说明应优先引用哪一卷。",
+          "difficulty": "easy",
+          "acceptable_hits": [
+            "mechanical_design_volume_2"
+          ],
+          "min_hit_in_top_k": 3
+        },
+        {
+          "id": "mdh_gear_transmission_design",
+          "query": "齿轮传动设计参数、强度校核或传动选型资料应查机械设计手册第几卷？回答必须带引用。",
+          "difficulty": "medium",
+          "acceptable_hits": [
+            "mechanical_design_volume_3"
+          ],
+          "min_hit_in_top_k": 3
+        },
+        {
+          "id": "mdh_belt_chain_vs_gear",
+          "query": "对比齿轮传动、带传动和链传动在选型检索时应查哪些资料，回答要区分主题并引用来源。",
+          "difficulty": "medium",
+          "acceptable_hits": [
+            "mechanical_design_volume_3"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "mdh_hydraulic_pneumatic_lookup",
+          "query": "液压传动、气压传动、润滑或密封相关资料在机械设计手册中应查哪一卷？",
+          "difficulty": "medium",
+          "acceptable_hits": [
+            "mechanical_design_volume_4"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "mdh_control_mechatronics_reliability",
+          "query": "机械控制、机电一体化、现代设计方法或可靠性设计应优先检索机械设计手册哪一卷？",
+          "difficulty": "medium",
+          "acceptable_hits": [
+            "mechanical_design_volume_5"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "mdh_cross_volume_shaft_bearing_transmission",
+          "query": "我要设计一套含轴、轴承和齿轮传动的机械系统，应该跨哪些卷检索？请分步骤说明并引用来源。",
+          "difficulty": "hard",
+          "acceptable_hits": [
+            "mechanical_design_volume_2",
+            "mechanical_design_volume_3"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "mdh_cross_volume_hydraulic_control",
+          "query": "如果机械系统同时涉及液压执行机构和电控/机电一体化控制，应怎样在手册第4卷和第5卷之间分工检索？",
+          "difficulty": "hard",
+          "acceptable_hits": [
+            "mechanical_design_volume_4",
+            "mechanical_design_volume_5"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "mdh_table_formula_ocr_probe",
+          "query": "请检索机械设计手册中表格、公式或设计参数密集的内容，并说明 OCR 结果是否足以支撑引用。",
+          "difficulty": "hard",
+          "acceptable_hits": [
+            "mechanical_design_volume_1",
+            "mechanical_design_volume_2",
+            "mechanical_design_volume_3",
+            "mechanical_design_volume_4",
+            "mechanical_design_volume_5"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "mdh_all_volumes_inventory",
+          "query": "机械设计手册第六版 PDF 语料库当前入库了哪些卷册？按卷号列出并给出引用。",
+          "difficulty": "easy",
+          "acceptable_hits": [
+            "mechanical_design_volume_1",
+            "mechanical_design_volume_2",
+            "mechanical_design_volume_3",
+            "mechanical_design_volume_4",
+            "mechanical_design_volume_5"
+          ],
+          "min_hit_in_top_k": 10
+        }
+      ]
+    }
+  ]
+}

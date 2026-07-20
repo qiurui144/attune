@@ -16,15 +16,20 @@ PASSWORD="${ATTUNE_K3_E2E_PASSWORD:-e2e-pass-2026}"
 BIND_DIR="${ATTUNE_K3_BACKGROUND_BIND_DIR:-}"
 LONGTEXT_MANIFEST="${ATTUNE_K3_LONGTEXT_MANIFEST:-}"
 LONGTEXT_E2E="${ATTUNE_K3_LONGTEXT_E2E:-0}"
+LONGTEXT_CORPORA="${ATTUNE_K3_LONGTEXT_CORPORA:-airplane,mechanical_design}"
 LONGTEXT_PROFILE="${ATTUNE_K3_LONGTEXT_PROFILE:-edge_scheduler_comprehensive}"
 LONGTEXT_LIMIT_DOCS="${ATTUNE_K3_LONGTEXT_LIMIT_DOCS:-}"
 LONGTEXT_CORPUS_DIR="${ATTUNE_K3_LONGTEXT_CORPUS_DIR:-}"
+MECHANICAL_LONGTEXT_CORPUS_DIR="${ATTUNE_K3_MECHANICAL_DESIGN_LONGTEXT_CORPUS_DIR:-}"
 LONGTEXT_REMOTE_RUNNER="${ATTUNE_K3_LONGTEXT_REMOTE_RUNNER:-}"
 LONGTEXT_REMOTE_MANIFEST="${ATTUNE_K3_LONGTEXT_REMOTE_MANIFEST:-}"
+MECHANICAL_LONGTEXT_REMOTE_MANIFEST="${ATTUNE_K3_MECHANICAL_DESIGN_LONGTEXT_REMOTE_MANIFEST:-}"
 LONGTEXT_REMOTE_RESULTS="${ATTUNE_K3_LONGTEXT_REMOTE_RESULTS:-}"
+LONGTEXT_REPEAT_CHAT="${ATTUNE_K3_LONGTEXT_REPEAT_CHAT:-3}"
 LONGTEXT_REQUIRE_SCHEDULER_GENERATION="${ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION:-0}"
 LONGTEXT_PDF_OCR="${ATTUNE_K3_LONGTEXT_PDF_OCR:-1}"
 AIRPLANE_LONGTEXT_REPO_URL="https://github.com/shiroinekotfs/airplane-manual-collection.git"
+MECHANICAL_LONGTEXT_REPO_URL="https://github.com/GEQfa/handbook-of-mechanical-design.git"
 SERVER_SCHEDULER_BASE="${ATTUNE_K3_SERVER_SCHEDULER_BASE:-http://127.0.0.1:8090}"
 SCHEDULER_CHAT_MODEL="${ATTUNE_K3_SCHEDULER_CHAT_MODEL:-llm-summary}"
 CONFIGURE_SCHEDULER_AI="${ATTUNE_K3_CONFIGURE_SCHEDULER_AI:-}"
@@ -121,14 +126,19 @@ Environment:
   ATTUNE_K3_SSH_PASSWORD        Password for non-interactive SSH/scp via sshpass -e.
                                 Omit when key-based SSH is configured.
   ATTUNE_K3_API_CONTRACT=0      Skip the strict NAS Web API contract probe.
-  ATTUNE_K3_LONGTEXT_E2E=1      Run the full airplane GitHub long-text API gate
+  ATTUNE_K3_LONGTEXT_E2E=1      Run the full standard GitHub long-text API gate
                                 on the NAS host before the optional UI gate.
+  ATTUNE_K3_LONGTEXT_CORPORA    Comma-separated corpora for the API gate.
+                                Defaults to airplane,mechanical_design.
   ATTUNE_K3_LONGTEXT_PROFILE    Long-text profile. Defaults to edge_scheduler_comprehensive.
   ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1
                                 Require every non-safety long-text chat row to use
                                 scheduler answer generation. Defaults to 0; scheduler
                                 generation coverage is reported but does not block Attune.
-  ATTUNE_K3_LONGTEXT_PDF_OCR=0  Disable server-side PDF OCR for the airplane long-text
+  ATTUNE_K3_LONGTEXT_REPEAT_CHAT
+                                Repeat count for post-ingest search/chat/multiturn stability suite.
+                                Defaults to 3.
+  ATTUNE_K3_LONGTEXT_PDF_OCR=0  Disable server-side PDF OCR for the long-text
                                 bind. Defaults to 1; Attune's bounded PDF OCR path
                                 is part of this gate.
   ATTUNE_K3_LONGTEXT_MANIFEST   Local JSON manifest for the optional long-text UI gate.
@@ -163,14 +173,20 @@ fi
 if [ -z "$LONGTEXT_CORPUS_DIR" ]; then
   LONGTEXT_CORPUS_DIR="$REMOTE_TMP/airplane-manual-collection"
 fi
+if [ -z "$MECHANICAL_LONGTEXT_CORPUS_DIR" ]; then
+  MECHANICAL_LONGTEXT_CORPUS_DIR="$REMOTE_TMP/handbook-of-mechanical-design"
+fi
 if [ -z "$LONGTEXT_REMOTE_RUNNER" ]; then
-  LONGTEXT_REMOTE_RUNNER="$REMOTE_TMP/airplane-longtext-runner"
+  LONGTEXT_REMOTE_RUNNER="$REMOTE_TMP/longtext-corpora-runner"
 fi
 if [ -z "$LONGTEXT_REMOTE_MANIFEST" ]; then
   LONGTEXT_REMOTE_MANIFEST="$REMOTE_TMP/attune-airplane-longtext-$LONGTEXT_PROFILE.json"
 fi
+if [ -z "$MECHANICAL_LONGTEXT_REMOTE_MANIFEST" ]; then
+  MECHANICAL_LONGTEXT_REMOTE_MANIFEST="$REMOTE_TMP/attune-mechanical-design-longtext-$LONGTEXT_PROFILE.json"
+fi
 if [ -z "$LONGTEXT_REMOTE_RESULTS" ]; then
-  LONGTEXT_REMOTE_RESULTS="$REMOTE_TMP/airplane-longtext-results"
+  LONGTEXT_REMOTE_RESULTS="$REMOTE_TMP/longtext-corpora-results"
 fi
 if [ -z "$CONFIGURE_SCHEDULER_AI" ]; then
   if [ -n "$SCHEDULER_URL" ]; then
@@ -209,6 +225,11 @@ esac
 case "$LONGTEXT_PDF_OCR" in
   0|1) ;;
   *) echo "ATTUNE_K3_LONGTEXT_PDF_OCR must be 0 or 1, got: $LONGTEXT_PDF_OCR" >&2; exit 2 ;;
+esac
+case "$LONGTEXT_REPEAT_CHAT" in
+  ''|*[!0-9]*) echo "ATTUNE_K3_LONGTEXT_REPEAT_CHAT must be a positive integer, got: $LONGTEXT_REPEAT_CHAT" >&2; exit 2 ;;
+  0) echo "ATTUNE_K3_LONGTEXT_REPEAT_CHAT must be a positive integer, got: $LONGTEXT_REPEAT_CHAT" >&2; exit 2 ;;
+  *) ;;
 esac
 
 mkdir -p "$REPORTS_DIR"
@@ -262,12 +283,17 @@ report_header() {
     echo "- Run NAS Web API contract: $API_CONTRACT"
     echo "- Long-text manifest: ${LONGTEXT_MANIFEST:-<none>}"
     echo "- Long-text E2E: $LONGTEXT_E2E"
+    echo "- Long-text corpora: $LONGTEXT_CORPORA"
     echo "- Airplane long-text repo: $AIRPLANE_LONGTEXT_REPO_URL"
+    echo "- Mechanical Design long-text repo: $MECHANICAL_LONGTEXT_REPO_URL"
     echo "- Long-text profile: $LONGTEXT_PROFILE"
-    echo "- Long-text corpus dir: $LONGTEXT_CORPUS_DIR"
+    echo "- Airplane long-text corpus dir: $LONGTEXT_CORPUS_DIR"
+    echo "- Mechanical Design long-text corpus dir: $MECHANICAL_LONGTEXT_CORPUS_DIR"
     echo "- Long-text remote runner: $LONGTEXT_REMOTE_RUNNER"
-    echo "- Long-text remote manifest: $LONGTEXT_REMOTE_MANIFEST"
+    echo "- Airplane long-text remote manifest: $LONGTEXT_REMOTE_MANIFEST"
+    echo "- Mechanical Design long-text remote manifest: $MECHANICAL_LONGTEXT_REMOTE_MANIFEST"
     echo "- Long-text remote results: $LONGTEXT_REMOTE_RESULTS"
+    echo "- Long-text repeat chat runs: $LONGTEXT_REPEAT_CHAT"
     echo "- Require long-text scheduler generation: $LONGTEXT_REQUIRE_SCHEDULER_GENERATION"
     echo "- Long-text PDF OCR guard: ATTUNE_K3_LONGTEXT_PDF_OCR=$LONGTEXT_PDF_OCR"
     echo "- Skip RVV performance gate: $SKIP_RVV_PERFORMANCE"
@@ -363,12 +389,12 @@ configure_longtext_pdf_ocr_guard() {
 
   append_report "## Long-text PDF OCR Guard"
   if [ "$LONGTEXT_PDF_OCR" = "1" ]; then
-    append_report "Server-side PDF OCR remains enabled for airplane long-text bind."
+    append_report "Server-side PDF OCR remains enabled for standard long-text corpus bind."
     remote "rm -f /etc/systemd/system/attune-server.service.d/90-attune-k3-longtext-pdf-ocr.conf && systemctl daemon-reload && systemctl restart attune-server.service && systemctl is-active attune-server.service"
     return
   fi
 
-  append_report "Server-side PDF OCR disabled for airplane long-text bind (ATTUNE_K3_LONGTEXT_PDF_OCR=0). This is an explicit operator override; the default gate keeps Attune's bounded PDF OCR path enabled."
+  append_report "Server-side PDF OCR disabled for standard long-text corpus bind (ATTUNE_K3_LONGTEXT_PDF_OCR=0). This is an explicit operator override; the default gate keeps Attune's bounded PDF OCR path enabled."
   remote "mkdir -p /etc/systemd/system/attune-server.service.d && printf '%s\n' '[Service]' 'Environment=ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_LOCAL_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_PDF_OCR_ENABLED=0' > /etc/systemd/system/attune-server.service.d/90-attune-k3-longtext-pdf-ocr.conf && systemctl daemon-reload && systemctl restart attune-server.service && systemctl is-active attune-server.service"
 }
 
@@ -383,8 +409,11 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
   append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, and chat scheduler metadata."
-  append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=1 clears any OCR-disabling systemd drop-in before airplane bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=0 only to isolate retrieval/vector behavior."
-  append_report "- Airplane GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1, run tests/e2e/airplane_manual_longtext_e2e.py on the NAS host with source repo $AIRPLANE_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized corpus under $LONGTEXT_CORPUS_DIR, then copy the generated manifest back for the optional UI gate; scheduler generation coverage is reported and only blocks when ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1."
+  append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=1 clears any OCR-disabling systemd drop-in before corpus bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=0 only to isolate retrieval/vector behavior."
+  append_report "- Airplane GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1 and ATTUNE_K3_LONGTEXT_CORPORA includes airplane, run it on the NAS host with source repo $AIRPLANE_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized corpus under $LONGTEXT_CORPUS_DIR, then copy the generated manifest back for the optional UI gate."
+  append_report "- Mechanical Design GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1 and ATTUNE_K3_LONGTEXT_CORPORA includes mechanical_design, run it on the NAS host with source repo $MECHANICAL_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized Git LFS corpus under $MECHANICAL_LONGTEXT_CORPUS_DIR, then include it in repeat chat and multiturn stability data."
+  append_report "- Long-text repeat suite: run scripts/eval-longtext-corpora-suite.py with ATTUNE_K3_LONGTEXT_REPEAT_CHAT=$LONGTEXT_REPEAT_CHAT after indexing to collect repeated chat and multiturn stability metrics."
+  append_report "- Long-text scheduler generation gate: set ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1 to require every non-safety chat row to use scheduler answer generation."
   append_report "- Use K3/NAS-local bind path for knowledge-base import."
   append_report "- Require local scheduler chat metadata and poll async answer jobs when scheduler chat is required."
   append_report "- Run optional Playwright UI gate when ATTUNE_K3_LONGTEXT_MANIFEST points to a local long-text manifest and the NAS-side corpus is already indexed."
@@ -751,7 +780,7 @@ print(text[:500])
 PY
 
 LONGTEXT_UI_MANIFEST="$LONGTEXT_MANIFEST"
-append_report "## Airplane GitHub Longtext Gate"
+append_report "## Standard GitHub Longtext Gates"
 if [ "$LONGTEXT_E2E" = "1" ]; then
   if [ -z "$HOST" ]; then
     echo "--host or ATTUNE_K3_HOST is required for ATTUNE_K3_LONGTEXT_E2E=1" >&2
@@ -759,32 +788,58 @@ if [ "$LONGTEXT_E2E" = "1" ]; then
   fi
   configure_longtext_pdf_ocr_guard
   LONGTEXT_LOCAL_MANIFEST="$REPORTS_DIR/k3-airplane-longtext-$LONGTEXT_PROFILE-$TS.json"
-  LONGTEXT_RESULTS_TGZ="$REPORTS_DIR/k3-airplane-longtext-results-$LONGTEXT_PROFILE-$TS.tgz"
-  remote "command -v git >/dev/null || { echo 'git is required on the NAS host for airplane GitHub long-text materialization' >&2; exit 2; }"
+  MECHANICAL_LONGTEXT_LOCAL_MANIFEST="$REPORTS_DIR/k3-mechanical-design-longtext-$LONGTEXT_PROFILE-$TS.json"
+  LONGTEXT_RESULTS_TGZ="$REPORTS_DIR/k3-longtext-corpora-results-$LONGTEXT_PROFILE-$TS.tgz"
+  remote "command -v git >/dev/null || { echo 'git is required on the NAS host for GitHub long-text materialization' >&2; exit 2; }"
+  if printf '%s' "$LONGTEXT_CORPORA" | grep -q 'mechanical_design'; then
+    remote "git lfs version >/dev/null || { echo 'git-lfs is required on the NAS host for mechanical_design Git LFS PDFs' >&2; exit 2; }"
+  fi
   remote "mkdir -p '$LONGTEXT_REMOTE_RUNNER/scripts' '$LONGTEXT_REMOTE_RUNNER/tests/e2e' '$LONGTEXT_REMOTE_RESULTS'"
   run_scp \
     "$ROOT/scripts/build-airplane-manual-longtext-dataset.py" \
+    "$ROOT/scripts/build-mechanical-design-longtext-dataset.py" \
     "$ROOT/scripts/eval-airplane-manual-longtext-search.py" \
     "$ROOT/scripts/eval-airplane-manual-longtext-chat.py" \
     "$ROOT/scripts/eval-airplane-manual-longtext-multiturn.py" \
+    "$ROOT/scripts/eval-longtext-corpora-suite.py" \
     "$SSH_TARGET:$LONGTEXT_REMOTE_RUNNER/scripts/"
   run_scp \
     "$ROOT/tests/e2e/airplane_longtext_support.py" \
     "$ROOT/tests/e2e/airplane_manual_longtext_e2e.py" \
+    "$ROOT/tests/e2e/mechanical_design_longtext_e2e.py" \
+    "$ROOT/tests/e2e/longtext_corpora_e2e.py" \
     "$SSH_TARGET:$LONGTEXT_REMOTE_RUNNER/tests/e2e/"
-  LONGTEXT_REMOTE_CMD="ATTUNE_BASE_URL='http://127.0.0.1:18900' ATTUNE_E2E_PASSWORD='$PASSWORD' ATTUNE_LONGTEXT_PROFILE='$LONGTEXT_PROFILE' ATTUNE_LONGTEXT_CORPUS_DIR='$LONGTEXT_CORPUS_DIR' ATTUNE_LONGTEXT_MANIFEST='$LONGTEXT_REMOTE_MANIFEST' ATTUNE_LONGTEXT_GOLDEN='$LONGTEXT_REMOTE_RESULTS/attune-airplane-longtext-$LONGTEXT_PROFILE-golden.json' ATTUNE_LONGTEXT_RESULTS_DIR='$LONGTEXT_REMOTE_RESULTS' ATTUNE_LONGTEXT_UI=0 ATTUNE_LONGTEXT_FAIL_ON_TARGETS=1 ATTUNE_LONGTEXT_BACKGROUND_BIND_UX=1 ATTUNE_LONGTEXT_MULTITURN=1 ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION='$LONGTEXT_REQUIRE_SCHEDULER_GENERATION'"
+  LONGTEXT_REMOTE_CMD="ATTUNE_BASE_URL='http://127.0.0.1:18900' ATTUNE_E2E_PASSWORD='$PASSWORD' ATTUNE_LONGTEXT_PROFILE='$LONGTEXT_PROFILE' ATTUNE_LONGTEXT_CORPORA='$LONGTEXT_CORPORA' ATTUNE_AIRPLANE_LONGTEXT_CORPUS_DIR='$LONGTEXT_CORPUS_DIR' ATTUNE_AIRPLANE_LONGTEXT_MANIFEST='$LONGTEXT_REMOTE_MANIFEST' ATTUNE_AIRPLANE_LONGTEXT_GOLDEN='$LONGTEXT_REMOTE_RESULTS/attune-airplane-longtext-$LONGTEXT_PROFILE-golden.json' ATTUNE_MECHANICAL_DESIGN_LONGTEXT_CORPUS_DIR='$MECHANICAL_LONGTEXT_CORPUS_DIR' ATTUNE_MECHANICAL_DESIGN_LONGTEXT_MANIFEST='$MECHANICAL_LONGTEXT_REMOTE_MANIFEST' ATTUNE_MECHANICAL_DESIGN_LONGTEXT_GOLDEN='$LONGTEXT_REMOTE_RESULTS/attune-mechanical-design-longtext-$LONGTEXT_PROFILE-golden.json' ATTUNE_LONGTEXT_RESULTS_DIR='$LONGTEXT_REMOTE_RESULTS' ATTUNE_LONGTEXT_UI=0 ATTUNE_LONGTEXT_FAIL_ON_TARGETS=1 ATTUNE_LONGTEXT_BACKGROUND_BIND_UX=1 ATTUNE_LONGTEXT_MULTITURN=1 ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION='$LONGTEXT_REQUIRE_SCHEDULER_GENERATION'"
   if [ -n "$LONGTEXT_LIMIT_DOCS" ]; then
     LONGTEXT_REMOTE_CMD="$LONGTEXT_REMOTE_CMD ATTUNE_LONGTEXT_LIMIT_DOCS='$LONGTEXT_LIMIT_DOCS'"
   fi
-  remote "$LONGTEXT_REMOTE_CMD python3 '$LONGTEXT_REMOTE_RUNNER/tests/e2e/airplane_manual_longtext_e2e.py'"
-  run_scp "$SSH_TARGET:$LONGTEXT_REMOTE_MANIFEST" "$LONGTEXT_LOCAL_MANIFEST"
-  remote "tar -C '$LONGTEXT_REMOTE_RESULTS' -czf '$REMOTE_TMP/airplane-longtext-results-$LONGTEXT_PROFILE-$TS.tgz' ."
-  run_scp "$SSH_TARGET:$REMOTE_TMP/airplane-longtext-results-$LONGTEXT_PROFILE-$TS.tgz" "$LONGTEXT_RESULTS_TGZ"
-  LONGTEXT_UI_MANIFEST="$LONGTEXT_LOCAL_MANIFEST"
+  remote "$LONGTEXT_REMOTE_CMD python3 '$LONGTEXT_REMOTE_RUNNER/tests/e2e/longtext_corpora_e2e.py'"
+
+  LONGTEXT_SUITE_JSON="$LONGTEXT_REMOTE_RESULTS/attune-longtext-corpora-$LONGTEXT_PROFILE-suite-summary.json"
+  LONGTEXT_SUITE_CMD="$LONGTEXT_REMOTE_CMD ATTUNE_TOKEN='$TOKEN' ATTUNE_LONGTEXT_REPEAT_CHAT='$LONGTEXT_REPEAT_CHAT' ATTUNE_LONGTEXT_REPEAT_MULTITURN='$LONGTEXT_REPEAT_CHAT' python3 '$LONGTEXT_REMOTE_RUNNER/scripts/eval-longtext-corpora-suite.py' --base-url 'http://127.0.0.1:18900' --profile '$LONGTEXT_PROFILE' --out '$LONGTEXT_SUITE_JSON' --fail-on-targets"
+  remote "$LONGTEXT_SUITE_CMD"
+
+  if printf '%s' "$LONGTEXT_CORPORA" | grep -q 'airplane'; then
+    run_scp "$SSH_TARGET:$LONGTEXT_REMOTE_MANIFEST" "$LONGTEXT_LOCAL_MANIFEST"
+    LONGTEXT_UI_MANIFEST="$LONGTEXT_LOCAL_MANIFEST"
+  fi
+  if printf '%s' "$LONGTEXT_CORPORA" | grep -q 'mechanical_design'; then
+    run_scp "$SSH_TARGET:$MECHANICAL_LONGTEXT_REMOTE_MANIFEST" "$MECHANICAL_LONGTEXT_LOCAL_MANIFEST"
+  fi
+  remote "tar -C '$LONGTEXT_REMOTE_RESULTS' -czf '$REMOTE_TMP/longtext-corpora-results-$LONGTEXT_PROFILE-$TS.tgz' ."
+  run_scp "$SSH_TARGET:$REMOTE_TMP/longtext-corpora-results-$LONGTEXT_PROFILE-$TS.tgz" "$LONGTEXT_RESULTS_TGZ"
+  append_report "- Long-text corpora: $LONGTEXT_CORPORA"
   append_report "- Airplane GitHub repo: $AIRPLANE_LONGTEXT_REPO_URL"
+  append_report "- Mechanical Design GitHub repo: $MECHANICAL_LONGTEXT_REPO_URL"
   append_report "- Long-text profile: $LONGTEXT_PROFILE"
-  append_report "- Local manifest copy: $LONGTEXT_LOCAL_MANIFEST"
+  if printf '%s' "$LONGTEXT_CORPORA" | grep -q 'airplane'; then
+    append_report "- Airplane local manifest copy: $LONGTEXT_LOCAL_MANIFEST"
+  fi
+  if printf '%s' "$LONGTEXT_CORPORA" | grep -q 'mechanical_design'; then
+    append_report "- Mechanical Design local manifest copy: $MECHANICAL_LONGTEXT_LOCAL_MANIFEST"
+  fi
   append_report "- Results archive: $LONGTEXT_RESULTS_TGZ"
+  append_report "- Repeat chat/multiturn runs per corpus: $LONGTEXT_REPEAT_CHAT"
   append_report "- Require scheduler generation: $LONGTEXT_REQUIRE_SCHEDULER_GENERATION"
 else
   append_report "Skipped because ATTUNE_K3_LONGTEXT_E2E=0."

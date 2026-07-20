@@ -613,6 +613,10 @@ def main() -> int:
 
     build_manifest(profile, corpus_dir, manifest, golden, dry_run)
     if dry_run:
+        result_dir = Path(os.environ.get("ATTUNE_LONGTEXT_RESULTS_DIR", "/tmp")).expanduser()
+        print(f"[longtext] dry-run result search={result_dir / f'attune-airplane-longtext-{profile}-search.json'}")
+        print(f"[longtext] dry-run result chat={result_dir / f'attune-airplane-longtext-{profile}-chat.json'}")
+        print(f"[longtext] dry-run result multiturn={result_dir / f'attune-airplane-longtext-{profile}-multiturn.json'}")
         print("=== airplane manual longtext E2E DRY RUN PASS ===")
         return 0
 

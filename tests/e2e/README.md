@@ -20,12 +20,16 @@ ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
   bash tests/e2e/run_all.sh
 ```
 
-该流程会把 `airplane-manual-collection` 选定 PDF materialize 到
-`~/attune-e2e-corpora/airplane-manual-collection`，通过
+该流程默认会跑 `ATTUNE_LONGTEXT_CORPORA=airplane,mechanical_design`：
+`airplane-manual-collection` 选定 PDF materialize 到
+`~/attune-e2e-corpora/airplane-manual-collection`，`handbook-of-mechanical-design`
+五卷 Git LFS PDF materialize 到
+`~/attune-e2e-corpora/handbook-of-mechanical-design`，通过
 `POST /api/v1/index/bind` 让 Attune 构建向量库，等待
 `pending_embeddings=0`，再跑检索、API 对话评估和 Web UI 评估。对话门禁
-要求综合准确率、citation 命中率达标，多轮追问不能跨机型/跨手册漂移，真实飞行
-操作请求必须拒答，并且 edge scheduler 30B 级 profile p95 响应延迟不超过 10s；Web UI 门禁
+要求综合准确率、citation 命中率达标；airplane 多轮追问不能跨机型/跨手册漂移，真实飞行
+操作请求必须拒答；mechanical_design 多轮追问必须保持中文机械手册来源连续性，不能漂移到
+airplane 来源。Web UI 门禁
 会打开浏览器验证条目页可见、对话框可问、答案/citation
 可见，以及 scheduler 状态条在 edge scheduler 路径下渲染。
 最终 prompt admission 默认还会受 `ATTUNE_CONTEXT_ADMISSION_MAX_INPUT_TOKENS=65536`
@@ -101,7 +105,9 @@ ATTUNE_E2E_LONGTEXT=1 \
 | `memory_moat_search_quality_e2e.py` | 8 | RRF 混合检索召回质量 — 6 主题语料 + 针对性 query top-1 命中 + 跨主题区分度 |
 | `memory_moat_stress_loop_e2e.py` | 5 | 120 轮持续操作（600 HTTP 调用）；RSS/FD 监控验证无内存/句柄泄漏 |
 | `memory_moat_chat_e2e.py` | 9 | legacy direct-Ollama RAG 问答；citation 引用；citation_hit 信号落库（默认 runner 不执行）|
-| `airplane_manual_longtext_e2e.py` | gate | 可选长文本 KB E2E；Attune bind 目录建向量库；检索 Hit/Recall/MRR；chat 准确率/citation/10s p95；多轮来源连续性和安全拒答；Web UI 交互 |
+| `longtext_corpora_e2e.py` | gate | 标准 GitHub 长文本 KB E2E；默认并列跑 airplane 与 mechanical_design；各自 materialize、bind、embedding drain、search、chat、multiturn |
+| `airplane_manual_longtext_e2e.py` | gate | airplane 单 corpus 调试入口；检索 Hit/Recall/MRR；chat 准确率/citation/10s p95；多轮来源连续性和安全拒答；Web UI 交互 |
+| `mechanical_design_longtext_e2e.py` | gate | mechanical_design 单 corpus 调试入口；Git LFS PDF 校验；中文 OCR/向量生成；跨卷检索；中文多轮来源连续性 |
 
 长文本多轮 API 子门禁可单独运行：
 
@@ -115,6 +121,17 @@ python3 scripts/eval-airplane-manual-longtext-multiturn.py \
 
 `airplane_manual_longtext_e2e.py` 默认会在单轮 chat gate 后调用该脚本。调试纯
 search/chat 单轮时可设 `ATTUNE_LONGTEXT_MULTITURN=0`。
+
+标准 corpora 完成 ingest 后，使用 repeat suite 固化多次 chat 和多轮 chat 的稳定性采样：
+
+```bash
+ATTUNE_LONGTEXT_REPEAT_CHAT=3 \
+ATTUNE_LONGTEXT_CORPORA=airplane,mechanical_design \
+python3 scripts/eval-longtext-corpora-suite.py \
+  --base-url http://localhost:18905 \
+  --profile edge_scheduler_comprehensive \
+  --fail-on-targets
+```
 
 生成型 scheduler answer worker 门禁可通过关闭抽取式 fast path 后运行：
 

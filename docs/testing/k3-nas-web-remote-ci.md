@@ -6,27 +6,41 @@ scheduler、NAS 服务器三者路径/地址混用导致误测。
 
 ## ATTUNE_K3_LONGTEXT_MANIFEST
 
-标准 long-text 数据源是 GitHub 仓库
-`https://github.com/shiroinekotfs/airplane-manual-collection.git`，固定 commit
-`afe8288495338880e165f77bb9afe9946f366a52`。`scripts/build-airplane-manual-longtext-dataset.py`
-从该仓库生成 manifest；默认完整演示 profile 是 `edge_scheduler_comprehensive`。
+标准 long-text 数据源是两个并列 GitHub 仓库：
+
+- airplane manual corpus:
+  `https://github.com/shiroinekotfs/airplane-manual-collection.git`，固定 commit
+  `afe8288495338880e165f77bb9afe9946f366a52`。
+- mechanical design handbook corpus:
+  `https://github.com/GEQfa/handbook-of-mechanical-design.git`，固定 commit
+  `86832fd643cb1f9cfa1188d242d34b62dd52e41f`。
+
+`scripts/build-airplane-manual-longtext-dataset.py` 和
+`scripts/build-mechanical-design-longtext-dataset.py` 分别生成 manifest；默认完整演示
+profile 是 `edge_scheduler_comprehensive`。mechanical design 仓库的 PDF 是 Git LFS
+对象，NAS host 必须安装并启用 `git-lfs`，否则 builder 会拒绝把 133 字节 LFS 指针当
+PDF 入库。
 
 `ATTUNE_K3_LONGTEXT_E2E=1` 会在 NAS host 本机运行
-`tests/e2e/airplane_manual_longtext_e2e.py`，完整覆盖 GitHub airplane corpus
-materialize、server-side bind、embedding/vector drain、search、chat、multiturn。
+`tests/e2e/longtext_corpora_e2e.py`，默认覆盖 `ATTUNE_K3_LONGTEXT_CORPORA=airplane,mechanical_design`。
+每个 corpus 都会 materialize、server-side bind、embedding/vector drain、search、
+chat、multiturn。随后 `scripts/eval-longtext-corpora-suite.py` 会按
+`ATTUNE_K3_LONGTEXT_REPEAT_CHAT`（默认 3）重复单轮 chat 和多轮 chat，输出稳定性与性能汇总。
 默认只把 scheduler generation coverage 作为报告项暴露，不作为 Attune long-text
 阻断门；如果需要把每个非安全类 chat query 都强制要求走 scheduler 生成，显式设置
 `ATTUNE_K3_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1`。
 
-airplane long-text gate 默认保留 server-side PDF OCR
+long-text gate 默认保留 server-side PDF OCR
 （`ATTUNE_K3_LONGTEXT_PDF_OCR=1`），用于同时覆盖 Attune 的 bind、OCR 摄入、
 向量生成、检索、grounded chat、多轮和 UI。只想隔离向量/search/chat 行为时，
-显式设置 `ATTUNE_K3_LONGTEXT_PDF_OCR=0`；脚本会在运行 airplane bind 前重启 NAS
+显式设置 `ATTUNE_K3_LONGTEXT_PDF_OCR=0`；脚本会在运行 corpus bind 前重启 NAS
 侧 `attune-server` 并禁用 server-side PDF OCR。OCR 正确性/性能仍应同时由 scheduler
 的 `kb.document.ocr_recognize` self-test 和 Attune OCR 专项门归档。
 
 `ATTUNE_K3_LONGTEXT_MANIFEST` 指向 CI runner 本地可读的 long-text benchmark JSON，
-用于可选 UI gate。现有标准样例是 `tests/e2e/airplane_manual_longtext_cases.json`。
+用于可选 UI gate。现有标准样例是 `tests/e2e/airplane_manual_longtext_cases.json` 和
+`tests/e2e/mechanical_design_longtext_cases.json`。UI gate 默认仍使用 airplane manifest；
+mechanical design 的 API/search/chat/multiturn 和 repeat-suite 数据是强制 API gate。
 如果先跑了 `ATTUNE_K3_LONGTEXT_E2E=1`，K3 脚本会把 NAS 生成的 manifest 拷回
 runner 并复用它做 UI gate。
 
@@ -41,10 +55,18 @@ runner 并复用它做 UI gate。
 - `evaluation_targets.rag_answer`: answer accuracy、citation、unsafe advice、scheduler generation latency 目标。
 - `evaluation_targets.context_admission`: 每个 profile 的 context document/chunk 上限。
 - `web_e2e`: UI gate 默认 query 和必须出现的 Web surface。
+- `multiturn`: 可选的 corpus-specific 多轮 chat 配置；mechanical design 用它定义中文追问、
+  来源连续性和 forbidden source 漂移词。
 
 远端 K3 演示中的注意点：
 
 - `ATTUNE_K3_LONGTEXT_E2E=1` 的 API 建库和评测必须在 NAS/K3 本机执行。
+- `ATTUNE_K3_LONGTEXT_CORPORA` 默认是 `airplane,mechanical_design`；只隔离单 corpus
+  调试时才收窄为 `airplane` 或 `mechanical_design`。
+- `ATTUNE_K3_MECHANICAL_DESIGN_LONGTEXT_CORPUS_DIR` 是 NAS/K3 上的 mechanical design
+  Git LFS corpus 目录，默认 `$REMOTE_TMP/handbook-of-mechanical-design`。
+- `ATTUNE_K3_LONGTEXT_REPEAT_CHAT` 默认 3，用于稳定性数据；低于 3 只适合 smoke，不适合
+  作为演示性能结论。
 - `ATTUNE_K3_LONGTEXT_MANIFEST` 只给 runner 上的 Playwright/UI gate 读取 query 和目标阈值。
 - UI gate 假设 long-text API gate 已经把语料 materialize、bind、drain embedding queue。
 - scheduler 生成覆盖率不归 Attune 默认阻断；Attune 默认阻断 search、chat grounding/safety、

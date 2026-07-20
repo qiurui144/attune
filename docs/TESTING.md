@@ -189,8 +189,10 @@ K3 的 strict headed gate 必须覆盖后台 bind visibility；如当前 K3 服�
 - 降级/失败：scheduler 延迟、拒答、OCR metadata-only、无知识命中都必须给诚实反馈，不能静默切小模型胡答。
 - 视觉：桌面 1440x900 与窄屏至少各看一次；按钮文字不溢出，弹层不遮挡主操作。
 
-当前长文本 K3/scheduler 基准见
-[`docs/benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md`](benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md)。
+当前长文本 K3/scheduler 基准见：
+
+- [`docs/benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md`](benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md)
+- [`docs/benchmarks/2026-07-20-longtext-corpora-e2e.md`](benchmarks/2026-07-20-longtext-corpora-e2e.md)
 
 ---
 
