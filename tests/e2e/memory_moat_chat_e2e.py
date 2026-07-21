@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 
 BASE = "http://localhost:18905"
-VAULT_DB = "/tmp/attune-e2e/data/attune/vault.db"
+VAULT_DB = os.environ.get("ATTUNE_VAULT_DB", "/tmp/attune-e2e/data/attune/vault.db")
 PASS = 0
 FAIL = 0
 

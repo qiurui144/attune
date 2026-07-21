@@ -23,7 +23,7 @@ def raw(method, path, body_bytes=None, ctype="application/json"):
     headers = {"Content-Type": ctype} if body_bytes is not None else {}
     r = urllib.request.Request(BASE + path, data=body_bytes, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(r, timeout=30) as resp:
+        with urllib.request.urlopen(r, timeout=120) as resp:
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()

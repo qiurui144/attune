@@ -191,6 +191,7 @@ pub struct HardwareProfile {
     pub has_intel_npu: bool,            // /dev/accel/accel0 + intel_vpu 模块
     pub total_ram_bytes: u64,           // 总内存字节；硬件档位匹配用
     pub os: &'static str,               // "linux" | "macos" | "windows"
+    pub has_riscv_npu: bool,
     pub form_factor: FormFactor, // Laptop / LocalSchedulerAppliance / Server / Unknown — 决定 LLM 默认路径
     pub gpu_label: Option<String>, // 统一给 UI 的 GPU 描述
 }
@@ -254,6 +255,13 @@ impl HardwareProfile {
         if p.has_amd_gpu {
             p.amd_gfx_target = detect_amd_gfx_target();
         }
+
+        // RISC-V NPU (Spacemit X100 A100): CPU名含 spacemit/x100 或 k3-scheduler 存在
+        p.has_riscv_npu = cfg!(target_os = "linux")
+            && !cfg!(target_arch = "x86_64")
+            && !cfg!(target_arch = "aarch64")
+            && (p.cpu_model.to_ascii_lowercase().contains("spacemit")
+                || p.cpu_model.to_ascii_lowercase().contains("x100"));
 
         // NPU：区分 AMD XDNA vs Intel VPU
         if std::path::Path::new("/dev/accel/accel0").exists() {

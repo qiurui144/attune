@@ -31,6 +31,9 @@ pub enum AccelKind {
     IntelIgpu,
     /// Intel NPU（Core Ultra AI Boost，走 OpenVINO）。
     IntelNpu,
+    /// RISC-V SoC on-chip NPU（Spacemit X100 A100，走 vendor runtime / k3-scheduler）。
+    /// 未来 Rockchip RK3588 NPU 等同类 RISC-V/ARM SoC NPU 也归此。
+    RiscvNpu,
 }
 
 impl AccelKind {
@@ -43,6 +46,7 @@ impl AccelKind {
             AccelKind::AmdNpu => "amd_npu",
             AccelKind::IntelIgpu => "intel_igpu",
             AccelKind::IntelNpu => "intel_npu",
+            AccelKind::RiscvNpu => "riscv_npu",
         }
     }
 }
@@ -96,6 +100,10 @@ impl AccelCapabilities {
         // Intel NPU（Core Ultra AI Boost）：复用 intel_vpu 探测。
         if p.has_intel_npu {
             accelerators.push(classify_intel_npu(true));
+        }
+        // RISC-V NPU（Spacemit X100 A100 / 未来 RISC-V SoC NPU）
+        if p.has_riscv_npu {
+            accelerators.push(classify_riscv_npu(true));
         }
         // AMD RDNA GPU：present 时 driver_ready（render node / kfd 已被探测到）。
         if p.has_amd_gpu {
@@ -222,6 +230,16 @@ fn classify_intel_igpu(present: bool) -> Accelerator {
         present,
         driver_ready: present,
         notes: "Intel iGPU Arc/Iris Xe (OpenVINO EP)".to_string(),
+    }
+}
+
+fn classify_riscv_npu(present: bool) -> Accelerator {
+    Accelerator {
+        kind: AccelKind::RiscvNpu,
+        vendor: "spacemit",
+        present,
+        driver_ready: present,
+        notes: if present { "Spacemit A100 (ime2): local-scheduler runtime".to_string() } else { String::new() },
     }
 }
 

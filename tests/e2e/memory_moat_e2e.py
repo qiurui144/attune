@@ -18,6 +18,7 @@ search_cache 失效 bug（编辑后旧词仍命中 / 删除后仍命中）。
 audit log 可达。
 """
 import json
+import os
 import sys
 import time
 import urllib.request
