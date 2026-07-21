@@ -355,7 +355,35 @@ where
     // request; otherwise one stalled status probe can overrun the poll deadline.
     let request_timeout = poll_timeout.min(crate::local_scheduler::SUBMIT_TIMEOUT);
     let client = LocalSchedulerClient::with_base(scheduler_base, request_timeout);
-    let response = client.submit_kb_task(task, body, explicit_async)?;
+    let mut response = client.submit_kb_task(task, body, explicit_async)?;
+
+    // Cold-start retry: scheduler may return "async/pending" without a job_id
+    // when the target model worker is not yet loaded. Wait up to poll_timeout
+    // for the cold-start to complete, then retry the task submission.
+    if response.status.as_deref() == Some("async/pending")
+        && response.job_id.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+    {
+        let retry_deadline = std::time::Instant::now() + poll_timeout;
+        let retry_request_timeout = Duration::from_secs(30);
+        let retry_client = LocalSchedulerClient::with_base(scheduler_base, retry_request_timeout);
+        while std::time::Instant::now() < retry_deadline {
+            std::thread::sleep(Duration::from_secs(10));
+            match retry_client.submit_kb_task(task, body, explicit_async) {
+                Ok(r) => {
+                    let has_job = r.job_id.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                    response = r;
+                    if has_job {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    // Transient errors during cold-start are expected; continue retrying
+                    continue;
+                }
+            }
+        }
+    }
+
     final_outputs(
         &client,
         response,
