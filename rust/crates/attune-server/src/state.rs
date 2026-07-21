@@ -4016,7 +4016,7 @@ fn build_llm_from_settings(
             .as_ref()
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
-        if hardware.form_factor.prefers_local_llm() || crate::local_scheduler::native_kb_ask_enabled(if crate::local_scheduler::native_kb_ask_enabled(&settings) {settings) {
+        if hardware.form_factor.prefers_local_llm() || crate::local_scheduler::native_kb_ask_enabled(&settings) {
             let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
             tracing::info!(
                 "LLM (scheduler-native KB): using scheduler endpoint {scheduler_ep}"
