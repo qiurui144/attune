@@ -663,17 +663,13 @@ impl SchedulerKbTaskResponse {
                     .unwrap_or("unknown error")
             )));
         }
-        let missing_job_id = self
-            .job_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|job_id| !job_id.is_empty())
-            .is_none();
+        // Use effective_job_id() to cover scheduler v0.8.2 "id" field alias
+        let missing_job_id = self.effective_job_id().is_none();
         if missing_job_id
             && (explicit_async || self.http_status == Some(202) || self.requires_job_id())
         {
             return Err(VaultError::LlmUnavailable(format!(
-                "{label} returned async/pending status without job_id"
+                "{label} returned async/pending status without job_id (effective job id also missing)"
             )));
         }
         Ok(())
