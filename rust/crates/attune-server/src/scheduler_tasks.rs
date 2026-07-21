@@ -361,7 +361,7 @@ where
     // when the target model worker is not yet loaded. Wait up to poll_timeout
     // for the cold-start to complete, then retry the task submission.
     if response.status.as_deref() == Some("async/pending")
-        && response.job_id.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+        && response.effective_job_id().is_none()
     {
         let retry_deadline = std::time::Instant::now() + poll_timeout;
         let retry_request_timeout = Duration::from_secs(30);
@@ -370,7 +370,7 @@ where
             std::thread::sleep(Duration::from_secs(10));
             match retry_client.submit_kb_task(task, body, explicit_async) {
                 Ok(r) => {
-                    let has_job = r.job_id.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                    let has_job = r.effective_job_id().is_some();
                     response = r;
                     if has_job {
                         break;
@@ -421,7 +421,7 @@ where
         }
         SchedulerJobState::Waiting => {}
     }
-    if let Some(job_id) = response.job_id {
+    if let Some(job_id) = response.effective_job_id() {
         let deadline = Instant::now() + poll_timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());

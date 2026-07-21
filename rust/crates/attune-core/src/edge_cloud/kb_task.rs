@@ -56,6 +56,10 @@ impl<'a> SchedulerKbTaskAdapter<'a> {
         match admission {
             ContextAdmissionDecision::AdmitSync(ctx) => {
                 apply_output_limit(&mut body, ctx.max_output_tokens);
+                // Scheduler v0.8.2+ rejects app-set fields; kb.query.ask manages limits internally.
+                if req.task_name == "kb.query.ask" {
+                    body.remove("max_output_tokens");
+                }
                 submit_local_task(
                     self.client,
                     req.task_name,
@@ -73,6 +77,10 @@ impl<'a> SchedulerKbTaskAdapter<'a> {
             }
             ContextAdmissionDecision::SubmitAsync(ctx) => {
                 apply_output_limit(&mut body, ctx.max_output_tokens);
+                // Scheduler v0.8.2+ rejects app-set fields; kb.query.ask manages limits internally.
+                if req.task_name == "kb.query.ask" {
+                    body.remove("max_output_tokens");
+                }
                 submit_local_task(
                     self.client,
                     req.task_name,

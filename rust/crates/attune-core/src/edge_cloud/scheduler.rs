@@ -523,6 +523,9 @@ pub struct SchedulerKbTaskResponse {
     pub scheduled_as: String,
     #[serde(default)]
     pub job_id: Option<String>,
+    /// Scheduler v0.8.2+ uses "id" instead of "job_id".
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -638,6 +641,11 @@ impl SchedulerKbTaskResponse {
     /// transport success: explicit async calls and async/future response modes
     /// require a job id, while failed/error-bearing bodies are never accepted
     /// as completed work.
+    pub fn effective_job_id(&self) -> Option<&str> {
+        self.job_id.as_deref().filter(|s| !s.trim().is_empty() && s.trim() != "pending")
+            .or_else(|| self.id.as_deref().filter(|s| !s.trim().is_empty() && s.trim() != "pending"))
+    }
+
     pub fn validate_submission(&self, explicit_async: bool, label: &str) -> Result<()> {
         if let Some(status) = self
             .http_status
