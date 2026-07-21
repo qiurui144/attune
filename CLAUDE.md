@@ -768,3 +768,66 @@ detector.py 中维护了精确匹配表:
 - spec 评审通过 → invoke `superpowers:writing-plans` 出 plan
 - plan 评审过 → implementation
 - 不允许"先写代码再补 spec"
+
+
+## Release Workflow (riscv64 deb)
+
+### Git + Version Management
+
+```
+# 1. Bump version in Cargo.toml
+sed -i 's/^version = "'$OLD_VER'"/version = "'$NEW_VER'"/' rust/Cargo.toml
+
+# 2. Commit + tag
+git add rust/Cargo.toml
+git commit -m "release: v${NEW_VER}"
+git tag -a "v${NEW_VER}" -m "v${NEW_VER}: release"
+git push origin HEAD && git push origin "v${NEW_VER}"
+```
+
+### riscv64 Build
+
+Must use `scripts/build-optimized.sh` — handles Spacemit toolchain, CC_* env vars, 
+sccache configuration. Direct `cargo build` will fail on numkong C crate 
+(system `riscv64-linux-gnu-gcc` lacks RVV support).
+
+```bash
+ATTUNE_RVA23_TOOLCHAIN=/data/RV/.../spacemit-toolchain-linux-glibc-x86_64-v1.2.2 \
+bash scripts/build-optimized.sh \
+  --profile rva23 --package attune-server \
+  --features scheduler-runtime,artifact-export-rich,wasm-runtime \
+  -- --no-default-features --bin attune-server-headless
+```
+
+### Package deb
+
+```bash
+ATTUNE_PACKAGE_SKIP_FRONTEND=1 ATTUNE_PACKAGE_SKIP_BUILD=1 ATTUNE_PACKAGE_SKIP_RVV_AUDIT=1 \
+bash scripts/package-riscv64-deb.sh \
+  --out-dir dist/release/riscv64-server-deb --reports-dir reports/release
+```
+
+### Deploy to K3
+
+```bash
+scp dist/release/riscv64-server-deb/attune-server_${VER}_riscv64.deb root@192.168.100.233:/root/
+ssh root@192.168.100.233 "dpkg -i /root/attune-server_${VER}_riscv64.deb && systemctl restart attune-server"
+```
+
+### E2E Verification
+
+```bash
+cd tests/e2e && export ATTUNE_BASE_URL=http://192.168.100.233:18905
+for s in memory_moat_e2e.py memory_moat_signals_e2e.py memory_moat_stress_e2e.py \
+         memory_moat_fault_e2e.py memory_moat_annotation_e2e.py memory_moat_v07routes_e2e.py \
+         memory_moat_search_quality_e2e.py memory_moat_stress_loop_e2e.py; do
+  python3 "$s" && echo "PASS $s" || echo "FAIL $s"
+done
+```
+
+### One-key Release (recommended)
+
+```bash
+bash scripts/release-riscv64.sh 1.5.2    # full flow: bump → build → package → verify
+bash scripts/release-riscv64.sh 1.5.2 --dry-run  # preview without execution
+```
