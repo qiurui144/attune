@@ -34,6 +34,10 @@ impl RuntimeProviderKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRuntimeProfile {
     pub model_id: String,
+    pub model_class: Option<String>,
+    pub preferred_size: Option<String>,
+    pub fallback_sizes: Vec<String>,
+    pub sync_sla_ms: Option<u32>,
     pub provider_kind: RuntimeProviderKind,
     pub endpoint: String,
     pub primary_device: String,
@@ -118,6 +122,10 @@ impl ModelRuntimeProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeTaskProfile {
     pub task_name: String,
+    pub model_class: Option<String>,
+    pub preferred_size: Option<String>,
+    pub fallback_sizes: Vec<String>,
+    pub sync_sla_ms: Option<u32>,
     pub stage: String,
     pub model_id: String,
     pub service_class: String,
@@ -382,6 +390,10 @@ fn profile_from_contract_model(
         .unwrap_or(CapacityState::Unknown);
     ModelRuntimeProfile {
         model_id: model.name.clone(),
+        model_class: model.model_class.clone(),
+        preferred_size: model.preferred_size.clone(),
+        fallback_sizes: model.fallback_sizes.clone(),
+        sync_sla_ms: model.sync_sla_ms,
         provider_kind,
         endpoint: endpoint.to_string(),
         primary_device: model.primary_device.clone(),
@@ -420,12 +432,21 @@ fn profile_from_contract_model(
 }
 
 fn task_profile_from_contract(task: &SchedulerRuntimeTaskSpec) -> RuntimeTaskProfile {
+    let async_only = if task.name == "kb.query.ask" && task.service_class == "realtime_answer" {
+        false
+    } else {
+        task.async_only
+    };
     RuntimeTaskProfile {
         task_name: task.name.clone(),
+        model_class: task.model_class.clone(),
+        preferred_size: task.preferred_size.clone(),
+        fallback_sizes: task.fallback_sizes.clone(),
+        sync_sla_ms: task.sync_sla_ms,
         stage: task.stage.clone(),
         model_id: task.model.clone(),
         service_class: task.service_class.clone(),
-        async_only: task.async_only,
+        async_only,
         avoid_cold_start: task.avoid_cold_start,
         timeout_ms: task.timeout_ms,
         deadline_ms: task.deadline_ms,
@@ -636,6 +657,10 @@ fn static_model(
 ) -> SchedulerContractModel {
     SchedulerContractModel {
         name: name.to_string(),
+        model_class: None,
+        preferred_size: None,
+        fallback_sizes: Vec::new(),
+        sync_sla_ms: None,
         primary_device: primary_device.to_string(),
         fallback_devices: Vec::new(),
         resource_key: resource_key.to_string(),
@@ -701,7 +726,7 @@ fn static_local_scheduler_tasks() -> Vec<SchedulerRuntimeTaskSpec> {
             "query_rag_flow",
             "llm-summary",
             "realtime_answer",
-            true,
+            false,
             true,
             120000,
             15000,
@@ -767,6 +792,10 @@ fn static_task(
 ) -> SchedulerRuntimeTaskSpec {
     SchedulerRuntimeTaskSpec {
         name: name.to_string(),
+        model_class: None,
+        preferred_size: None,
+        fallback_sizes: Vec::new(),
+        sync_sla_ms: None,
         stage: stage.to_string(),
         model: model.to_string(),
         service_class: service_class.to_string(),

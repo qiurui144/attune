@@ -201,6 +201,14 @@ pub struct SchedulerContractModel {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
+    pub model_class: Option<String>,
+    #[serde(default)]
+    pub preferred_size: Option<String>,
+    #[serde(default)]
+    pub fallback_sizes: Vec<String>,
+    #[serde(default)]
+    pub sync_sla_ms: Option<u32>,
+    #[serde(default)]
     pub primary_device: String,
     #[serde(default)]
     pub fallback_devices: Vec<String>,
@@ -246,6 +254,14 @@ pub struct SchedulerContractModel {
 pub struct SchedulerRuntimeTaskSpec {
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub model_class: Option<String>,
+    #[serde(default)]
+    pub preferred_size: Option<String>,
+    #[serde(default)]
+    pub fallback_sizes: Vec<String>,
+    #[serde(default)]
+    pub sync_sla_ms: Option<u32>,
     #[serde(default)]
     pub stage: String,
     #[serde(default)]
@@ -642,8 +658,14 @@ impl SchedulerKbTaskResponse {
     /// require a job id, while failed/error-bearing bodies are never accepted
     /// as completed work.
     pub fn effective_job_id(&self) -> Option<&str> {
-        self.job_id.as_deref().filter(|s| !s.trim().is_empty() && s.trim() != "pending")
-            .or_else(|| self.id.as_deref().filter(|s| !s.trim().is_empty() && s.trim() != "pending"))
+        self.job_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty() && s.trim() != "pending")
+            .or_else(|| {
+                self.id
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty() && s.trim() != "pending")
+            })
     }
 
     pub fn validate_submission(&self, explicit_async: bool, label: &str) -> Result<()> {

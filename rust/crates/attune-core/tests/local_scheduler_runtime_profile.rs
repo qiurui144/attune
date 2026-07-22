@@ -67,6 +67,52 @@ fn resolves_profiles_from_scheduler_contract_models_and_capacity() {
 }
 
 #[test]
+fn runtime_profile_preserves_scheduler_capability_metadata() {
+    let mut contract_json: serde_json::Value = serde_json::from_str(CONTRACT_JSON).unwrap();
+    let models = contract_json["models"].as_array_mut().unwrap();
+    let chat = models
+        .iter_mut()
+        .find(|model| model["name"] == "llm-chat")
+        .expect("llm-chat model");
+    chat["model_class"] = serde_json::json!("local-answer");
+    chat["preferred_size"] = serde_json::json!("30b");
+    chat["fallback_sizes"] = serde_json::json!(["14b", "7b"]);
+    chat["sync_sla_ms"] = serde_json::json!(8000);
+
+    let tasks = contract_json["runtime_tasks"].as_array_mut().unwrap();
+    let ask = tasks
+        .iter_mut()
+        .find(|task| task["name"] == "kb.query.ask")
+        .expect("kb.query.ask task");
+    ask["model_class"] = serde_json::json!("local-answer");
+    ask["preferred_size"] = serde_json::json!("30b");
+    ask["fallback_sizes"] = serde_json::json!(["14b", "7b"]);
+    ask["sync_sla_ms"] = serde_json::json!(8000);
+
+    let contract: SchedulerBenchmarkContract = serde_json::from_value(contract_json).unwrap();
+    let models: SchedulerModels = serde_json::from_str(MODELS_JSON).unwrap();
+    let capacity: SchedulerCapacitySnapshot = serde_json::from_str(CAPACITY_JSON).unwrap();
+    let set = RuntimeProfileResolver::from_scheduler(
+        &contract,
+        &models,
+        &capacity,
+        "http://127.0.0.1:8090",
+    );
+
+    let chat = set.model("llm-chat").unwrap();
+    assert_eq!(chat.model_class.as_deref(), Some("local-answer"));
+    assert_eq!(chat.preferred_size.as_deref(), Some("30b"));
+    assert_eq!(chat.fallback_sizes, vec!["14b", "7b"]);
+    assert_eq!(chat.sync_sla_ms, Some(8000));
+
+    let ask = set.task("kb.query.ask").unwrap();
+    assert_eq!(ask.model_class.as_deref(), Some("local-answer"));
+    assert_eq!(ask.preferred_size.as_deref(), Some("30b"));
+    assert_eq!(ask.fallback_sizes, vec!["14b", "7b"]);
+    assert_eq!(ask.sync_sla_ms, Some(8000));
+}
+
+#[test]
 fn runtime_profile_cache_uses_ttl_then_refreshes() {
     let now = Instant::now();
     let calls = Cell::new(0);
