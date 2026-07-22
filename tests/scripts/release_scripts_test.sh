@@ -205,6 +205,9 @@ grep -q "Windows Service" "$ROOT/docs/edge-scheduler-delivery.md"
 grep -q "30B" "$ROOT/docs/edge-scheduler-delivery.md"
 grep -q "rag_profiles" "$ROOT/docs/plugin-protocol.md"
 grep -q "attune-edge-scheduler" "$ROOT/docs/local-llm-setup.md"
+grep -q "SchedulerBase" "$ROOT/tests/e2e/kb_longloop_windows.ps1"
+grep -q "Windows Service" "$ROOT/tests/e2e/kb_longloop_windows.ps1"
+grep -q "attune-edge-scheduler" "$ROOT/tests/e2e/kb_longloop_windows.ps1"
 
 bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
   --dry-run \

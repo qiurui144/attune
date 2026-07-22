@@ -3,7 +3,9 @@ param(
   [string]$Docs = "C:\attune-e2e\kb-longloop-docs",
   [string]$ReportGlob = "C:\attune-e2e\full-user-e2e-*.json",
   [int]$Loops = 10,
-  [string]$OutDir = "C:\attune-e2e"
+  [string]$OutDir = "C:\attune-e2e",
+  [string]$SchedulerBase = $env:ATTUNE_EDGE_SCHEDULER_URL,
+  [string]$SchedulerService = "attune-edge-scheduler"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +54,27 @@ function Invoke-AttuneJson {
   }
 }
 
+function Invoke-PlainJson {
+  param(
+    [string]$Method,
+    [string]$Uri,
+    [int]$Timeout = 30
+  )
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $resp = Invoke-RestMethod -Method $Method -Uri $Uri -TimeoutSec $Timeout
+    $sw.Stop()
+    return @{ ok = $true; status = 200; ms = $sw.ElapsedMilliseconds; body = $resp }
+  } catch {
+    $sw.Stop()
+    $status = $null
+    try {
+      $status = [int]$_.Exception.Response.StatusCode
+    } catch {}
+    return @{ ok = $false; status = $status; ms = $sw.ElapsedMilliseconds; error = $_.Exception.Message }
+  }
+}
+
 $docsMeta = @(
   @{ file = "intel-windows.en.md"; title = "Benchmark Intel Windows overview"; tags = @("kb-longloop", "benchmark", "intel") },
   @{ file = "intel-windows-igpu.en.md"; title = "Benchmark Intel Windows iGPU OpenVINO"; tags = @("kb-longloop", "benchmark", "intel", "openvino") },
@@ -73,10 +96,28 @@ $report = [ordered]@{
   started = (Get-Date).ToString("o")
   base = $Base
   source_report = $reportFile.FullName
+  scheduler = [ordered]@{
+    package = "attune-edge-scheduler"
+    service_kind = "Windows Service"
+    service_name = $SchedulerService
+    base = $SchedulerBase
+    service_status = $null
+    contract = $null
+  }
   health = $null
   ingests = @()
   loops = @()
   summary = @{}
+}
+
+$svc = Get-Service -Name $SchedulerService -ErrorAction SilentlyContinue
+if ($svc) {
+  $report.scheduler.service_status = $svc.Status.ToString()
+} else {
+  $report.scheduler.service_status = "not-installed-or-not-visible"
+}
+if ($SchedulerBase) {
+  $report.scheduler.contract = Invoke-PlainJson GET "$SchedulerBase/benchmark/contract" 30
 }
 
 $report.health = Invoke-AttuneJson GET "/api/v1/status/health" $null 60
