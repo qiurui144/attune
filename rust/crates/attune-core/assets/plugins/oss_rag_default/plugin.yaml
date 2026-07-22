@@ -1,7 +1,7 @@
 id: oss-rag-default
 name: Attune OSS Default RAG
 type: rag_profile_pack
-version: "1.5.1"
+version: "1.5.2"
 author: attune-team
 category: general
 description: Default knowledge-base chat and summary RAG profiles for offline, cloud-only, and edge-scheduler deployments.

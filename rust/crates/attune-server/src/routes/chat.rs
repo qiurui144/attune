@@ -62,6 +62,7 @@ const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 48;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
 const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
+const FALLBACK_CHAT_RAG_SYSTEM_PROMPT: &str = "You answer only from the provided knowledge-base evidence. Prefer concise answers with explicit source references. If evidence is empty or does not support the question, say that the current knowledge base does not contain enough evidence.";
 const LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS: [&str; 3] = [
     "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
     "ATTUNE_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
@@ -519,6 +520,40 @@ fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> 
         ChatMessage::system(LOCAL_SCHEDULER_KB_ASK_SYSTEM),
         ChatMessage::user(&user),
     ]
+}
+
+fn plugin_rag_prompt<'a>(
+    registry: &'a attune_core::plugin_registry::PluginRegistry,
+    intent: &str,
+) -> Option<&'a str> {
+    registry
+        .plugins()
+        .find(|plugin| {
+            !plugin.prompt.trim().is_empty()
+                && plugin.manifest.rag_profiles.iter().any(|profile| {
+                    profile
+                        .intents
+                        .iter()
+                        .any(|profile_intent| profile_intent == intent)
+                })
+        })
+        .map(|plugin| plugin.prompt.trim())
+}
+
+fn local_scheduler_ask_matches_llm_model(
+    profiles: &attune_core::edge_cloud::RuntimeProfileSet,
+    desired_model: &str,
+) -> bool {
+    let desired_model = desired_model.trim();
+    if desired_model.is_empty() {
+        return true;
+    }
+    profiles
+        .task(LOCAL_SCHEDULER_KB_ASK_TASK)
+        .map(|task| {
+            task.model_id.trim().is_empty() || task.model_id.eq_ignore_ascii_case(desired_model)
+        })
+        .unwrap_or(true)
 }
 
 fn compact_ascii_lower(text: &str) -> String {
@@ -1367,7 +1402,33 @@ pub async fn chat(
     }
     let native_scheduler_kb_profile =
         crate::local_scheduler::native_kb_enabled(&app_settings, &state.hardware);
-    let native_scheduler_ask = crate::local_scheduler::native_kb_ask_enabled(&app_settings);
+    let native_scheduler_ask_requested =
+        crate::local_scheduler::native_kb_ask_enabled(&app_settings);
+    let native_scheduler_ask = if native_scheduler_ask_requested {
+        let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
+        let desired_model = llm.model_name().to_string();
+        tokio::task::spawn_blocking(move || {
+            let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
+            let matches = local_scheduler_ask_matches_llm_model(&profiles, &desired_model);
+            if !matches {
+                let task_model = profiles
+                    .task(LOCAL_SCHEDULER_KB_ASK_TASK)
+                    .map(|task| task.model_id.as_str())
+                    .unwrap_or("unknown");
+                tracing::info!(
+                    task = LOCAL_SCHEDULER_KB_ASK_TASK,
+                    task_model,
+                    desired_model,
+                    "chat: scheduler native KB ask does not match configured chat model; using direct local-scheduler LLM RAG"
+                );
+            }
+            matches
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
 
     // 1. Search knowledge base via three-stage pipeline. Local scheduler profiles
     // use the edge-native retrieval planner; other paths keep the existing chat
@@ -1765,10 +1826,14 @@ pub async fn chat(
     let knowledge: Vec<serde_json::Value> = if web_search_used {
         // 网络搜索结果已经是 snippet，不做二次压缩
         knowledge
-    } else if summary_mode == "off" || native_scheduler_ask {
+    } else if summary_mode == "off"
+        || native_scheduler_ask
+        || (native_scheduler_kb_profile && llm.is_local())
+    {
         // summary=off：跳过上下文摘要，注入原文 (弱机/离线/省钱)。
         // scheduler-native KB 路径也跳过 summary_llm，避免本地答案生成前误触云端
-        // 或 OpenAI-compatible 摘要器；后续 build_local_scheduler_kb_contexts 会按
+        // 或 OpenAI-compatible 摘要器；direct local-scheduler LLM RAG 也保持原文证据,
+        // 避免 chat RAG 在回答前先排队做一次摘要。后续上下文会按
         // evidence window 对每段做硬上限裁剪。
         knowledge
     } else {
@@ -2339,10 +2404,9 @@ pub async fn chat(
          如果搜索结果不够可靠，请明确说明并补充你自己的判断。\n\n"
             .to_string()
     } else {
-        "你是用户的个人知识助手。以下是从用户本地知识库中检索到的相关文档。\n\
-         请基于这些知识回答用户的问题。如果引用了某个文档，请标注 [文档标题]。\n\
-         如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n"
-            .to_string()
+        let rag_prompt = plugin_rag_prompt(&plugin_registry, "chat.rag.question")
+            .unwrap_or(FALLBACK_CHAT_RAG_SYSTEM_PROMPT);
+        format!("{rag_prompt}\n\n")
     };
 
     if !knowledge.is_empty() {
@@ -3619,6 +3683,21 @@ mod tests {
             &settings, &hardware
         ));
         assert!(crate::local_scheduler::native_kb_ask_enabled(&settings));
+    }
+
+    #[test]
+    fn local_scheduler_native_ask_does_not_capture_configured_chat_model() {
+        let profiles =
+            attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(
+                "http://127.0.0.1:8090",
+            );
+        assert!(local_scheduler_ask_matches_llm_model(
+            &profiles,
+            "llm-summary"
+        ));
+        assert!(!local_scheduler_ask_matches_llm_model(
+            &profiles, "llm-chat"
+        ));
     }
 
     #[test]
