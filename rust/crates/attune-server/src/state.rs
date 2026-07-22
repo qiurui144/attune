@@ -4,7 +4,7 @@ use attune_core::embed::{
     EmbeddingProvider, LocalSchedulerEmbeddingProvider, OpenAiEmbeddingProvider,
 };
 use attune_core::index::FulltextIndex;
-use attune_core::llm::{LlmProvider, OpenAiLlmProvider};
+use attune_core::llm::{LlmProvider, LocalSchedulerInferLlmProvider, OpenAiLlmProvider};
 use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
 use attune_core::pii::Redactor;
 use attune_core::resource_governor::{global_registry, TaskKind};
@@ -3921,13 +3921,6 @@ fn drop_plugin_hub_provider(provider: Arc<dyn attune_core::plugin_hub::PluginHub
     let _ = std::thread::spawn(move || drop(provider)).join();
 }
 
-fn scheduler_openai_endpoint_from_settings(settings_json: &Option<serde_json::Value>) -> String {
-    format!(
-        "{}/v1",
-        crate::local_scheduler::base_from_optional_settings(settings_json)
-    )
-}
-
 fn should_route_local_endpoint_to_scheduler(endpoint: &str, provider: &str) -> bool {
     crate::local_scheduler::provider_is_scheduler_native(provider)
         || (embedding_endpoint_is_local(endpoint)
@@ -3974,36 +3967,36 @@ fn build_llm_from_settings(
 
         if let Some(ep) = endpoint.filter(|s| !s.is_empty()) {
             if should_route_local_endpoint_to_scheduler(&ep, provider) {
-                let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
+                let scheduler_base = crate::local_scheduler::base_from_optional_settings(settings_json);
                 let model = if model.trim().is_empty() {
                     "llm-chat".to_string()
                 } else {
                     model
                 };
                 tracing::warn!(
-                    "LLM: local direct endpoint {ep} is not used; routing provider={provider} through scheduler {scheduler_ep}"
+                    "LLM: local direct endpoint {ep} is not used; routing provider={provider} through scheduler infer {scheduler_base}"
                 );
-                return Some(Arc::new(OpenAiLlmProvider::new(
-                    &scheduler_ep,
-                    &api_key,
+                let _ = api_key;
+                return Some(Arc::new(LocalSchedulerInferLlmProvider::new(
+                    &scheduler_base,
                     &model,
                 )) as Arc<dyn LlmProvider>);
             }
             tracing::info!("LLM: using configured endpoint {ep}");
             Some(Arc::new(OpenAiLlmProvider::new(&ep, &api_key, &model)) as Arc<dyn LlmProvider>)
         } else if provider_is_local_llm_alias(provider) {
-            let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
+            let scheduler_base = crate::local_scheduler::base_from_optional_settings(settings_json);
             let model = if model.trim().is_empty() {
                 "llm-chat".to_string()
             } else {
                 model
             };
             tracing::info!(
-                "LLM: provider={provider} routed through local scheduler endpoint {scheduler_ep}"
+                "LLM: provider={provider} routed through local scheduler infer {scheduler_base}"
             );
-            Some(Arc::new(OpenAiLlmProvider::new(
-                &scheduler_ep,
-                &api_key,
+            let _ = api_key;
+            Some(Arc::new(LocalSchedulerInferLlmProvider::new(
+                &scheduler_base,
                 &model,
             )) as Arc<dyn LlmProvider>)
         } else {
@@ -4017,13 +4010,12 @@ fn build_llm_from_settings(
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         if hardware.form_factor.prefers_local_llm() || crate::local_scheduler::native_kb_ask_enabled(&settings) {
-            let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
+            let scheduler_base = crate::local_scheduler::base_from_optional_settings(settings_json);
             tracing::info!(
-                "LLM (scheduler-native KB): using scheduler endpoint {scheduler_ep}"
+                "LLM (scheduler-native KB): using scheduler infer {scheduler_base}"
             );
-            Some(Arc::new(OpenAiLlmProvider::new(
-                &scheduler_ep,
-                "local-scheduler",
+            Some(Arc::new(LocalSchedulerInferLlmProvider::new(
+                &scheduler_base,
                 "llm-chat",
             )) as Arc<dyn LlmProvider>)
         } else {

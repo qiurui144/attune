@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "attune-accounts"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "attune-core",
  "axum",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "attune-cli"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "assert_cmd",
  "attune-core",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "attune-core"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "attune-server"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "attune-core",
  "axum",

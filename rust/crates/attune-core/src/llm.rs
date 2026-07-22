@@ -937,6 +937,19 @@ pub struct OpenAiLlmProvider {
     model: String,
 }
 
+/// Local scheduler legacy infer client.
+///
+/// Current K3 scheduler builds expose `/kb/tasks/*` as the business API but do
+/// not yet expose an OpenAI-compatible `/v1/chat/completions` surface. Attune
+/// uses this provider only for co-located local-scheduler LLM settings so RAG
+/// chat can still target the configured `llm-chat` model without putting prompt
+/// policy or model files in attune-server.
+pub struct LocalSchedulerInferLlmProvider {
+    client: reqwest::Client,
+    base_url: String,
+    model: String,
+}
+
 #[derive(Deserialize)]
 struct OpenAiResponse {
     choices: Vec<OpenAiChoice>,
@@ -1006,6 +1019,154 @@ impl OpenAiUsage {
             model: model.to_string(),
             provider: provider.to_string(),
         }
+    }
+}
+
+impl LocalSchedulerInferLlmProvider {
+    pub fn new(base_url: &str, model: &str) -> Self {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
+        Self {
+            client,
+            base_url: crate::edge_cloud::capacity::normalize_scheduler_base(base_url),
+            model: model.trim().to_string(),
+        }
+    }
+
+    fn infer_url(&self) -> Result<String> {
+        crate::net::destination::join_local_scheduler_url(
+            &self.base_url,
+            &format!("/infer/{}", self.model.trim()),
+        )
+        .ok_or_else(|| {
+            VaultError::LlmUnavailable(
+                "local scheduler infer endpoint must be localhost, loopback, or private IP"
+                    .to_string(),
+            )
+        })
+    }
+
+    fn model_url(&self) -> Option<String> {
+        crate::net::destination::join_local_scheduler_url(
+            &self.base_url,
+            &format!("/models/{}", self.model.trim()),
+        )
+    }
+}
+
+impl LlmProvider for LocalSchedulerInferLlmProvider {
+    fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+        self.chat_with_history(&[ChatMessage::system(system), ChatMessage::user(user)])
+    }
+
+    fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        self.chat_with_history_opts(messages, &LlmCallOptions::default())
+    }
+
+    fn chat_with_history_opts(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        let hinted = apply_cot_hint(messages, opts);
+        let mut body = serde_json::json!({
+            "inputs": {
+                "messages": hinted,
+            },
+        });
+        if let Some(cap) = opts.effective_output_cap() {
+            body["max_output_tokens"] = serde_json::json!(cap);
+        }
+        let body_bytes = serde_json::to_vec(&body)?;
+        let url = self.infer_url()?;
+        let client = self.client.clone();
+        let model = self.model.clone();
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("X-K3S-Allow-Deprecated-API", "1")
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| {
+                    VaultError::LlmUnavailable(format!("local scheduler infer send: {e}"))
+                })?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "local scheduler infer HTTP {status}: {body}"
+                )));
+            }
+            let parsed: serde_json::Value = resp.json().await.map_err(|e| {
+                VaultError::Classification(format!("local scheduler infer json: {e}"))
+            })?;
+            let content = parsed
+                .pointer("/outputs/choices/0/message/content")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    parsed
+                        .pointer("/outputs/text")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| {
+                    parsed
+                        .pointer("/outputs/answer")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .ok_or_else(|| {
+                    VaultError::Classification(
+                        "local scheduler infer response did not contain assistant content"
+                            .to_string(),
+                    )
+                })?
+                .to_string();
+            let usage = parsed
+                .pointer("/outputs/usage")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<OpenAiUsage>(value).ok())
+                .or_else(|| {
+                    parsed
+                        .get("usage")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<OpenAiUsage>(value).ok())
+                })
+                .unwrap_or_default()
+                .into_token_usage(&model, "local_scheduler");
+            Ok((content, usage))
+        })
+    }
+
+    fn is_available(&self) -> bool {
+        let Some(url) = self.model_url() else {
+            return false;
+        };
+        let client = self.client.clone();
+        llm_block_on(async move {
+            client
+                .get(&url)
+                .send()
+                .await
+                .map(|resp| resp.status().is_success())
+                .map_err(|e| VaultError::LlmUnavailable(e.to_string()))
+        })
+        .unwrap_or(false)
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn is_local(&self) -> bool {
+        true
     }
 }
 
@@ -2502,6 +2663,99 @@ mod tests {
         assert!(
             req.contains("\"model\":\"qwen2.5-0.5b\""),
             "model not in body: {req}"
+        );
+    }
+
+    #[test]
+    fn local_scheduler_infer_llm_routes_to_legacy_infer_with_ack_header() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let cap2 = captured.clone();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            let mut header_end = None;
+            while header_end.is_none() {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                header_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+            }
+            let header_end = header_end.map(|idx| idx + 4).unwrap_or(buf.len());
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while buf.len().saturating_sub(header_end) < content_length {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            *cap2.lock().unwrap() = String::from_utf8_lossy(&buf).to_string();
+
+            let body = r#"{"outputs":{"choices":[{"message":{"content":"legacy scheduler reply"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let provider = LocalSchedulerInferLlmProvider::new(&endpoint, "llm-chat");
+        let (reply, usage) = provider
+            .chat_with_history_opts(
+                &[ChatMessage::user("hi")],
+                &LlmCallOptions {
+                    max_tokens: Some(32),
+                    ..LlmCallOptions::default()
+                },
+            )
+            .expect("chat ok");
+
+        handle.join().unwrap();
+
+        assert_eq!(reply, "legacy scheduler reply");
+        assert_eq!(usage.provider, "local_scheduler");
+        assert_eq!(usage.model, "llm-chat");
+        assert_eq!(usage.tokens_in, 7);
+        assert_eq!(usage.tokens_out, 3);
+
+        let req = captured.lock().unwrap().clone();
+        let req_lc = req.to_lowercase();
+        assert!(
+            req.starts_with("POST /infer/llm-chat "),
+            "request line was: {req}"
+        );
+        assert!(
+            req_lc.contains("x-k3s-allow-deprecated-api: 1"),
+            "missing deprecated API ack header: {req}"
+        );
+        assert!(
+            req.contains("\"inputs\":{\"messages\""),
+            "messages not nested under inputs: {req}"
+        );
+        assert!(
+            req.contains("\"max_output_tokens\":32"),
+            "max output cap not forwarded: {req}"
         );
     }
 }
