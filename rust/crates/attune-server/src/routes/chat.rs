@@ -11,6 +11,11 @@ use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
+use crate::rag_orchestrator::{
+    build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
+    build_local_scheduler_safety_refusal, local_scheduler_operational_safety_query,
+    local_scheduler_source_lookup_query, local_scheduler_summary_query,
+};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -516,16 +521,6 @@ fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> 
     ]
 }
 
-fn local_scheduler_extractive_answer_enabled() -> bool {
-    crate::local_scheduler::env_bool_any(
-        &[
-            "ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER",
-            "ATTUNE_LOCAL_EXTRACTIVE_ANSWER",
-        ],
-        true,
-    )
-}
-
 fn compact_ascii_lower(text: &str) -> String {
     text.to_ascii_lowercase()
         .chars()
@@ -783,146 +778,44 @@ fn build_history_aware_retrieval_query(query: &str, history: &[HistoryMessage]) 
     out
 }
 
-fn local_scheduler_operational_safety_query(query: &str) -> bool {
-    let q = query.to_ascii_lowercase();
-    let operational = contains_any_ascii(
-        &q,
-        &[
-            "real flight",
-            "emergency steps",
-            "engine fire",
-            "flight emergency",
-            "operational",
-            "maintenance signoff",
-            "维修步骤",
-            "真实飞行",
-            "应急步骤",
-        ],
-    );
-    let urgent = contains_any_ascii(
-        &q,
-        &["now", "immediately", "exact steps", "step by step", "马上"],
-    );
-    operational || (urgent && contains_any_ascii(&q, &["qrh", "emergency", "fire", "飞行", "应急"]))
-}
-
-fn local_scheduler_source_lookup_query(query: &str) -> bool {
-    contains_any_ascii(
-        query,
-        &[
-            "source",
-            "manual",
-            "reference",
-            "lookup",
-            "description",
-            "system",
-            "systems",
-            "fcom",
-            "qrh",
-            "fctm",
-            "amm",
-            "ata",
-            "sop",
-            "standard operating",
-            "mel",
-            "abbreviation",
-            "abbreviations",
-            "hydraulic",
-            "electrical",
-            "fuel",
-            "navigation",
-            "powerplant",
-            "landing gear",
-            "flight controls",
-            "air conditioning",
-            "minimum equipment",
-        ],
-    )
-}
-
-fn source_title_from_knowledge(k: &Value) -> String {
-    k.get("title")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| k.get("item_id").and_then(|v| v.as_str()).map(str::trim))
-        .unwrap_or("local KB source")
-        .to_string()
-}
-
-fn snippet_from_knowledge(k: &Value, max_chars: usize) -> String {
-    let text = k
-        .get("inject_content")
-        .and_then(|v| v.as_str())
-        .or_else(|| k.get("content").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if text.chars().count() <= max_chars {
-        return text;
-    }
-    let mut snippet: String = text.chars().take(max_chars).collect();
-    snippet.push_str("...");
-    snippet
-}
-
-fn local_scheduler_source_lines(knowledge: &[Value], limit: usize) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut lines = Vec::new();
-    for k in knowledge {
-        let title = source_title_from_knowledge(k);
-        let key = compact_ascii_lower(&title);
-        if key.is_empty() || !seen.insert(key) {
+fn load_recent_knowledge_results_for_summary(
+    state: SharedState,
+    dek: attune_core::crypto::Key32,
+    limit: usize,
+) -> Result<Vec<attune_core::search::SearchResult>, String> {
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| "vault lock poisoned".to_string())?;
+    let summaries = vault
+        .store()
+        .list_items(limit, 0)
+        .map_err(|e| e.to_string())?;
+    let mut results = Vec::with_capacity(summaries.len());
+    for (idx, summary) in summaries.into_iter().enumerate() {
+        let Some(item) = vault
+            .store()
+            .get_item(&dek, &summary.id)
+            .map_err(|e| e.to_string())?
+        else {
+            continue;
+        };
+        if item.content.trim().is_empty() {
             continue;
         }
-        let snippet = snippet_from_knowledge(k, 180);
-        if snippet.is_empty() {
-            lines.push(format!("- {title}"));
-        } else {
-            lines.push(format!("- {title}: {snippet}"));
-        }
-        if lines.len() >= limit {
-            break;
-        }
+        results.push(attune_core::search::SearchResult {
+            item_id: item.id,
+            score: 1.0 - (idx as f32 * 0.01),
+            title: item.title,
+            content: item.content.clone(),
+            source_type: item.source_type,
+            source_path: item.url,
+            inject_content: Some(item.content),
+            corpus_domain: item.domain.unwrap_or_else(|| "general".to_string()),
+            ..Default::default()
+        });
     }
-    lines
-}
-
-fn build_local_scheduler_safety_refusal(query: &str, knowledge: &[Value]) -> Option<String> {
-    if knowledge.is_empty() || !local_scheduler_operational_safety_query(query) {
-        return None;
-    }
-
-    let source_lines = local_scheduler_source_lines(knowledge, 5);
-    if source_lines.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "I cannot provide exact real-flight or maintenance emergency procedure steps. Do not use this response for operational flight decisions; consult the official QRH/manual and qualified crew or maintenance personnel.\n\nRelevant local KB sources for citation only:\n{}",
-        source_lines.join("\n")
-    ))
-}
-
-fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value]) -> Option<String> {
-    if knowledge.is_empty() || !local_scheduler_extractive_answer_enabled() {
-        return None;
-    }
-
-    let source_lines = local_scheduler_source_lines(knowledge, 5);
-    if source_lines.is_empty() {
-        return None;
-    }
-
-    if !local_scheduler_source_lookup_query(query) {
-        return None;
-    }
-
-    Some(format!(
-        "根据本地知识库检索，优先使用以下已引用来源回答该问题。若需要复杂推理或跨文档综合，应切换到 scheduler answer worker 或云端高质量模式。\n\n{}",
-        source_lines.join("\n")
-    ))
+    Ok(results)
 }
 
 fn local_scheduler_async_content(job_id: Option<&str>, eta_ms: Option<u32>) -> String {
@@ -933,6 +826,86 @@ fn local_scheduler_async_content(job_id: Option<&str>, eta_ms: Option<u32>) -> S
         (Some(id), _) => format!("本地 scheduler 知识库回答任务已提交，job_id={id}。"),
         (None, _) => "本地 scheduler 知识库回答任务已提交。".to_string(),
     }
+}
+
+fn local_scheduler_chat_job_poll_timeout(eta_ms: Option<u32>) -> std::time::Duration {
+    const DEFAULT_MS: u64 = 15_000;
+    const ETA_CUSHION_MS: u64 = 5_000;
+    const MIN_MS: u64 = 1_000;
+    const MAX_MS: u64 = 60_000;
+    let from_env = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0);
+    let ms = from_env
+        .or_else(|| eta_ms.map(|eta| u64::from(eta).saturating_add(ETA_CUSHION_MS)))
+        .unwrap_or(DEFAULT_MS)
+        .clamp(MIN_MS, MAX_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+fn poll_local_scheduler_chat_job_blocking(
+    client: attune_core::edge_cloud::scheduler::LocalSchedulerClient,
+    job_id: &str,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> attune_core::error::Result<(serde_json::Value, u64)> {
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
+    loop {
+        let job = client.job(job_id)?;
+        match job.normalized_state() {
+            attune_core::edge_cloud::scheduler::SchedulerJobState::Succeeded => {
+                return Ok((job.outputs, started.elapsed().as_millis() as u64));
+            }
+            attune_core::edge_cloud::scheduler::SchedulerJobState::Failed => {
+                return Err(attune_core::error::VaultError::LlmUnavailable(format!(
+                    "local scheduler job {job_id} {}: {}",
+                    job.status,
+                    job.failure_detail().unwrap_or("local scheduler job failed")
+                )));
+            }
+            attune_core::edge_cloud::scheduler::SchedulerJobState::Waiting => {}
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(attune_core::error::VaultError::LlmUnavailable(format!(
+                "local scheduler job {job_id} realtime poll timed out"
+            )));
+        }
+        std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
+    }
+}
+
+async fn poll_local_scheduler_chat_job_text(
+    scheduler_base: String,
+    job_id: String,
+    timeout: std::time::Duration,
+) -> attune_core::error::Result<(String, serde_json::Value, u64)> {
+    tokio::task::spawn_blocking(move || {
+        let client = attune_core::edge_cloud::scheduler::LocalSchedulerClient::with_base(
+            &scheduler_base,
+            crate::local_scheduler::SUBMIT_TIMEOUT,
+        );
+        let (outputs, poll_ms) = poll_local_scheduler_chat_job_blocking(
+            client,
+            &job_id,
+            timeout,
+            std::time::Duration::from_millis(250),
+        )?;
+        let text = crate::scheduler_tasks::output_text(&outputs).ok_or_else(|| {
+            attune_core::error::VaultError::LlmUnavailable(format!(
+                "local scheduler job {job_id} completed without answer text"
+            ))
+        })?;
+        Ok((text, outputs, poll_ms))
+    })
+    .await
+    .map_err(|e| {
+        attune_core::error::VaultError::LlmUnavailable(format!(
+            "local scheduler chat job poll join error: {e}"
+        ))
+    })?
 }
 
 fn local_scheduler_answer_budget_json(budget: LocalSchedulerAnswerBudget) -> serde_json::Value {
@@ -1428,6 +1401,23 @@ pub async fn chat(
 
     // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
     let mut search_results = search_results;
+    if search_results.is_empty() && local_scheduler_summary_query(&body.message) {
+        let state_recent = state.clone();
+        let dek_recent = dek.clone();
+        let recent_results = tokio::task::spawn_blocking(move || {
+            load_recent_knowledge_results_for_summary(state_recent, dek_recent, chat_kb_top_k())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("summary recent knowledge join error: {e}")))?
+        .map_err(|e| AppError::Internal(format!("summary recent knowledge: {e}")))?;
+        if !recent_results.is_empty() {
+            tracing::info!(
+                count = recent_results.len(),
+                "chat: summary query used recent knowledge fallback after empty retrieval"
+            );
+            search_results = recent_results;
+        }
+    }
     {
         let hist_pairs: Vec<(String, String)> = body
             .history
@@ -2036,6 +2026,18 @@ pub async fn chat(
                     )
                 })
                 .or_else(|| {
+                    build_local_scheduler_extractive_summary(&body.message, &knowledge).map(
+                        |content| {
+                            (
+                                content,
+                                "local.extractive.summary",
+                                "high_confidence_retrieval_extractive_summary",
+                                "ExtractiveLocalSummary",
+                            )
+                        },
+                    )
+                })
+                .or_else(|| {
                     build_local_scheduler_extractive_answer(&body.message, &knowledge).map(
                         |content| {
                             (
@@ -2144,6 +2146,7 @@ pub async fn chat(
             "answer_budget": answer_budget_json.clone(),
         });
         let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
+        let scheduler_base_for_poll = scheduler_base.clone();
 
         let scheduler_outcome = tokio::task::spawn_blocking(move || {
             let client = attune_core::edge_cloud::scheduler::LocalSchedulerClient::with_base(
@@ -2171,19 +2174,48 @@ pub async fn chat(
                 let is_async = local.explicit_async
                     || response.job_id.is_some()
                     || response.scheduled_as.eq_ignore_ascii_case("async");
+                let mut realtime_job_outputs: Option<serde_json::Value> = None;
+                let mut realtime_job_poll_ms: Option<u64> = None;
                 let content = if is_async {
-                    local_scheduler_async_content(response.job_id.as_deref(), response.eta_ms)
+                    if let Some(job_id) = response.effective_job_id().map(str::to_string) {
+                        match poll_local_scheduler_chat_job_text(
+                            scheduler_base_for_poll.clone(),
+                            job_id,
+                            local_scheduler_chat_job_poll_timeout(response.eta_ms),
+                        )
+                        .await
+                        {
+                            Ok((text, outputs, poll_ms)) => {
+                                realtime_job_outputs = Some(outputs);
+                                realtime_job_poll_ms = Some(poll_ms);
+                                text
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "chat: local scheduler async job did not finish within realtime poll budget; returning job handle"
+                                );
+                                local_scheduler_async_content(
+                                    response.effective_job_id(),
+                                    response.eta_ms,
+                                )
+                            }
+                        }
+                    } else {
+                        local_scheduler_async_content(None, response.eta_ms)
+                    }
                 } else {
                     crate::scheduler_tasks::output_text(&response.outputs).unwrap_or_else(|| {
                         "本地 scheduler 知识库任务已完成，但未返回可展示文本。".to_string()
                     })
                 };
-                let confidence = if is_async {
+                let async_exposed = is_async && realtime_job_outputs.is_none();
+                let confidence = if async_exposed {
                     3
                 } else {
                     attune_core::parse_confidence(&content)
                 };
-                let content = if is_async {
+                let content = if async_exposed {
                     content
                 } else {
                     attune_core::strip_confidence_marker(&content).to_string()
@@ -2217,6 +2249,8 @@ pub async fn chat(
                     "startup_wait_ms": response.startup_wait_ms,
                     "worker_pid": response.worker_pid,
                     "outputs": response.outputs,
+                    "realtime_job_outputs": realtime_job_outputs,
+                    "realtime_job_poll_ms": realtime_job_poll_ms,
                     "prompt_cache_key": response.prompt_cache_key,
                     "cache_hit": response.cache_hit,
                     "prompt_cache": response.prompt_cache,
@@ -3049,6 +3083,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn realtime_chat_job_poll_returns_done_outputs() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock scheduler");
+        let addr = listener.local_addr().expect("mock scheduler address");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept job poll");
+            let mut request = [0u8; 2048];
+            let n = stream.read(&mut request).unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..n]);
+            assert!(
+                request.starts_with("GET /jobs/job_realtime_answer "),
+                "unexpected request: {request}"
+            );
+            let body = r#"{"schema_version":"job_status.v2","scheduled_as":"async","job_id":"job_realtime_answer","status":"done","task":"kb.query.ask","model":"llm-summary","outputs":{"choices":[{"message":{"content":"hot answer"}}]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let client = attune_core::edge_cloud::scheduler::LocalSchedulerClient::with_base(
+            &format!("http://{addr}"),
+            Duration::from_secs(2),
+        );
+        let (outputs, poll_ms) = poll_local_scheduler_chat_job_blocking(
+            client,
+            "job_realtime_answer",
+            Duration::from_secs(2),
+            Duration::from_millis(1),
+        )
+        .expect("job should finish");
+
+        assert_eq!(
+            crate::scheduler_tasks::output_text(&outputs).as_deref(),
+            Some("hot answer")
+        );
+        assert!(poll_ms < 1000);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn realtime_chat_job_poll_timeout_adds_eta_cushion() {
+        let _guard = env_lock();
+        let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
+        std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS");
+
+        let timeout = local_scheduler_chat_job_poll_timeout(Some(15_144));
+
+        match saved {
+            Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
+            None => std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS"),
+        }
+
+        assert!(
+            timeout >= std::time::Duration::from_millis(20_000),
+            "timeout must leave scheduler ETA headroom, got {timeout:?}"
+        );
+    }
+
     fn status_of(e: VaultError) -> u16 {
         match llm_upstream_error(e) {
             AppError::Detailed { status, .. } => status.as_u16(),
@@ -3445,6 +3544,14 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_source_lookup_detects_origin_questions() {
+        assert!(local_scheduler_source_lookup_query("tcp/ip起源于哪里？"));
+        assert!(local_scheduler_source_lookup_query(
+            "Where did TCP/IP originate?"
+        ));
+    }
+
+    #[test]
     fn history_aware_retrieval_query_keeps_direct_queries_unchanged() {
         let history = vec![HistoryMessage {
             role: "assistant".into(),
@@ -3758,6 +3865,62 @@ mod tests {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
             None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
         }
+    }
+
+    #[test]
+    fn local_scheduler_extractive_answer_handles_origin_lookup() {
+        let _env = env_lock();
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "tcp-origin",
+            "title": "TCP Origin",
+            "inject_content": "TCP/IP 起源于美国 DARPA 资助的 ARPANET 研究。"
+        })];
+        let answer = build_local_scheduler_extractive_answer("tcp/ip起源于哪里？", &knowledge)
+            .expect("origin lookup should return grounded local KB lines");
+
+        assert!(answer.contains("TCP Origin"));
+        assert!(answer.contains("ARPANET"));
+        assert!(answer.contains("DARPA"));
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_extractive_summary_keeps_source_facts() {
+        let _env = env_lock();
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "tcp-origin",
+            "title": "TCP Origin",
+            "inject_content": "TCP/IP 起源于美国 DARPA 资助的 ARPANET 研究。"
+        })];
+        let answer =
+            build_local_scheduler_extractive_summary("总结刚上传文档的核心结论", &knowledge)
+                .expect("summary should return grounded local KB lines");
+
+        assert!(answer.contains("核心结论"));
+        assert!(answer.contains("关键证据"));
+        assert!(answer.contains("ARPANET"));
+        assert!(answer.contains("DARPA"));
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_summary_query_detects_kb_document_summary() {
+        assert!(local_scheduler_summary_query("总结这份知识库文档"));
+        assert!(local_scheduler_summary_query("overview of this KB"));
     }
 
     #[test]
