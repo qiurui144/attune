@@ -1,0 +1,45 @@
+id: oss-rag-default
+name: Attune OSS Default RAG
+type: rag_profile_pack
+version: "1.5.1"
+author: attune-team
+category: general
+description: Default knowledge-base chat and summary RAG profiles for offline, cloud-only, and edge-scheduler deployments.
+
+prompt_file: prompt.md
+
+rag_profiles:
+  - id: default_kb_chat
+    intents: [chat.rag.lookup, chat.rag.question]
+    retrieval:
+      strategy: source_diverse_cited_chunks
+      fallback_when_empty: refuse
+      top_k: 8
+    answer:
+      task: kb.query.ask
+      model_class: rag-chat
+      preferred_size: 30B
+      fallback_sizes: [14B, 70B, cloud]
+      sync_sla_ms: 8000
+      realtime_poll: true
+    grounding:
+      min_citations: 1
+      refuse_without_evidence: true
+      allow_extractive_repair: true
+  - id: default_kb_summary
+    intents: [chat.rag.summary, document.summary]
+    retrieval:
+      strategy: recent_or_source_diverse_cited_chunks
+      fallback_when_empty: refuse
+      top_k: 12
+    answer:
+      task: kb.query.ask
+      model_class: rag-summary
+      preferred_size: 30B
+      fallback_sizes: [14B, 70B, cloud]
+      sync_sla_ms: 30000
+      realtime_poll: true
+    grounding:
+      min_citations: 1
+      refuse_without_evidence: true
+      allow_extractive_repair: true

@@ -179,10 +179,15 @@ rag_profiles:
       min_citations: 1
       refuse_without_evidence: true
       allow_extractive_repair: true
+  - id: fixed-top-k-chat
+    intents: [qa]
+    retrieval:
+      strategy: hybrid
+      top_k: 8
 "#;
 
     let m: PluginManifest = serde_yaml::from_str(yaml).expect("parse rag profile");
-    assert_eq!(m.rag_profiles.len(), 1);
+    assert_eq!(m.rag_profiles.len(), 2);
     let profile = &m.rag_profiles[0];
     assert_eq!(profile.id, "default-kb-chat");
     assert_eq!(profile.intents, vec!["qa", "summary", "source_lookup"]);
@@ -199,6 +204,10 @@ rag_profiles:
     assert_eq!(profile.grounding.min_citations, Some(1));
     assert_eq!(profile.grounding.refuse_without_evidence, Some(true));
     assert_eq!(profile.grounding.allow_extractive_repair, Some(true));
+    assert_eq!(
+        format!("{:?}", m.rag_profiles[1].retrieval.top_k.as_ref()),
+        "Some(Fixed(8))"
+    );
 }
 
 #[test]

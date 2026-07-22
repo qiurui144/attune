@@ -137,6 +137,10 @@ if grep -q '\${ATTUNE_EXTRA_ARGS}' "$EXTRACTED_PKG/lib/systemd/system/attune-ser
   echo "systemd unit must not pass an empty ATTUNE_EXTRA_ARGS argument" >&2
   exit 1
 fi
+test -f "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/plugin.yaml"
+test -f "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/prompt.md"
+grep -q "rag_profiles" "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/plugin.yaml"
+grep -q "30B" "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/plugin.yaml"
 
 bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
   --dry-run \

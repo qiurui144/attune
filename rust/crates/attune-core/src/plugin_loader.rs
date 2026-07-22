@@ -189,7 +189,14 @@ pub struct RagRetrievalSpec {
     #[serde(default)]
     pub fallback_when_empty: Option<String>,
     #[serde(default)]
-    pub top_k: Option<String>,
+    pub top_k: Option<RagTopKSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RagTopKSpec {
+    Fixed(u32),
+    Policy(String),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

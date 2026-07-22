@@ -123,6 +123,7 @@ else
 fi
 
 BIN="$ROOT/rust/target/$TARGET/release/attune-server-headless"
+OSS_RAG_PACK_SRC="$ROOT/rust/crates/attune-core/assets/plugins/oss_rag_default"
 STAGE="$OUT_DIR/pkgroot-attune-server-$VERSION-riscv64"
 DEB="$OUT_DIR/attune-server_${VERSION}_riscv64.deb"
 SHA="$DEB.sha256"
@@ -225,9 +226,12 @@ mkdir -p \
   "$STAGE/usr/bin" \
   "$STAGE/lib/systemd/system" \
   "$STAGE/etc/default" \
+  "$STAGE/usr/share/attune/capability-packs/oss-rag-default" \
   "$STAGE/usr/share/doc/attune-server"
 
 install -m 0755 "$BIN" "$STAGE/usr/bin/attune-server-headless"
+install -m 0644 "$OSS_RAG_PACK_SRC/plugin.yaml" "$STAGE/usr/share/attune/capability-packs/oss-rag-default/plugin.yaml"
+install -m 0644 "$OSS_RAG_PACK_SRC/prompt.md" "$STAGE/usr/share/attune/capability-packs/oss-rag-default/prompt.md"
 install -m 0644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/attune-server/LICENSE"
 install -m 0644 "$ROOT/NOTICE" "$STAGE/usr/share/doc/attune-server/NOTICE"
 install -m 0644 "$ROOT/README.md" "$STAGE/usr/share/doc/attune-server/README.md"
@@ -256,6 +260,10 @@ set -e
 install -d -m 0755 /var/lib/attune
 install -d -m 0755 /var/lib/attune/data
 install -d -m 0755 /var/lib/attune/config
+install -d -m 0755 /var/lib/attune/data/attune/plugins/oss-rag-default
+if [ -d /usr/share/attune/capability-packs/oss-rag-default ]; then
+  cp -a /usr/share/attune/capability-packs/oss-rag-default/. /var/lib/attune/data/attune/plugins/oss-rag-default/
+fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
   systemctl enable attune-server.service || true
