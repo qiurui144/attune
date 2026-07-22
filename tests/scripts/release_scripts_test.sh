@@ -197,6 +197,15 @@ grep -q "scheduler self-test" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "scheduler_observations" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "cross-host" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 
+test -f "$ROOT/docs/edge-scheduler-delivery.md"
+grep -q "attune-edge-scheduler" "$ROOT/docs/edge-scheduler-delivery.md"
+grep -q "cloud-only" "$ROOT/docs/edge-scheduler-delivery.md"
+grep -q "systemd" "$ROOT/docs/edge-scheduler-delivery.md"
+grep -q "Windows Service" "$ROOT/docs/edge-scheduler-delivery.md"
+grep -q "30B" "$ROOT/docs/edge-scheduler-delivery.md"
+grep -q "rag_profiles" "$ROOT/docs/plugin-protocol.md"
+grep -q "attune-edge-scheduler" "$ROOT/docs/local-llm-setup.md"
+
 bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
   --dry-run \
   --scheduler-url http://127.0.0.1:8090 \

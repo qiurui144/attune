@@ -212,6 +212,27 @@ registers_case_kinds:
 # 现有字段保留: chat_trigger / capabilities / workflows
 # (实装迭代中渐进迁移)
 
+# RAG Profiles
+# 插件声明知识库对话意图，不直接绑定模型、worker 或平台实现。
+rag_profiles:
+  - id: aviation_manual_chat
+    intents: [chat.rag.lookup, chat.rag.summary]
+    retrieval:
+      strategy: source_diverse_cited_chunks
+      fallback_when_empty: refuse
+      top_k: 8
+    answer:
+      task: kb.query.ask
+      model_class: rag-chat
+      preferred_size: 30B
+      fallback_sizes: [14B, 70B, cloud]
+      sync_sla_ms: 8000
+      realtime_poll: true
+    grounding:
+      min_citations: 1
+      refuse_without_evidence: true
+      allow_extractive_repair: true
+
 # Skills
 skills:
   - id: extract_loan_terms
