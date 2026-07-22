@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Attune KB Demo · K3</title>
+<style>
+:root{--bg:#f6f7f8;--surface:#fff;--surface2:#eef4f4;--text:#222831;--muted:#67707a;--accent:#4f7f7a;--accent2:#3d6763;--border:#d9dee2;--ok:#238636;--warn:#b7791f;--err:#c62828;--chip:#edf1f2;--radius:8px}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.app{max-width:1180px;margin:0 auto;padding:18px}.header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}.header h1{font-size:22px;margin:0;color:var(--accent)}.header p{margin:4px 0 0;color:var(--muted);font-size:12px}.statusbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{font-size:11px;padding:5px 8px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted)}.pill.ok{color:var(--ok);border-color:#bbdfc1}.pill.warn{color:var(--warn);border-color:#efd9a6}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0}.tab{min-height:42px;border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer}.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}.grid{display:grid;grid-template-columns:1fr 360px;gap:14px}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}.card h2{font-size:15px;margin:0 0 12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.grow{flex:1;min-width:180px}input,select,textarea{font:inherit;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--surface);padding:10px 12px;color:var(--text);outline:none}textarea{width:100%;resize:vertical;min-height:72px;line-height:1.55}input:focus,select:focus,textarea:focus{border-color:var(--accent)}button{border:0;border-radius:6px;background:var(--accent);color:#fff;padding:10px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}button:hover{background:var(--accent2)}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:var(--chip);color:var(--text);border:1px solid var(--border)}.secondary:hover{background:#e1e8e8}.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:34px 18px;text-align:center;background:#fbfcfc;cursor:pointer}.upload-zone.dragover,.upload-zone:hover{border-color:var(--accent);background:var(--surface2)}.upload-zone input{display:none}.upload-zone strong{display:block;font-size:15px;margin-bottom:5px}.muted{color:var(--muted);font-size:12px}.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}.step{border:1px solid var(--border);border-radius:6px;padding:10px;background:#fbfcfc;min-height:72px}.step .name{font-size:12px;font-weight:700}.step .time{font-size:18px;color:var(--accent);font-weight:800;margin-top:5px}.step .state{font-size:11px;color:var(--muted);margin-top:2px}.step.done{border-color:#b9dfc0;background:#f0fbf2}.step.active{border-color:var(--accent);background:var(--surface2)}.file-list,.chunk-list,.chat-msgs{display:flex;flex-direction:column;gap:8px}.file,.chunk,.msg{border:1px solid var(--border);border-radius:var(--radius);background:#fbfcfc;padding:11px 12px}.file{display:grid;grid-template-columns:1fr auto;gap:6px 10px}.file .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file .meta,.chunk .meta,.msg .meta{font-size:11px;color:var(--muted)}.file .right{text-align:right}.oktxt{color:var(--ok)}.warntxt{color:var(--warn)}.errtxt{color:var(--err)}.chunk{line-height:1.52}.chunk .title{font-weight:750;margin-bottom:4px}.chunk .body{font-size:12px;color:#343b43;max-height:130px;overflow:auto;white-space:pre-wrap}.chunk .score{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}.chat-msgs{max-height:520px;overflow:auto;margin-bottom:10px}.msg{max-width:88%;line-height:1.6;font-size:13px}.msg.user{align-self:flex-end;background:var(--accent);border-color:var(--accent);color:#fff}.msg.asst{align-self:flex-start}.msg.status{border-style:dashed;background:#fff8e8}.msg .role{font-weight:800;font-size:11px;margin-bottom:3px;opacity:.78}.cite{border-top:1px solid var(--border);margin-top:8px;padding-top:7px;display:flex;gap:5px;flex-wrap:wrap}.cite span{font-size:10px;background:var(--chip);border-radius:999px;padding:2px 7px;color:var(--muted)}.side-stat{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{background:#fbfcfc;border:1px solid var(--border);border-radius:6px;padding:10px}.stat b{display:block;color:var(--accent);font-size:20px}.empty{padding:26px 10px;text-align:center;color:var(--muted);font-size:13px}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #c8d0d6;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:860px){.header{display:block}.statusbar{justify-content:flex-start;margin-top:10px}.tabs{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr}.msg{max-width:100%}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <div><h1>Attune 知识库 Demo</h1><p>K3 RISC-V · 上传、向量库、RAG Chat、RAG Summary 全流程展示</p></div>
+    <div class="statusbar">
+      <span class="pill" id="apiPill">API: -</span>
+      <span class="pill" id="vaultPill">Vault: -</span>
+      <span class="pill" id="itemsPill">Docs: -</span>
+      <span class="pill" id="pendingPill">Pending: -</span>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="upload">上传 & 管理</button>
+    <button class="tab" data-tab="vectors">向量库</button>
+    <button class="tab" data-tab="chat">Chat RAG</button>
+    <button class="tab" data-tab="summary">Summary RAG</button>
+  </div>
+
+  <section id="tab-upload">
+    <div class="grid">
+      <div>
+        <div class="card">
+          <div class="upload-zone" id="dropZone" onclick="fileInput.click()">
+            <strong>拖拽文件到此处，或点击选择文件</strong>
+            <div class="muted">PDF / Markdown / TXT / HTML / DOCX / 图片 · 通过 Attune /api/v1/upload 入库</div>
+            <input type="file" id="fileInput" multiple accept=".pdf,.md,.markdown,.txt,.html,.docx,.png,.jpg,.jpeg,.webp,.bmp">
+          </div>
+          <div class="pipeline" id="pipeline"></div>
+        </div>
+        <div class="card">
+          <div class="row" style="justify-content:space-between;margin-bottom:10px">
+            <h2 style="margin:0">上传文件</h2>
+            <button class="secondary" onclick="refreshAll()">刷新状态</button>
+          </div>
+          <div class="file-list" id="fileList"></div>
+        </div>
+      </div>
+      <aside>
+        <div class="card">
+          <h2>全流程时间</h2>
+          <div class="side-stat">
+            <div class="stat"><b id="statUpload">-</b><span class="muted">上传</span></div>
+            <div class="stat"><b id="statChunks">-</b><span class="muted">向量块</span></div>
+            <div class="stat"><b id="statIndex">-</b><span class="muted">索引等待</span></div>
+            <div class="stat"><b id="statTotal">-</b><span class="muted">总耗时</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Attune 能力链路</h2>
+          <div class="muted" style="line-height:1.8">上传文件后，attune 解析内容、切分 L1/L2 chunk、写入全文索引与向量 embedding 队列。页面通过 `/api/v1/status` 和 `/api/v1/search` 展示索引进度与可检索向量块。</div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <section id="tab-vectors" style="display:none">
+    <div class="card">
+      <div class="row">
+        <input class="grow" id="vectorQuery" placeholder="搜索向量库 chunk，例如：HNSW、加密、合同条款">
+        <select id="topK"><option>5</option><option selected>10</option><option>20</option><option>50</option></select>
+        <button onclick="runVectorSearch()">检索块</button>
+        <button class="secondary" onclick="loadRecentChunks()">最近索引</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px"><h2 style="margin:0">向量块显示</h2><span class="muted" id="vectorMeta">-</span></div>
+      <div class="chunk-list" id="chunkList"></div>
+    </div>
+  </section>
+
+  <section id="tab-chat" style="display:none">
+    <div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <select id="chatModel"><option value="llm-chat" selected>llm-chat · Qwen3-30B-A3B</option><option value="llm-summary">llm-summary · Qwen3.5-2B</option></select>
+        <button class="secondary" onclick="prepareModel('chat')">切换模型</button>
+        <span class="muted" id="chatModelState">模型: llm-chat</span>
+      </div>
+      <div class="chat-msgs" id="chatMsgs"><div class="msg asst"><div class="role">Attune</div>上传文件后，基于知识库直接提问。回答、引用、耗时都来自 `/api/v1/chat`。</div></div>
+      <div class="row">
+        <input class="grow" id="chatInput" placeholder="输入知识库问题..." onkeydown="if(event.key==='Enter')sendRag('chat')">
+        <button id="chatBtn" onclick="sendRag('chat')">提问</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-summary" style="display:none">
+    <div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <select id="summaryModel"><option value="llm-summary" selected>llm-summary · 快速总结</option><option value="llm-chat">llm-chat · 深度总结</option></select>
+        <button class="secondary" onclick="prepareModel('summary')">切换模型</button>
+        <span class="muted" id="summaryModelState">模型: llm-summary</span>
+      </div>
+      <div class="chat-msgs" id="summaryMsgs"><div class="msg asst"><div class="role">Attune Summary</div>这里同样走 RAG，只是默认用 summary 模型和总结提示词。</div></div>
+      <textarea id="summaryInput" placeholder="输入总结目标，例如：总结刚上传文档的核心结论、风险点和待办。"></textarea>
+      <div class="row" style="justify-content:flex-end;margin-top:8px">
+        <button id="summaryBtn" onclick="sendRag('summary')">生成总结</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const API_BASE = (params.get('api') || localStorage.getItem('attune_api_base') || (location.hostname ? `${location.protocol}//${location.hostname}:8889` : 'http://192.168.100.233:8889')).replace(/\/$/,'');
+const files = new Map(JSON.parse(sessionStorage.getItem('attune_demo_files') || '[]'));
+const timings = {upload:0,index:0,total:0,chunks:0};
+let activeTab = 'upload';
+let latestStatus = {items:0,pending_embeddings:0};
+
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+function fmtMs(ms){if(!ms)return'-';if(ms<1000)return `${Math.round(ms)}ms`;if(ms<60000)return `${(ms/1000).toFixed(1)}s`;return `${(ms/60000).toFixed(1)}m`}
+function fmtSize(b){if(!b)return'-';if(b<1024*1024)return `${(b/1024).toFixed(1)} KB`;return `${(b/1024/1024).toFixed(1)} MB`}
+function saveFiles(){sessionStorage.setItem('attune_demo_files', JSON.stringify([...files.entries()]))}
+function setText(id, text){document.getElementById(id).textContent=text}
+
+async function api(method, path, body, options={}){
+  if(!path.startsWith('/api/v1/')) throw new Error(`non-attune api path blocked: ${path}`);
+  const init = {method, headers:{...(options.headers||{})}};
+  if(body instanceof FormData){init.body=body}
+  else if(body !== undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
+  const res = await fetch(API_BASE + path, init);
+  const text = await res.text();
+  let data = {};
+  try{data = text ? JSON.parse(text) : {}}catch(_){data = {raw:text}}
+  if(!res.ok){throw new Error(data.error || data.message || `${method} ${path} HTTP ${res.status}`)}
+  return data;
+}
+
+document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>switchTab(btn.dataset.tab)));
+fileInput.addEventListener('change', e=>handleFiles(e.target.files));
+const dz = document.getElementById('dropZone');
+dz.addEventListener('dragover', e=>{e.preventDefault();dz.classList.add('dragover')});
+dz.addEventListener('dragleave', ()=>dz.classList.remove('dragover'));
+dz.addEventListener('drop', e=>{e.preventDefault();dz.classList.remove('dragover');handleFiles(e.dataTransfer.files)});
+
+function switchTab(tab){
+  activeTab = tab;
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===tab));
+  ['upload','vectors','chat','summary'].forEach(t=>document.getElementById(`tab-${t}`).style.display = t===tab ? '' : 'none');
+  if(tab==='vectors') loadRecentChunks();
+  refreshAll();
+}
+
+function renderPipeline(stage='idle'){
+  const steps = [
+    ['upload','上传',timings.upload],
+    ['chunk','切分',timings.chunks ? `${timings.chunks} 块` : 0],
+    ['embed','向量化',timings.index],
+    ['search','检索验证',timings.total && timings.index ? Math.max(timings.total-timings.upload-timings.index,0) : 0],
+    ['ready','就绪',timings.total],
+  ];
+  const order = ['upload','chunk','embed','search','ready'];
+  const activeIdx = order.indexOf(stage);
+  pipeline.innerHTML = steps.map(([id,name,time],i)=>{
+    const cls = stage==='idle' ? '' : i < activeIdx ? 'done' : i === activeIdx ? 'active' : '';
+    const value = typeof time === 'string' ? time : fmtMs(time);
+    return `<div class="step ${cls}"><div class="name">${name}</div><div class="time">${value}</div><div class="state">${cls==='done'?'完成':cls==='active'?'进行中':'等待'}</div></div>`;
+  }).join('');
+  setText('statUpload', fmtMs(timings.upload));
+  setText('statChunks', timings.chunks ? String(timings.chunks) : '-');
+  setText('statIndex', fmtMs(timings.index));
+  setText('statTotal', fmtMs(timings.total));
+}
+
+async function handleFiles(list){
+  for(const file of list){
+    const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+    files.set(localId,{name:file.name,size:file.size,status:'上传中',chunks:0,created:Date.now(),elapsed:0});
+    saveFiles(); renderFiles(); renderPipeline('upload');
+    const t0 = performance.now();
+    try{
+      const form = new FormData();
+      form.append('file', file, file.name);
+      const up0 = performance.now();
+      const out = await api('POST','/api/v1/upload',form);
+      timings.upload = performance.now() - up0;
+      const itemId = out.id || localId;
+      files.delete(localId);
+      files.set(itemId,{name:out.title||file.name,size:file.size,status:out.status||'processing',chunks:out.chunks_queued||0,created:Date.now(),elapsed:performance.now()-t0,item_id:itemId});
+      timings.chunks = out.chunks_queued || 0;
+      saveFiles(); renderFiles(); renderPipeline('embed');
+      await waitUntilSearchable(itemId, out.title || file.name, t0);
+    }catch(err){
+      const info = files.get(localId);
+      if(info){info.status='失败';info.error=err.message;info.elapsed=performance.now()-t0}
+      saveFiles(); renderFiles(); renderPipeline('idle');
+    }
+  }
+}
+
+async function waitUntilSearchable(itemId, name, t0){
+  const start = performance.now();
+  const query = (name || itemId).replace(/\.[^.]+$/,'').slice(0,32) || itemId;
+  for(let i=0;i<45;i++){
+    await new Promise(r=>setTimeout(r,1800));
+    try{
+      const result = await api('GET', `/api/v1/search?q=${encodeURIComponent(query)}&top_k=20`);
+      const chunks = (result.results||[]).filter(r=>r.item_id===itemId);
+      const info = files.get(itemId);
+      if(chunks.length){
+        timings.index = performance.now() - start;
+        timings.total = performance.now() - t0;
+        timings.chunks = chunks.length;
+        if(info){info.status='ready';info.ready=true;info.elapsed=timings.total;info.chunks=timings.chunks}
+        saveFiles(); renderFiles(); renderPipeline('ready'); renderChunks(chunks, result.latency_ms, query);
+        return;
+      }
+      if(info){info.status=`索引中 ${Math.round((performance.now()-t0)/1000)}s`;info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+    }catch(_){}
+  }
+  const info = files.get(itemId);
+  if(info){info.status='等待向量完成';info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+  timings.total = performance.now() - t0; renderPipeline('search');
+}
+
+function renderFiles(){
+  const rows = [...files.entries()].sort((a,b)=>(b[1].created||0)-(a[1].created||0));
+  if(!rows.length){fileList.innerHTML='<div class="empty">暂无已上传文件</div>';return}
+  fileList.innerHTML = rows.map(([id,f])=>{
+    const good = f.ready || f.status==='ready' || f.chunks>0;
+    const cls = f.error ? 'errtxt' : good ? 'oktxt' : 'warntxt';
+    return `<div class="file"><div><div class="name">${esc(f.name)}</div><div class="meta">${esc(id)} · ${fmtSize(f.size)}</div></div><div class="right"><div class="${cls}">${esc(f.error || f.status || 'processing')}</div><div class="meta">${f.chunks||0} chunks · ${fmtMs(f.elapsed)}</div></div></div>`;
+  }).join('');
+}
+
+async function refreshAll(){
+  apiPill.textContent = `API: ${API_BASE}`;
+  try{
+    const status = await api('GET','/api/v1/status');
+    latestStatus = status;
+    const state = status.state || status.vault_state || 'ok';
+    vaultPill.textContent = `Vault: ${state}`;
+    vaultPill.className = `pill ${String(state).toLowerCase().includes('unlock') || state==='ok' ? 'ok' : 'warn'}`;
+    itemsPill.textContent = `Docs: ${status.items ?? '-'}`;
+    pendingPill.textContent = `Pending: ${status.pending_embeddings ?? 0}`;
+    pendingPill.className = `pill ${(status.pending_embeddings||0)>0 ? 'warn' : 'ok'}`;
+  }catch(err){
+    vaultPill.textContent = `Vault: ${err.message}`;
+    vaultPill.className = 'pill warn';
+  }
+  renderFiles();
+}
+
+async function ensureKnowledgeReadyForRag(){
+  await refreshAll();
+  const pending = Number(latestStatus.pending_embeddings || 0);
+  if(pending > 0){
+    throw new Error(`知识库仍在向量化，Pending ${pending}。请等待索引完成后再提问。`);
+  }
+  const localFiles = [...files.values()];
+  const readyLocal = localFiles.some(f=>f.ready || f.status==='ready');
+  if(localFiles.length && !readyLocal){
+    throw new Error('已上传文件还没有可检索向量块。请在上传页等待状态变为 ready，或到向量库页确认能检索到 chunk。');
+  }
+}
+
+async function runVectorSearch(){
+  const q = vectorQuery.value.trim();
+  if(!q){vectorQuery.focus();return}
+  chunkList.innerHTML = '<div class="empty"><span class="spinner"></span>检索向量块...</div>';
+  const t0 = performance.now();
+  try{
+    const d = await api('GET', `/api/v1/search?q=${encodeURIComponent(q)}&top_k=${encodeURIComponent(topK.value)}`);
+    renderChunks(d.results||[], d.latency_ms ?? performance.now()-t0, q);
+  }catch(err){
+    chunkList.innerHTML = `<div class="empty errtxt">${esc(err.message)}</div>`;
+  }
+}
+
+async function loadRecentChunks(){
+  const fallback = [...files.values()].find(f=>f.name)?.name || '__all__';
+  vectorQuery.value = vectorQuery.value || fallback.replace(/\.[^.]+$/,'');
+  await runVectorSearch();
+}
+
+function renderChunks(results, latency, query){
+  vectorMeta.textContent = `${results.length} chunks · ${fmtMs(latency)} · query: ${query}`;
+  if(!results.length){chunkList.innerHTML='<div class="empty">没有匹配的向量块</div>';return}
+  chunkList.innerHTML = results.map((r,i)=>{
+    const text = r.inject_content || r.content || r.snippet || '';
+    const title = r.title || r.filename || r.item_id || `chunk ${i+1}`;
+    const crumb = r.breadcrumb || r.chunk_id || r.item_id || '';
+    const score = Number(r.score ?? r.relevance ?? 0);
+    return `<div class="chunk"><div class="row" style="justify-content:space-between"><div class="title">${i+1}. ${esc(title)}</div><div class="score">${score.toFixed(4)}</div></div><div class="meta">${esc(crumb)}${r.chunk_offset_start!=null ? ` · ${r.chunk_offset_start}-${r.chunk_offset_end}` : ''}</div><div class="body">${esc(text)}</div></div>`;
+  }).join('');
+}
+
+async function prepareModel(kind){
+  const model = document.getElementById(kind==='chat'?'chatModel':'summaryModel').value;
+  const stateEl = document.getElementById(kind==='chat'?'chatModelState':'summaryModelState');
+  stateEl.innerHTML = '<span class="spinner"></span>切换中...';
+  await api('PATCH','/api/v1/settings',{llm:{provider:'local_scheduler',endpoint:'http://127.0.0.1:8090',model,api_key:'local-scheduler'}});
+  stateEl.textContent = `模型: ${model}`;
+  return model;
+}
+
+function appendMsg(kind, role, text, extra=''){
+  const box = document.getElementById(kind==='chat'?'chatMsgs':'summaryMsgs');
+  const cls = role==='你' ? 'user' : 'asst';
+  box.insertAdjacentHTML('beforeend', `<div class="msg ${cls}"><div class="role">${esc(role)}</div>${esc(text).replace(/\n/g,'<br>')}${extra}</div>`);
+  box.scrollTop = box.scrollHeight;
+}
+
+function chatJobIdFromResponse(d){
+  const direct = d?.local_scheduler?.job_id || d?.job_id || d?.id;
+  if(direct && String(direct).startsWith('job_')) return String(direct);
+  const text = String(d?.content || d?.answer || d?.message || '');
+  const match = text.match(/\bjob_[a-zA-Z0-9_:-]+\b/);
+  return match ? match[0] : '';
+}
+
+function textFromSchedulerJob(payload){
+  const job = payload?.job || payload || {};
+  return job?.outputs?.choices?.[0]?.message?.content
+    || job?.outputs?.answer
+    || job?.outputs?.text
+    || job?.output?.text
+    || job?.result?.text
+    || '';
+}
+
+function latencyFromApiPayload(payload, fallback){
+  const job = payload?.job || payload || {};
+  const candidates = [
+    payload?.latency_ms,
+    payload?.elapsed_ms,
+    payload?.cost?.latency_ms,
+    job?.latency_ms,
+    job?.elapsed_ms,
+    job?.outputs?.latency_ms,
+    job?.outputs?.usage?.latency_ms,
+  ];
+  for(const value of candidates){
+    const n = Number(value);
+    if(Number.isFinite(n) && n >= 0) return n;
+  }
+  return fallback;
+}
+
+function modelFromApiPayload(payload, fallback){
+  const job = payload?.job || payload || {};
+  return payload?.cost?.model
+    || payload?.cost_estimate?.model
+    || payload?.local_scheduler?.model
+    || job?.model
+    || job?.outputs?.model
+    || fallback;
+}
+
+function providerFromApiPayload(payload){
+  const job = payload?.job || payload || {};
+  return payload?.cost?.provider
+    || payload?.local_scheduler?.provider
+    || job?.provider
+    || job?.outputs?.provider
+    || '';
+}
+
+function isTerminalJob(payload){
+  const job = payload?.job || payload || {};
+  const status = String(job.status || job.state || '').toLowerCase();
+  return ['done','completed','complete','success','succeeded','failed','error','cancelled','canceled','expired'].includes(status);
+}
+
+async function pollChatJob(jobId, timeoutMs=45000){
+  const started = performance.now();
+  while(performance.now() - started < timeoutMs){
+    await new Promise(r=>setTimeout(r,250));
+    const payload = await api('GET', `/api/v1/chat/local-scheduler/jobs/${encodeURIComponent(jobId)}`);
+    const text = textFromSchedulerJob(payload);
+    if(text) return {text, payload, elapsed: performance.now() - started};
+    if(isTerminalJob(payload)){
+      const job = payload?.job || payload || {};
+      throw new Error(job.error || job.reason || `scheduler job ${jobId} ended without text`);
+    }
+  }
+  throw new Error(`scheduler job ${jobId} timed out`);
+}
+
+async function sendRag(kind){
+  const isChat = kind==='chat';
+  const input = document.getElementById(isChat?'chatInput':'summaryInput');
+  const btn = document.getElementById(isChat?'chatBtn':'summaryBtn');
+  const raw = input.value.trim();
+  if(!raw)return;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+  appendMsg(kind,'你',raw);
+  const box = document.getElementById(isChat?'chatMsgs':'summaryMsgs');
+  const waitId = `${kind}-wait-${Date.now()}`;
+  box.insertAdjacentHTML('beforeend', `<div class="msg asst status" id="${waitId}"><div class="role">Attune</div><span class="spinner"></span>RAG 检索 + 推理中...</div>`);
+  try{
+    await ensureKnowledgeReadyForRag();
+    const model = await prepareModel(kind);
+    const message = isChat ? raw : `请只基于 Attune 知识库检索结果进行总结。输出：1. 核心结论；2. 关键证据；3. 风险或待办。\n\n总结目标：${raw}`;
+    const t0 = performance.now();
+    const d = await api('POST','/api/v1/chat',{message});
+    const elapsed = performance.now() - t0;
+    document.getElementById(waitId)?.remove();
+    const jobId = chatJobIdFromResponse(d);
+    let answer = d.content || d.answer || JSON.stringify(d);
+    let displayedLatency = latencyFromApiPayload(d, elapsed);
+    let displayedModel = modelFromApiPayload(d, model);
+    let displayedProvider = providerFromApiPayload(d);
+    if(jobId){
+      const statusId = `${kind}-job-${Date.now()}`;
+      box.insertAdjacentHTML('beforeend', `<div class="msg asst status" id="${statusId}"><div class="role">Attune</div><span class="spinner"></span>任务 ${esc(jobId)} 已提交，正在通过 Attune 轮询...</div>`);
+      const done = await pollChatJob(jobId);
+      document.getElementById(statusId)?.remove();
+      answer = done.text;
+      displayedLatency = latencyFromApiPayload(done.payload, displayedLatency + done.elapsed);
+      displayedModel = modelFromApiPayload(done.payload, displayedModel);
+      displayedProvider = providerFromApiPayload(done.payload) || displayedProvider;
+    }
+    const cites = (d.citations||[]).slice(0,8).map(c=>`<span>${esc(c.title || c.item_id || c.chunk_id || 'source')}</span>`).join('');
+    const modelLabel = displayedProvider ? `${displayedProvider}/${displayedModel}` : displayedModel;
+    const meta = `<div class="meta">耗时 ${fmtMs(displayedLatency)} · ${esc(modelLabel)}${jobId ? ` · ${jobId}` : ''} · knowledge ${d.knowledge_count ?? (d.citations||[]).length}</div>${cites?`<div class="cite">${cites}</div>`:''}`;
+    appendMsg(kind, isChat ? 'Attune Chat RAG' : 'Attune Summary RAG', answer, meta);
+  }catch(err){
+    document.getElementById(waitId)?.remove();
+    appendMsg(kind,'错误',err.message);
+  }finally{
+    btn.disabled = false; btn.textContent = isChat ? '提问' : '生成总结'; input.value = '';
+  }
+}
+
+renderPipeline();
+renderFiles();
+refreshAll();
+</script>
+</body>
+</html>
