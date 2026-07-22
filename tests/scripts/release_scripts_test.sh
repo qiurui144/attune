@@ -9,6 +9,7 @@ required=(
   "$ROOT/scripts/package-riscv64-deb.sh"
   "$ROOT/scripts/audit-rvv-vectorization.sh"
   "$ROOT/scripts/release/build-riscv64-server-deb.sh"
+  "$ROOT/scripts/release/probe-attune-package-boundary.sh"
   "$ROOT/scripts/release/test-k3-nas-web-demo.sh"
   "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh"
   "$ROOT/scripts/maintenance/audit-scripts-and-outputs.sh"
@@ -64,6 +65,19 @@ test -f "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
 test -f "$TMP/one-key-reports/build-riscv64-server-deb-dry-run.md"
 grep -q "One-key riscv64 Debian Package" "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
 grep -q "scripts/release/build-riscv64-server-deb.sh" "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
+
+BOUNDARY_OK="$TMP/boundary-ok"
+BOUNDARY_BAD="$TMP/boundary-bad"
+mkdir -p "$BOUNDARY_OK/usr/bin" "$BOUNDARY_BAD/usr/lib"
+printf 'server\n' > "$BOUNDARY_OK/usr/bin/attune-server-headless"
+printf 'model\n' > "$BOUNDARY_BAD/usr/lib/model.onnx"
+bash "$ROOT/scripts/release/probe-attune-package-boundary.sh" "$BOUNDARY_OK" > "$TMP/boundary-ok.txt"
+grep -q "attune package boundary PASS" "$TMP/boundary-ok.txt"
+if bash "$ROOT/scripts/release/probe-attune-package-boundary.sh" "$BOUNDARY_BAD" > "$TMP/boundary-bad.txt" 2>&1; then
+  echo "package boundary probe unexpectedly accepted model/runtime artifact" >&2
+  exit 1
+fi
+grep -q "inference runtime/model-looking files" "$TMP/boundary-bad.txt"
 
 FAKE_TOOLS="$TMP/fake-rvv-tools"
 mkdir -p "$FAKE_TOOLS"

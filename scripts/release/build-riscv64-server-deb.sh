@@ -311,11 +311,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-if find "$STAGE" -type f | grep -Eiq 'onnx|sherpa|model|ort'; then
-  echo "package staging unexpectedly contains inference runtime/model-looking files" >&2
-  find "$STAGE" -type f | grep -Ei 'onnx|sherpa|model|ort' >&2 || true
-  exit 1
-fi
+bash "$ROOT/scripts/release/probe-attune-package-boundary.sh" "$STAGE"
 
 append_report '```text'
 find "$STAGE" -maxdepth 5 -type f | sed "s#^$STAGE/##" | sort >> "$REPORT"
