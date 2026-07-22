@@ -29,21 +29,21 @@
 - Produces: `PluginManifest.rag_profiles: Vec<RagProfileSpec>`
 - Produces: `PluginRegistry::list_rag_profiles(&self) -> Vec<(&str, &RagProfileSpec)>`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests that parse a plugin YAML with one `rag_profiles` entry and assert registry aggregation returns it.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p attune-core plugin_loader_parses_rag_profiles --test plugin_protocol_e2e -- --nocapture`
 
 Expected: compile failure or assertion failure because `rag_profiles` does not exist.
 
-- [ ] **Step 3: Implement schema and registry aggregation**
+- [x] **Step 3: Implement schema and registry aggregation**
 
 Add serde structs for `RagProfileSpec`, `RagRetrievalSpec`, `RagAnswerSpec`, and `RagGroundingSpec`. Add a defaulted `rag_profiles` field to `PluginManifest`. Add `PluginRegistry::list_rag_profiles`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `cargo test -p attune-core plugin_loader_parses_rag_profiles --test plugin_protocol_e2e -- --nocapture`
 
@@ -60,21 +60,21 @@ Expected: one passing test.
 - Produces: optional task/model metadata fields `model_class`, `preferred_size`, `fallback_sizes`, and `sync_sla_ms`.
 - Produces: runtime profile fields that expose capability metadata without breaking legacy scheduler contracts.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add a contract fixture or inline DTO with `model_class: "local-answer"` and `preferred_size: "30b"`, then assert `RuntimeProfileResolver` preserves it.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p attune-core runtime_profile_preserves_scheduler_capability_metadata --test local_scheduler_runtime_profile -- --nocapture`
 
 Expected: compile failure or assertion failure because metadata fields are missing.
 
-- [ ] **Step 3: Implement optional metadata**
+- [x] **Step 3: Implement optional metadata**
 
 Add serde-defaulted optional fields to scheduler DTOs and runtime profiles. Legacy contracts must deserialize unchanged.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `cargo test -p attune-core runtime_profile_preserves_scheduler_capability_metadata --test local_scheduler_runtime_profile -- --nocapture`
 
@@ -92,21 +92,21 @@ Expected: passing test plus existing scheduler profile tests unchanged.
 - Produces: one reusable script that checks server package staging does not contain model/runtime artifacts.
 - Produces: release reports naming the scheduler as a separate package responsibility.
 
-- [ ] **Step 1: Write failing shell test**
+- [x] **Step 1: Write failing shell test**
 
 Add a test that expects `scripts/release/probe-attune-package-boundary.sh` to exist and fail on files named like `model.onnx`, `libsherpa`, or `onnxruntime`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `bash tests/scripts/release_scripts_test.sh`
 
 Expected: failure because the new probe script is missing.
 
-- [ ] **Step 3: Implement probe script and wire packaging scripts**
+- [x] **Step 3: Implement probe script and wire packaging scripts**
 
 Create the probe script and replace inline grep checks in the riscv64 deb staging script with the reusable probe.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `bash tests/scripts/release_scripts_test.sh`
 
@@ -124,21 +124,21 @@ Expected: passing release script tests.
 - Produces: pure helpers for answer budget, scheduler context building, source line extraction, and summary/source lookup detection.
 - Keeps public `/api/v1/chat` response shape unchanged.
 
-- [ ] **Step 1: Write failing unit tests against `rag_orchestrator`**
+- [x] **Step 1: Write failing unit tests against `rag_orchestrator`**
 
 Move or duplicate tests for local scheduler context budget, source lookup, and summary extraction to the new module first.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p attune-server rag_orchestrator -- --nocapture`
 
 Expected: compile failure because the module does not exist.
 
-- [ ] **Step 3: Move pure helper code**
+- [x] **Step 3: Move pure helper code**
 
 Move pure functions out of `routes/chat.rs` into `rag_orchestrator.rs` and re-export only the functions used by the route.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `cargo test -p attune-server rag_orchestrator -- --nocapture`
 
@@ -156,23 +156,22 @@ Expected: passing orchestrator tests and no public API change.
 - Produces: operator-facing contract for deb/exe/msi scheduler deployment.
 - Produces: shared E2E checklist for Linux, Windows, and RISC-V.
 
-- [ ] **Step 1: Write docs test or grep check**
+- [x] **Step 1: Write docs test or grep check**
 
 Extend script tests to assert docs mention `attune-edge-scheduler`, `cloud-only`, `Windows Service`, and `systemd`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `bash tests/scripts/release_scripts_test.sh`
 
 Expected: failure if the docs do not contain the required contract terms.
 
-- [ ] **Step 3: Write delivery docs**
+- [x] **Step 3: Write delivery docs**
 
 Document package roles, install directories, service names, scheduler URL configuration, and platform E2E checks.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `bash tests/scripts/release_scripts_test.sh`
 
 Expected: passing docs/release checks.
-
