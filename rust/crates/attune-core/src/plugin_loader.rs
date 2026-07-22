@@ -121,6 +121,12 @@ pub struct PluginManifest {
     #[serde(default)]
     pub registers_skills: Vec<String>,
 
+    /// Declarative knowledge-base chat profiles. These describe retrieval,
+    /// answer-task, and grounding policy for generic RAG flows without adding
+    /// route-level hard-coded intent branches.
+    #[serde(default)]
+    pub rag_profiles: Vec<RagProfileSpec>,
+
     /// Skills — 原子能力 (纯函数, 可缓存).
     #[serde(default)]
     pub skills: Vec<SkillSpec>,
@@ -160,6 +166,56 @@ pub struct PluginResources {
     /// 外部 API 列表 (仅 hint, 数量不限制)
     #[serde(default)]
     pub external_apis: Vec<String>,
+}
+
+/// Declarative RAG profile contributed by an OSS or third-party plugin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagProfileSpec {
+    pub id: String,
+    #[serde(default)]
+    pub intents: Vec<String>,
+    #[serde(default)]
+    pub retrieval: RagRetrievalSpec,
+    #[serde(default)]
+    pub answer: RagAnswerSpec,
+    #[serde(default)]
+    pub grounding: RagGroundingSpec,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagRetrievalSpec {
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub fallback_when_empty: Option<String>,
+    #[serde(default)]
+    pub top_k: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagAnswerSpec {
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub model_class: String,
+    #[serde(default)]
+    pub preferred_size: Option<String>,
+    #[serde(default)]
+    pub fallback_sizes: Vec<String>,
+    #[serde(default)]
+    pub sync_sla_ms: Option<u64>,
+    #[serde(default)]
+    pub realtime_poll: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagGroundingSpec {
+    #[serde(default)]
+    pub min_citations: Option<usize>,
+    #[serde(default)]
+    pub refuse_without_evidence: Option<bool>,
+    #[serde(default)]
+    pub allow_extractive_repair: Option<bool>,
 }
 
 /// 案件类型注册 (付费插件 → 案件类型 → agent 映射)

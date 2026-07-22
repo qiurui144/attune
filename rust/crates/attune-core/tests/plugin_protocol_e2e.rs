@@ -155,6 +155,88 @@ fn manifest_v2_full_yaml_parses() {
 }
 
 #[test]
+fn plugin_loader_parses_rag_profiles() {
+    let yaml = r#"
+id: edge-rag
+name: Edge RAG
+type: utility
+version: "0.1.0"
+rag_profiles:
+  - id: default-kb-chat
+    intents: [qa, summary, source_lookup]
+    retrieval:
+      strategy: hybrid
+      fallback_when_empty: recent_items
+      top_k: adaptive
+    answer:
+      task: kb.rag.answer.v1
+      model_class: local-answer
+      preferred_size: 30b
+      fallback_sizes: [14b, 7b]
+      sync_sla_ms: 8000
+      realtime_poll: eta_plus_margin
+    grounding:
+      min_citations: 1
+      refuse_without_evidence: true
+      allow_extractive_repair: true
+"#;
+
+    let m: PluginManifest = serde_yaml::from_str(yaml).expect("parse rag profile");
+    assert_eq!(m.rag_profiles.len(), 1);
+    let profile = &m.rag_profiles[0];
+    assert_eq!(profile.id, "default-kb-chat");
+    assert_eq!(profile.intents, vec!["qa", "summary", "source_lookup"]);
+    assert_eq!(profile.retrieval.strategy, "hybrid");
+    assert_eq!(
+        profile.retrieval.fallback_when_empty.as_deref(),
+        Some("recent_items")
+    );
+    assert_eq!(profile.answer.task, "kb.rag.answer.v1");
+    assert_eq!(profile.answer.model_class, "local-answer");
+    assert_eq!(profile.answer.preferred_size.as_deref(), Some("30b"));
+    assert_eq!(profile.answer.fallback_sizes, vec!["14b", "7b"]);
+    assert_eq!(profile.answer.sync_sla_ms, Some(8000));
+    assert_eq!(profile.grounding.min_citations, Some(1));
+    assert_eq!(profile.grounding.refuse_without_evidence, Some(true));
+    assert_eq!(profile.grounding.allow_extractive_repair, Some(true));
+}
+
+#[test]
+fn plugin_registry_aggregates_rag_profiles() {
+    let tmp = TempDir::new().expect("tmp");
+    let dir = tmp.path().join("edge-rag");
+    fs::create_dir_all(&dir).expect("mkdir");
+    fs::write(
+        dir.join("plugin.yaml"),
+        r#"
+id: edge-rag
+name: Edge RAG
+type: utility
+version: "0.1.0"
+rag_profiles:
+  - id: default-kb-chat
+    intents: [qa]
+    retrieval:
+      strategy: hybrid
+    answer:
+      task: kb.rag.answer.v1
+      model_class: local-answer
+    grounding:
+      min_citations: 1
+"#,
+    )
+    .expect("write plugin");
+
+    let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+    assert!(errs.is_empty(), "scan errors: {errs:?}");
+    let profiles = reg.list_rag_profiles();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].0, "edge-rag");
+    assert_eq!(profiles[0].1.id, "default-kb-chat");
+    assert_eq!(profiles[0].1.answer.model_class, "local-answer");
+}
+
+#[test]
 fn document_classifier_via_agent_trait() {
     use attune_core::agents::document_classifier::DocumentClassifierAgent;
 

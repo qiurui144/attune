@@ -309,6 +309,17 @@ impl PluginRegistry {
         out
     }
 
+    /// List every declarative RAG profile contributed by installed plugins.
+    pub fn list_rag_profiles(&self) -> Vec<(&str, &crate::plugin_loader::RagProfileSpec)> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            for profile in &p.manifest.rag_profiles {
+                out.push((pid.as_str(), profile));
+            }
+        }
+        out
+    }
+
     /// 按 case_kind 过滤 agents (调用方按业务场景选 kind, 拿到该 kind 下的 agents)
     pub fn agents_by_case_kind(&self, kind: &str) -> Vec<(&str, &crate::plugin_loader::AgentSpec)> {
         self.list_agents()
