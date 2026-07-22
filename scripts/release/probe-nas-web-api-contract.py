@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bind-dir", default="")
     parser.add_argument("--scheduler-url", default="")
     parser.add_argument("--server-scheduler-base", default="http://127.0.0.1:8090")
-    parser.add_argument("--scheduler-chat-model", default="llm-summary")
+    parser.add_argument("--scheduler-chat-model", default="llm-chat")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--job-timeout", type=float, default=90.0)
     parser.add_argument("--require-scheduler-chat", action="store_true")
