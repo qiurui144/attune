@@ -13,7 +13,10 @@
       "summary",
       "multiturn",
       "negative_evidence",
-      "out_of_manual_industry_general"
+      "out_of_manual_industry_general",
+      "multi_intent_decomposition",
+      "per_topic_source_quota",
+      "terminology_constraints"
     ],
     "minimum_turns_per_type": 1,
     "same_industry_only": true
@@ -87,6 +90,36 @@
       "expected_sources": ["security::access-control", "security::risk-assessment", "security::asset-inventory"],
       "must_include": ["知识库未直接覆盖", "行业通用", "证据不足", "不能当作手册结论"],
       "must_not_include": ["手册已明确要求零信任", "无需引用"],
+      "latency_budget_ms": 30000
+    },
+    {
+      "turn_id": "multi_intent_access_incident_audit_decision",
+      "message": "同时回答三个目标：1. 如何从 access control 证据定位问题；2. 如何排查 incident response 流程；3. 在缺少 audit evidence 时能否给出 risk assessment 建议？请按主题拆分并保留引用。",
+      "answer_mode": "multi_intent_decomposition",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::audit-evidence", "security::risk-assessment"],
+      "must_include": ["access control", "incident response", "audit evidence", "risk assessment", "证据"],
+      "must_not_include": ["跨行业", "无引用结论"],
+      "latency_budget_ms": 45000
+    },
+    {
+      "turn_id": "per_topic_source_quota_near_duplicate",
+      "message": "请从 security 知识库中分别选取 access control、incident response、risk assessment、audit evidence 的代表性证据，避免只重复同一类近重复来源。",
+      "answer_mode": "per_topic_source_quota",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "incident response", "risk assessment", "audit evidence", "代表性证据"],
+      "must_not_include": ["只引用同一来源", "跨行业"],
+      "latency_budget_ms": 45000
+    },
+    {
+      "turn_id": "terminology_constraints_bilingual_security",
+      "message": "回答时必须保留原始术语 access control、incident response、risk assessment、audit evidence，并给出中文说明；不要把这些术语替换成模糊中文。",
+      "answer_mode": "terminology_constraints",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "incident response", "risk assessment", "audit evidence", "中文"],
+      "must_not_include": ["模糊中文", "无来源"],
       "latency_budget_ms": 30000
     }
   ],

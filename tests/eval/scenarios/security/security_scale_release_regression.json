@@ -12,9 +12,11 @@
       "decision_assistance",
       "summary",
       "multiturn",
-      "negative_evidence"
-      ,
-      "out_of_manual_industry_general"
+      "negative_evidence",
+      "out_of_manual_industry_general",
+      "multi_intent_decomposition",
+      "per_topic_source_quota",
+      "terminology_constraints"
     ],
     "minimum_turns_per_type": 1,
     "same_industry_only": true,
@@ -89,6 +91,36 @@
       "expected_sources": ["security::access-control", "security::risk-assessment", "security::audit-evidence", "security::asset-inventory"],
       "must_include": ["知识库未直接覆盖", "行业通用", "证据不足", "不能当作手册结论"],
       "must_not_include": ["手册已明确要求零信任", "无需引用"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "multi_intent_access_incident_audit_decision",
+      "message": "在万级 security 知识库中，同时拆解 access control 定位、incident response 排查、audit evidence 缺失和 risk assessment 建议边界。",
+      "answer_mode": "multi_intent_decomposition",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::audit-evidence", "security::risk-assessment"],
+      "must_include": ["access control", "incident response", "audit evidence", "risk assessment", "证据"],
+      "must_not_include": ["跨行业漂移", "无引用结论"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "per_topic_source_quota_near_duplicate",
+      "message": "请为 access control、asset inventory、incident response、risk assessment、audit evidence 各选代表性来源，避免万级近重复文档淹没单一主题。",
+      "answer_mode": "per_topic_source_quota",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::asset-inventory", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "asset inventory", "incident response", "risk assessment", "audit evidence"],
+      "must_not_include": ["只引用同一来源", "跨行业"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "terminology_constraints_bilingual_security",
+      "message": "回答时保留原始英文术语 access control、incident response、risk assessment、audit evidence，并用中文解释每个术语对应的证据边界。",
+      "answer_mode": "terminology_constraints",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "incident response", "risk assessment", "audit evidence", "中文"],
+      "must_not_include": ["无来源", "跨行业"],
       "latency_budget_ms": 60000
     }
   ],

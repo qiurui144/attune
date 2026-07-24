@@ -27,6 +27,9 @@ required_types = {
     "multiturn",
     "negative_evidence",
     "out_of_manual_industry_general",
+    "multi_intent_decomposition",
+    "per_topic_source_quota",
+    "terminology_constraints",
 }
 minimum_documents = {
     "T2": 1000,

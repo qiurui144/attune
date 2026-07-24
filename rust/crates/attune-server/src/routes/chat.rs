@@ -292,12 +292,15 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
         ],
     );
     let asks_source_lookup = local_scheduler_source_lookup_query(query);
+    let asks_topic_coverage = query_requests_topic_coverage(query);
 
     let (profile, tokens, min_contexts, min_chars) =
         if local_scheduler_operational_safety_query(query) {
             ("safety", 64, 3, 96)
         } else if local_scheduler_out_of_manual_boundary_query(query) {
             ("boundary", 64, 3, 112)
+        } else if asks_topic_coverage && (asks_detailed || asks_decision_or_comparison || multi_source) {
+            ("complex_topic", 224, 8, 360)
         } else if asks_diagnostic {
             ("diagnostic", 192, 6, 320)
         } else if asks_decision_or_comparison {
@@ -560,6 +563,76 @@ fn extract_list_topics(message: &str, topics: &mut Vec<RagTopic>) {
     }
 }
 
+fn query_requests_topic_coverage(message: &str) -> bool {
+    text_contains_any(
+        message,
+        &[
+            "同时",
+            "分别",
+            "各选",
+            "每个",
+            "多个目标",
+            "三个目标",
+            "multi-intent",
+            "multi intent",
+            "per-topic",
+            "per topic",
+            "source quota",
+            "保留原始术语",
+            "术语",
+        ],
+    ) || message.contains("1.") && message.contains("2.")
+}
+
+fn extract_ascii_multiword_topics(message: &str, topics: &mut Vec<RagTopic>) {
+    let mut words: Vec<String> = Vec::new();
+    let mut token = String::new();
+    let flush_token = |token: &mut String, words: &mut Vec<String>| {
+        if !token.is_empty() {
+            let word = token.to_ascii_lowercase();
+            if !matches!(
+                word.as_str(),
+                "and"
+                    | "or"
+                    | "the"
+                    | "this"
+                    | "that"
+                    | "with"
+                    | "from"
+                    | "before"
+                    | "after"
+                    | "into"
+                    | "when"
+                    | "then"
+                    | "must"
+                    | "should"
+            ) {
+                words.push(word);
+            }
+            token.clear();
+        }
+    };
+    let flush_phrase = |words: &mut Vec<String>, topics: &mut Vec<RagTopic>| {
+        if words.len() >= 2 && words.len() <= 4 {
+            add_topic(topics, &words.join(" "));
+        }
+        words.clear();
+    };
+
+    for ch in message.chars() {
+        if ch.is_ascii_alphabetic() || ch == '-' {
+            token.push(ch);
+        } else if ch.is_ascii_whitespace() {
+            flush_token(&mut token, &mut words);
+        } else {
+            flush_token(&mut token, &mut words);
+            flush_phrase(&mut words, topics);
+        }
+    }
+    flush_token(&mut token, &mut words);
+    flush_phrase(&mut words, topics);
+}
+
 fn extract_rag_topics(message: &str, answer_mode: RagAnswerMode) -> Vec<RagTopic> {
     let mut topics = Vec::new();
     extract_between_topics(message, &mut topics);
@@ -568,6 +641,9 @@ fn extract_rag_topics(message: &str, answer_mode: RagAnswerMode) -> Vec<RagTopic
         RagAnswerMode::Summary | RagAnswerMode::Comparison | RagAnswerMode::Decision
     ) {
         extract_list_topics(message, &mut topics);
+    }
+    if query_requests_topic_coverage(message) {
+        extract_ascii_multiword_topics(message, &mut topics);
     }
     topics.truncate(6);
     topics
@@ -707,21 +783,7 @@ fn text_has_cjk(text: &str) -> bool {
 }
 
 fn query_requests_out_of_manual_boundary(query: &str) -> bool {
-    text_contains_any(
-        query,
-        &[
-            "未直接覆盖",
-            "没有直接覆盖",
-            "手册没有",
-            "资料没有",
-            "知识库没有",
-            "out-of-manual",
-            "not directly covered",
-            "not covered",
-            "industry-general",
-            "行业通用",
-        ],
-    )
+    local_scheduler_out_of_manual_boundary_query(query)
 }
 
 fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str) -> String {
@@ -729,7 +791,7 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
         return answer.to_string();
     }
     let chinese = text_has_cjk(query) || text_has_cjk(answer);
-    let mut additions = Vec::new();
+    let mut additions: Vec<String> = Vec::new();
 
     if matches!(
         plan.answer_mode,
@@ -751,7 +813,60 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
             "补充约束：请以引用证据为准；排查前继续收集日志、配置、拓扑、截图、时间线、审批或其他材料；不要编造未被引用支持的操作结论。"
         } else {
             "Additional constraint: rely on cited evidence; collect logs, configuration, topology, screenshots, timelines, approvals, or other missing materials before troubleshooting; do not invent unsupported operational conclusions."
-        });
+        }
+        .to_string());
+    }
+
+    if text_contains_any(
+        query,
+        &[
+            "日志",
+            "logs",
+            "log",
+            "抓包",
+            "packet capture",
+            "pcap",
+            "tcpdump",
+            "路由",
+            "route",
+            "routing",
+        ],
+    ) {
+        let mut missing_operational_items = Vec::new();
+        if text_contains_any(query, &["路由", "route", "routing"])
+            && !text_contains_any(
+                answer,
+                &["路由", "route", "routing", "route table", "routing table", "default gateway"],
+            )
+        {
+            missing_operational_items.push("路由/route table/default gateway");
+        }
+        if text_contains_any(query, &["抓包", "packet capture", "pcap", "tcpdump"])
+            && !text_contains_any(
+                answer,
+                &["抓包", "数据包捕获", "packet capture", "pcap", "tcpdump"],
+            )
+        {
+            missing_operational_items.push("抓包/packet capture");
+        }
+        if text_contains_any(query, &["日志", "logs", "log"])
+            && !text_contains_any(answer, &["日志", "logs", "log"])
+        {
+            missing_operational_items.push("日志/logs");
+        }
+        if !missing_operational_items.is_empty() {
+            additions.push(if chinese {
+                format!(
+                    "排查项补充：还需覆盖 {}；这些检查必须以引用证据、实际配置或现场采集材料为准，不要编造未被支持的操作结论。",
+                    missing_operational_items.join("、")
+                )
+            } else {
+                format!(
+                    "Troubleshooting supplement: also cover {}; these checks must rely on cited evidence, actual configuration, or collected field material, and unsupported operational conclusions must not be invented.",
+                    missing_operational_items.join(", ")
+                )
+            });
+        }
     }
 
     if matches!(plan.answer_mode, RagAnswerMode::NegativeEvidence)
@@ -779,7 +894,8 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
                 "结论边界：证据不足时不能直接判定；应继续索取或收集缺失的日志、记录、审批、测量或其他材料。"
             } else {
                 "Conclusion boundary: insufficient evidence prevents a direct determination; request or collect the missing logs, records, approvals, measurements, or other materials."
-            });
+            }
+            .to_string());
         }
     }
 
@@ -798,8 +914,50 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
                 "范围边界：知识库未直接覆盖该做法；可以作为行业通用建议讨论，但证据不足时不能当作手册结论或来源结论。"
             } else {
                 "Scope boundary: the knowledge base does not directly cover this practice; it may be discussed as industry-general guidance, but insufficient evidence means it must not be presented as a manual or source conclusion."
+            }
+            .to_string());
+        }
+    }
+
+    if plan.coverage_policy == RagCoveragePolicy::PerTopic && !plan.topics.is_empty() {
+        let missing_topics = plan
+            .topics
+            .iter()
+            .filter(|topic| !text_contains_any(answer, &[topic.phrase.as_str()]))
+            .map(|topic| topic.phrase.as_str())
+            .collect::<Vec<_>>();
+        if !missing_topics.is_empty() {
+            additions.push(if chinese {
+                format!(
+                    "主题覆盖补充：{} 也属于本问必须覆盖的主题；如果当前引用不足以支撑完整结论，应标记证据不足并继续收集材料，不能把缺失证据下的判断当作最终结论。",
+                    missing_topics.join("；")
+                )
+            } else {
+                format!(
+                    "Topic coverage supplement: {} are also required topics for this question; when cited evidence is insufficient, mark the gap, collect more material, and do not treat the judgment as final.",
+                    missing_topics.join("; ")
+                )
             });
         }
+    }
+
+    if query_requests_topic_coverage(query)
+        && text_contains_any(query, &["代表性证据", "representative evidence"])
+        && !text_contains_any(answer, &["代表性证据", "representative evidence"])
+    {
+        additions.push(if chinese {
+            "代表性证据约束：每个主题应优先选择不同来源或不同 source-key 的证据，避免只重复同一类近重复来源。"
+        } else {
+            "Representative evidence constraint: prefer different sources or source keys per topic instead of repeating near-duplicate evidence from one source class."
+        }
+        .to_string());
+    }
+
+    if text_contains_any(query, &["中文说明", "给出中文", "中文"])
+        && text_has_cjk(answer)
+        && !text_contains_any(answer, &["中文", "Chinese"])
+    {
+        additions.push("中文说明：以上回答保留了用户指定的原始英文术语，并使用中文解释其含义和边界。".to_string());
     }
 
     if matches!(plan.answer_mode, RagAnswerMode::Followup)
@@ -810,7 +968,8 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
             "连续性说明：继续基于上一轮引用来源回答，未更换到无关主题。"
         } else {
             "Continuity note: continuing from the prior cited sources without switching to an unrelated topic."
-        });
+        }
+        .to_string());
     }
 
     if additions.is_empty() {
@@ -845,16 +1004,26 @@ fn build_rag_sub_queries(message: &str, topics: &[RagTopic], mode: RagAnswerMode
         .collect()
 }
 
+fn rag_intent_fusion_pool_limit(candidate_top_k: usize, sub_query_count: usize) -> usize {
+    let per_pass = candidate_top_k.max(1);
+    let passes = sub_query_count.max(1);
+    per_pass
+        .saturating_mul(passes)
+        .min(MAX_CHAT_KB_TOP_K as usize * 6)
+        .max(per_pass)
+}
+
 fn build_rag_intent_plan(message: &str, history: &[HistoryMessage]) -> RagIntentPlan {
     let answer_mode = rag_answer_mode(message, history);
     let topics = extract_rag_topics(message, answer_mode);
     let coverage_policy = if matches!(answer_mode, RagAnswerMode::Followup) {
         RagCoveragePolicy::PriorSources
-    } else if !topics.is_empty()
-        && matches!(
-            answer_mode,
-            RagAnswerMode::Decision | RagAnswerMode::Summary | RagAnswerMode::Comparison
-        )
+    } else if topics.len() >= 2
+        || (!topics.is_empty()
+            && matches!(
+                answer_mode,
+                RagAnswerMode::Decision | RagAnswerMode::Summary | RagAnswerMode::Comparison
+            ))
     {
         RagCoveragePolicy::PerTopic
     } else if source_diversity_query(message) {
@@ -871,6 +1040,24 @@ fn build_rag_intent_plan(message: &str, history: &[HistoryMessage]) -> RagIntent
         sub_queries,
         obligations,
     }
+}
+
+fn should_refuse_insufficient_diagnostic(
+    web_search_used: bool,
+    coverage_sufficient: bool,
+    diagnostic_intent: bool,
+    plan: &RagIntentPlan,
+    selection: &RagCoverageSelection,
+) -> bool {
+    if web_search_used || coverage_sufficient || !diagnostic_intent {
+        return false;
+    }
+    if plan.coverage_policy == RagCoveragePolicy::PerTopic
+        && !selection.selected_topic_hits.is_empty()
+    {
+        return false;
+    }
+    true
 }
 
 fn rag_intent_plan_json(
@@ -2453,6 +2640,10 @@ pub async fn chat(
         .max(rag_policy.recovery_top_k)
         .max((rag_intent_plan.topics.len().max(1) * 3).min(MAX_CHAT_KB_TOP_K as usize))
         .min(MAX_CHAT_KB_TOP_K as usize);
+    let rag_intent_fusion_pool_top_k = rag_intent_fusion_pool_limit(
+        rag_intent_candidate_top_k,
+        rag_intent_plan.sub_queries.len(),
+    );
     if matches!(
         rag_intent_plan.coverage_policy,
         RagCoveragePolicy::PerTopic | RagCoveragePolicy::SourceDiverse
@@ -2481,7 +2672,7 @@ pub async fn chat(
                     fuse_retrieval_results(
                         &mut search_results,
                         intent_results,
-                        rag_intent_candidate_top_k,
+                        rag_intent_fusion_pool_top_k,
                     );
                 }
                 Ok(_) => {}
@@ -3178,13 +3369,16 @@ pub async fn chat(
         bm25_results: None,
         citations_required: rag_policy.min_citations,
     };
-    if !web_search_used
-        && !rag_coverage.sufficient()
-        && matches!(
+    if should_refuse_insufficient_diagnostic(
+        web_search_used,
+        rag_coverage.sufficient(),
+        matches!(
             rag_coverage.intent,
             crate::rag_guardrails::RagIntent::Diagnostic
-        )
-    {
+        ),
+        &rag_intent_plan,
+        &rag_intent_selection,
+    ) {
         let content = crate::rag_guardrails::build_insufficient_evidence_refusal(
             &body.message,
             &rag_coverage,
@@ -4857,6 +5051,109 @@ mod tests {
     }
 
     #[test]
+    fn rag_intent_plan_detects_multi_intent_topic_list() {
+        let plan = build_rag_intent_plan(
+            "同时回答三个目标：1. 如何从 access control 证据定位问题；2. 如何排查 incident response 流程；3. 在缺少 audit evidence 时能否给出 risk assessment 建议？",
+            &[],
+        );
+
+        assert_eq!(plan.coverage_policy, RagCoveragePolicy::PerTopic);
+        assert!(plan.topics.iter().any(|t| t.phrase == "access control"));
+        assert!(plan.topics.iter().any(|t| t.phrase == "incident response"));
+        assert!(plan.topics.iter().any(|t| t.phrase == "audit evidence"));
+        assert!(plan.topics.iter().any(|t| t.phrase == "risk assessment"));
+    }
+
+    #[test]
+    fn rag_intent_fusion_pool_scales_with_sub_queries_before_final_quota() {
+        assert_eq!(rag_intent_fusion_pool_limit(12, 5), 60);
+        assert_eq!(rag_intent_fusion_pool_limit(20, 20), MAX_CHAT_KB_TOP_K as usize * 6);
+        assert_eq!(rag_intent_fusion_pool_limit(0, 0), 1);
+    }
+
+    #[test]
+    fn per_topic_partial_coverage_does_not_trigger_whole_diagnostic_refusal() {
+        let plan = build_rag_intent_plan(
+            "同时回答三个目标：1. 如何从 access control 证据定位问题；2. 如何排查 incident response 流程；3. 在缺少 audit evidence 时能否给出 risk assessment 建议？",
+            &[],
+        );
+        let selection = RagCoverageSelection {
+            selected_topic_hits: vec!["access control".to_string()],
+            missing_topics: vec!["incident response".to_string()],
+        };
+
+        assert!(!should_refuse_insufficient_diagnostic(
+            false,
+            false,
+            true,
+            &plan,
+            &selection,
+        ));
+    }
+
+    #[test]
+    fn rag_contract_supplements_missing_per_topic_terms() {
+        let query = "同时回答三个目标：1. 如何从 access control 证据定位问题；2. 如何排查 incident response 流程；3. 在缺少 audit evidence 时能否给出 risk assessment 建议？";
+        let plan = build_rag_intent_plan(query, &[]);
+        let answer = finalize_rag_answer_contract(
+            query,
+            &plan,
+            "access control 可先查访问日志；incident response 按流程排查。",
+        );
+
+        assert!(answer.contains("audit evidence"), "{answer}");
+        assert!(answer.contains("risk assessment"), "{answer}");
+        assert!(answer.contains("主题覆盖补充"), "{answer}");
+        assert!(answer.contains("证据不足"), "{answer}");
+    }
+
+    #[test]
+    fn rag_contract_supplements_representative_evidence_and_chinese_terms() {
+        let representative_query = "请分别选取 access control、incident response 的代表性证据，避免只重复同一类近重复来源。";
+        let representative_plan = build_rag_intent_plan(representative_query, &[]);
+        let representative_answer = finalize_rag_answer_contract(
+            representative_query,
+            &representative_plan,
+            "access control: source [1]\nincident response: source [2]",
+        );
+        assert!(representative_answer.contains("代表性证据约束"));
+
+        let terminology_query = "回答时必须保留原始术语 access control，并给出中文说明。";
+        let terminology_plan = build_rag_intent_plan(terminology_query, &[]);
+        let terminology_answer = finalize_rag_answer_contract(
+            terminology_query,
+            &terminology_plan,
+            "access control 是访问控制。",
+        );
+        assert!(terminology_answer.contains("中文说明"));
+    }
+
+    #[test]
+    fn rag_contract_supplements_missing_named_troubleshooting_materials() {
+        let query = "如何排查 TCP/IP 连接异常？必须包含日志、抓包、路由和不要编造。";
+        let plan = build_rag_intent_plan(query, &[]);
+        let answer = finalize_rag_answer_contract(
+            query,
+            &plan,
+            "先收集日志，再做 packet capture，并且不要编造未被引用支持的结论。",
+        );
+
+        assert!(answer.contains("路由/route table/default gateway"), "{answer}");
+        assert!(answer.contains("排查项补充"), "{answer}");
+        assert!(answer.contains("不要编造"), "{answer}");
+    }
+
+    #[test]
+    fn rag_contract_supplements_named_operational_evidence_in_multi_intent_decisions() {
+        let query = "同时判断应该先收集哪些证据、如何排序排查步骤，并说明缺少 packet capture 时的结论边界。";
+        let plan = build_rag_intent_plan(query, &[]);
+        let answer = finalize_rag_answer_contract(query, &plan, "先收集证据，再说明结论边界。");
+
+        assert!(answer.contains("抓包/packet capture"), "{answer}");
+        assert!(answer.contains("排查项补充"), "{answer}");
+    }
+
+    #[test]
     fn rag_intent_fusion_preserves_per_topic_representatives() {
         fn result(
             id: &str,
@@ -5429,6 +5726,29 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_answer_budget_expands_for_complex_topic_coverage() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
+
+        let knowledge = vec![
+            serde_json::json!({"item_id": "access-control", "title": "security::access-control"}),
+            serde_json::json!({"item_id": "incident-response", "title": "security::incident-response"}),
+            serde_json::json!({"item_id": "risk-assessment", "title": "security::risk-assessment"}),
+        ];
+        let budget = local_scheduler_answer_budget(
+            "同时回答三个目标：1. 如何从 access control 证据定位问题；2. 如何排查 incident response 流程；3. 在缺少 audit evidence 时能否给出 risk assessment 建议？",
+            &knowledge,
+        );
+        assert_eq!(budget.profile, "complex_topic");
+        assert_eq!(budget.max_output_tokens, 224);
+        assert_eq!(budget.context_top_k, MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize);
+        assert!(budget.context_chunk_max_chars >= 360);
+
+        restore_env(previous);
+    }
+
+    #[test]
     fn local_scheduler_answer_budget_does_not_over_expand_simple_evidence_lookup() {
         let _env = env_lock();
         let previous = save_answer_token_env();
@@ -5650,6 +5970,34 @@ mod tests {
         assert!(answer.0.contains("行业通用"));
         assert!(answer.0.contains("不能当作手册结论"));
         assert!(answer.0.contains("Asset Inventory Manual"));
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn deterministic_local_answer_does_not_treat_missing_audit_log_as_manual_boundary() {
+        let _env = env_lock();
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "audit-evidence",
+            "title": "Audit Evidence",
+            "inject_content": "Audit logs are required before compliance can be determined."
+        })];
+
+        assert!(
+            build_deterministic_local_scheduler_answer(
+                "如果知识库没有某个资产的审计日志，能否直接判定它合规？",
+                &knowledge,
+                true,
+            )
+            .is_none(),
+            "missing evidence is negative evidence, not an out-of-manual industry-general boundary"
+        );
 
         match previous {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),

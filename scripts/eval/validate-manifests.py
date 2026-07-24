@@ -260,6 +260,9 @@ def validate_scale_suite_contract(suite: Manifest, corpora: list[Manifest], scen
         "multiturn",
         "negative_evidence",
         "out_of_manual_industry_general",
+        "multi_intent_decomposition",
+        "per_topic_source_quota",
+        "terminology_constraints",
     }
     missing = required - covered
     if missing:

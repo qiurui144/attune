@@ -1,6 +1,6 @@
 [package]
 name = "attune-server"
-version = "1.5.23"
+version = "1.5.29"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

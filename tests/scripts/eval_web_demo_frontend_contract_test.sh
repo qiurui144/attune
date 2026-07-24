@@ -18,6 +18,7 @@ grep -q "向量块显示" "$DEMO"
 grep -q "/api/v1/upload" "$DEMO"
 grep -q "/api/v1/search" "$DEMO"
 grep -q "/api/v1/chat" "$DEMO"
+grep -q "18906/tcp" "$ROOT/kb-web-demo/start_k3.sh"
 
 grep -q "web_demo_flow_pass_rate" "$SCRIPT"
 grep -q "web_demo_citation_render_rate" "$SCRIPT"
@@ -30,5 +31,25 @@ grep -q "summary" "$SCRIPT"
 
 python3 "$SCRIPT" --dry-run --out /tmp/attune-kb-web-demo-eval-frontend-dry-run.json >/tmp/attune-kb-web-demo-eval-frontend-dry-run.txt
 grep -q "kb-web-demo eval frontend dry-run PASS" /tmp/attune-kb-web-demo-eval-frontend-dry-run.txt
+
+python3 "$SCRIPT" --dry-run --profile deep --out /tmp/attune-kb-web-demo-eval-frontend-deep-dry-run.json >/tmp/attune-kb-web-demo-eval-frontend-deep-dry-run.txt
+python3 - /tmp/attune-kb-web-demo-eval-frontend-deep-dry-run.json <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report["profile"] == "deep"
+case_ids = {case["case_id"] for case in report["artifacts"]["chat_cases"]}
+assert {
+    "fact_origin",
+    "operation_troubleshooting",
+    "multi_intent_decision",
+    "negative_evidence_boundary",
+    "out_of_manual_industry_general",
+    "summary_citation_coverage",
+}.issubset(case_ids)
+assert "web_demo_complex_chat_pass_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_complex_chat_pass_rate"] == 1.0
+PY
 
 echo "eval web-demo frontend contract PASS"

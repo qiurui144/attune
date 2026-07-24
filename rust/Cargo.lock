@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "attune-server"
-version = "1.5.23"
+version = "1.5.29"
 dependencies = [
  "attune-core",
  "axum",

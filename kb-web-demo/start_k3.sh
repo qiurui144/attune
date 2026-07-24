@@ -15,6 +15,7 @@ fail() { printf "${KRED}[%s]${KOFF} %s\n" "$1" "$2"; }
 log "clean" "Stopping any existing demo services..."
 fuser -k 8888/tcp 2>/dev/null || true
 fuser -k 8889/tcp 2>/dev/null || true
+fuser -k 18906/tcp 2>/dev/null || true
 sleep 2
 
 # ── 1. Attune E2E instance ──

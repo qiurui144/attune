@@ -169,21 +169,50 @@ pub fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value])
 }
 
 pub fn local_scheduler_out_of_manual_boundary_query(query: &str) -> bool {
-    contains_any_ascii(
-        query,
+    let q = query.to_ascii_lowercase();
+    let explicit_boundary = contains_any_ascii(
+        &q,
         &[
             "未直接覆盖",
             "没有直接覆盖",
             "手册没有",
             "资料没有",
-            "知识库没有",
             "out-of-manual",
             "not directly covered",
             "not covered",
             "industry-general",
             "行业通用",
         ],
-    )
+    );
+    let kb_missing_practice = contains_any_ascii(&q, &["知识库没有", "knowledge base does not"])
+        && contains_any_ascii(
+            &q,
+            &[
+                "直接覆盖",
+                "做法",
+                "实践",
+                "practice",
+                "method",
+                "整改",
+                "建议",
+                "segmentation",
+                "zero trust",
+                "零信任",
+            ],
+        );
+    let missing_evidence_question = contains_any_ascii(
+        &q,
+        &[
+            "审计日志",
+            "audit log",
+            "audit evidence",
+            "日志",
+            "记录",
+            "证据",
+        ],
+    ) && contains_any_ascii(&q, &["能否直接", "直接判定", "合规", "determine", "compliant"]);
+
+    (explicit_boundary || kb_missing_practice) && !missing_evidence_question
 }
 
 pub fn build_local_scheduler_out_of_manual_boundary(
