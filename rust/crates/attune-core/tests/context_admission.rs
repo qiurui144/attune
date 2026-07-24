@@ -67,7 +67,7 @@ fn edge_scheduler_30b_over_async_cap_asks_caller_to_try_cloud_if_allowed() {
 }
 
 #[test]
-fn kb_query_ask_is_async_only_and_uses_task_output_cap() {
+fn kb_query_ask_interactive_small_prompt_admits_sync_and_uses_task_output_cap() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let summary = profiles.model("llm-summary").unwrap();
     let ask = profiles.task("kb.query.ask").unwrap();
@@ -77,13 +77,32 @@ fn kb_query_ask_is_async_only_and_uses_task_output_cap() {
         admit_context(ContextAdmissionRequest::interactive(&messages, summary).with_task(ask));
 
     match decision {
-        ContextAdmissionDecision::SubmitAsync(ctx) => {
-            assert_eq!(ctx.reason, AdmissionReason::TaskAsyncOnly);
+        ContextAdmissionDecision::AdmitSync(ctx) => {
+            assert_eq!(ctx.reason, AdmissionReason::FitsSync);
             assert_eq!(ctx.max_output_tokens, 128);
-            assert_eq!(ctx.ttl_ms, Some(900000));
             assert_eq!(ctx.service_class, "realtime_answer");
         }
-        other => panic!("expected async task admission, got {other:?}"),
+        other => panic!("expected sync task admission, got {other:?}"),
+    }
+}
+
+#[test]
+fn kb_query_ask_interactive_large_prompt_still_routes_async() {
+    let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
+    let summary = profiles.model("llm-summary").unwrap();
+    let ask = profiles.task("kb.query.ask").unwrap();
+    let messages = vec![ChatMessage::user(&"长".repeat(5000))];
+
+    let decision =
+        admit_context(ContextAdmissionRequest::interactive(&messages, summary).with_task(ask));
+
+    match decision {
+        ContextAdmissionDecision::SubmitAsync(ctx) => {
+            assert_eq!(ctx.reason, AdmissionReason::ContextTooLargeForSync);
+            assert_eq!(ctx.max_output_tokens, 128);
+            assert_eq!(ctx.ttl_ms, Some(900000));
+        }
+        other => panic!("expected async task admission for large prompt, got {other:?}"),
     }
 }
 
@@ -186,6 +205,10 @@ impl Drop for EnvGuard {
 fn cloud_profile(model_id: &str, context_cap: u32, output_cap: u32) -> ModelRuntimeProfile {
     ModelRuntimeProfile {
         model_id: model_id.to_string(),
+        model_class: None,
+        preferred_size: None,
+        fallback_sizes: Vec::new(),
+        sync_sla_ms: None,
         provider_kind: RuntimeProviderKind::Cloud,
         endpoint: "https://api.example.invalid".to_string(),
         primary_device: "cloud".to_string(),

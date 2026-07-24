@@ -1,0 +1,572 @@
+{
+  "schema_version": "attune.eval.asset_registry.v1",
+  "purpose": "Pinned public and generated knowledge assets for Attune RAG evaluation. Assets with unclear upstream rights are external-fetch-only and must not be redistributed in Attune packages.",
+  "metric_system": {
+    "retrieval": ["retrieval_hit_at_5", "retrieval_mrr", "empty_retrieval_rate"],
+    "citation": ["citation_hit_rate", "wrong_citation_rate", "citation_missing_rate"],
+    "answer": ["answer_accuracy", "required_term_rate", "forbidden_term_violation_rate", "negative_evidence_refusal_rate", "out_of_manual_boundary_rate"],
+    "summary": ["summary_coverage", "source_preservation", "unsupported_compression_rate"],
+    "multiturn": ["multiturn_source_continuity", "context_carryover_rate"],
+    "performance": ["upload_p95_ms", "index_drain_seconds", "search_p95_ms", "hot_chat_p95_ms", "summary_p95_ms"],
+    "stability": ["terminal_error_rate", "async_job_timeout_rate", "repeat_answer_variance"],
+    "frontend": ["web_demo_flow_pass_rate", "web_demo_citation_render_rate", "web_demo_time_render_rate", "web_demo_vector_chunk_render_rate"]
+  },
+  "metric_defaults": {
+    "retrieval_hit_at_5_min": 0.85,
+    "retrieval_mrr_min": 0.75,
+    "empty_retrieval_rate_max": 0.02,
+    "citation_hit_rate_min": 0.9,
+    "wrong_citation_rate_max": 0.03,
+    "answer_accuracy_min": 0.8,
+    "forbidden_term_violation_rate_max": 0.0,
+    "summary_coverage_min": 0.8,
+    "source_preservation_min": 0.85,
+    "multiturn_source_continuity_min": 0.85,
+    "negative_evidence_refusal_rate_min": 0.9,
+    "out_of_manual_boundary_rate_min": 0.8,
+    "search_p95_ms_max": 10000,
+    "hot_chat_p95_ms_max": 60000,
+    "summary_p95_ms_max": 60000,
+    "terminal_error_rate_max": 0.02,
+    "async_job_timeout_rate_max": 0.02,
+    "web_demo_flow_pass_rate_min": 0.95
+  },
+  "assets": [
+    {
+      "asset_id": "networking_tcpip_generated_smoke",
+      "domain": "networking",
+      "tier": "T0",
+      "source": {
+        "type": "generated",
+        "url": "repo://tests/eval/corpora/networking/tcpip_smoke.json",
+        "pin": "attune-networking-tcpip-smoke-20260723"
+      },
+      "license": {
+        "status": "generated",
+        "name": "generated-test-fixture",
+        "notes": "Small synthetic Markdown fixtures generated for Attune CI."
+      },
+      "redistribution": "vendored_generated_only",
+      "materialization": {
+        "mode": "inline_generated",
+        "command": "python3 scripts/eval/run-suite.py --suite pr_rag_smoke --dry-run",
+        "document_count": 3,
+        "expected_chunks": 12
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "summary"],
+        "expected_questions": [
+          "Where did TCP/IP originate?",
+          "How should a TCP/IP connectivity failure be investigated?",
+          "Summarize TCP/IP origin and troubleshooting with citations."
+        ],
+        "expected_sources": [
+          "tcpip_origin",
+          "tcpip_troubleshooting",
+          "tcpip_support_workflow"
+        ],
+        "must_include_terms": ["ARPANET", "DARPA", "physical link", "DNS", "packet capture"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 1.0,
+          "citation_hit_rate_min": 1.0,
+          "answer_accuracy_min": 0.9,
+          "hot_chat_p95_ms_max": 30000
+        }
+      }
+    },
+    {
+      "asset_id": "networking_rfc_tcpip_reference",
+      "domain": "networking",
+      "tier": "T1",
+      "source": {
+        "type": "https",
+        "url": "https://www.rfc-editor.org/rfc/",
+        "snapshot_id": "RFC791+RFC793+RFC1122"
+      },
+      "license": {
+        "status": "clear",
+        "name": "RFC Editor published RFC text",
+        "notes": "Use exact RFC IDs as immutable public references; CI stores only derived query metadata."
+      },
+      "redistribution": "redistributable_reference",
+      "materialization": {
+        "mode": "http_snapshot",
+        "command": "curl -fLO https://www.rfc-editor.org/rfc/rfc791.txt && curl -fLO https://www.rfc-editor.org/rfc/rfc793.txt && curl -fLO https://www.rfc-editor.org/rfc/rfc1122.txt",
+        "document_count": 3,
+        "expected_chunks": 160
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "decision_assistance"],
+        "expected_questions": [
+          "Which RFC defines the Internet Protocol?",
+          "What TCP state or retransmission evidence should be checked when connections timeout?",
+          "Which host requirements constrain IP gateway, DNS, and transport behavior?"
+        ],
+        "expected_sources": ["rfc791.txt", "rfc793.txt", "rfc1122.txt"],
+        "must_include_terms": ["Internet Protocol", "Transmission Control Protocol", "host requirements", "gateway", "retransmission"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.9,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.85,
+          "hot_chat_p95_ms_max": 30000
+        }
+      }
+    },
+    {
+      "asset_id": "aviation_airplane_manual_collection",
+      "domain": "aviation",
+      "tier": "T2",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/shiroinekotfs/airplane-manual-collection.git",
+        "pin": "afe8288495338880e165f77bb9afe9946f366a52"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "undefined upstream license",
+        "notes": "Upstream LICENSE states that copyrights cannot be defined. Use only on controlled K3 evaluation hosts; do not redistribute."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "git_sparse_checkout",
+        "command": "git clone https://github.com/shiroinekotfs/airplane-manual-collection.git && git -C airplane-manual-collection checkout afe8288495338880e165f77bb9afe9946f366a52",
+        "document_count": 74,
+        "expected_chunks": 4000
+      },
+      "evaluation": {
+        "scenario_types": ["operation_guidance", "summary", "high_complexity_longtext"],
+        "expected_questions": [
+          "Find the manual sections related to electrical power checks.",
+          "Summarize maintenance-document evidence without issuing real flight instructions.",
+          "When evidence conflicts across manuals, ask for aircraft model, revision, and page reference."
+        ],
+        "expected_sources": ["airplane_manuals_manifest", "manual_filename", "page_or_section"],
+        "must_include_terms": ["manual", "revision", "section", "citation", "not for operational flight decisions"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    },
+    {
+      "asset_id": "mechanical_handbook_of_mechanical_design",
+      "domain": "mechanical",
+      "tier": "T2",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/GEQfa/handbook-of-mechanical-design.git",
+        "pin": "86832fd643cb1f9cfa1188d242d34b62dd52e41f"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "no license file found",
+        "notes": "Use only as an external K3 evaluation checkout; do not redistribute documents or derived chunks."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "git_lfs_checkout",
+        "command": "git lfs install && git clone https://github.com/GEQfa/handbook-of-mechanical-design.git && git -C handbook-of-mechanical-design checkout 86832fd643cb1f9cfa1188d242d34b62dd52e41f",
+        "document_count": 5,
+        "expected_chunks": 2500
+      },
+      "evaluation": {
+        "scenario_types": ["operation_guidance", "decision_assistance", "multiturn", "summary"],
+        "expected_questions": [
+          "Which handbook volume should be searched first for a shaft, gear, or bearing design question?",
+          "Explain how to collect evidence before recommending a mechanical design choice.",
+          "Summarize the relevant handbook evidence and refuse unsupported final design sign-off."
+        ],
+        "expected_sources": ["mechanical_design_manifest", "volume_filename", "page_or_section"],
+        "must_include_terms": ["load", "material", "factor", "standard", "verify with cited handbook"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    },
+    {
+      "asset_id": "security_owasp_cheat_sheets",
+      "domain": "security",
+      "tier": "T2",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/OWASP/CheatSheetSeries.git",
+        "pin": "92de0115bab1b671bf66cdfb7afca90f0974fa39"
+      },
+      "license": {
+        "status": "clear",
+        "name": "CC-BY-SA-4.0",
+        "notes": "Use with attribution in reports."
+      },
+      "redistribution": "redistributable_reference",
+      "materialization": {
+        "mode": "git_sparse_checkout",
+        "command": "git clone --filter=blob:none --sparse https://github.com/OWASP/CheatSheetSeries.git && git -C CheatSheetSeries checkout 92de0115bab1b671bf66cdfb7afca90f0974fa39 && git -C CheatSheetSeries sparse-checkout set cheatsheets",
+        "document_count": 320,
+        "expected_chunks": 4200
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "decision_assistance"],
+        "expected_questions": [
+          "How should password storage be designed?",
+          "What SSRF defenses should be prioritized for a metadata-service risk?",
+          "Which session-management evidence is needed before recommending a fix?"
+        ],
+        "expected_sources": ["Password_Storage_Cheat_Sheet.md", "Server_Side_Request_Forgery_Prevention_Cheat_Sheet.md", "Session_Management_Cheat_Sheet.md"],
+        "must_include_terms": ["salt", "work factor", "allowlist", "metadata service", "session ID"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.9,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.85,
+          "hot_chat_p95_ms_max": 30000
+        }
+      }
+    },
+    {
+      "asset_id": "cloud_native_kubernetes_website_docs",
+      "domain": "cloud_native",
+      "tier": "T2",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/kubernetes/website.git",
+        "pin": "e6231d08aba100c24da779ef2388c949d73159db"
+      },
+      "license": {
+        "status": "clear",
+        "name": "CC-BY-4.0",
+        "notes": "Use docs content with attribution."
+      },
+      "redistribution": "redistributable_reference",
+      "materialization": {
+        "mode": "git_sparse_checkout",
+        "command": "git clone --filter=blob:none --sparse https://github.com/kubernetes/website.git && git -C website checkout e6231d08aba100c24da779ef2388c949d73159db && git -C website sparse-checkout set content/en/docs",
+        "document_count": 1200,
+        "expected_chunks": 15000
+      },
+      "evaluation": {
+        "scenario_types": ["operation_guidance", "decision_assistance", "multiturn", "summary"],
+        "expected_questions": [
+          "How should a CrashLoopBackOff pod be investigated?",
+          "Which Kubernetes objects and events should be cited for a Service routing issue?",
+          "Summarize evidence before recommending a rollout or rollback."
+        ],
+        "expected_sources": ["content/en/docs/concepts", "content/en/docs/tasks", "content/en/docs/reference"],
+        "must_include_terms": ["Pod", "Event", "Deployment", "Service", "kubectl describe"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.88,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.82,
+          "hot_chat_p95_ms_max": 45000
+        }
+      }
+    },
+    {
+      "asset_id": "embedded_riscv_isa_manual",
+      "domain": "embedded",
+      "tier": "T2",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/riscv/riscv-isa-manual.git",
+        "pin": "971bc71be1429c97a6d3cc0c66a2bb2e6d5472ff"
+      },
+      "license": {
+        "status": "clear",
+        "name": "CC-BY-4.0",
+        "notes": "Use spec text with attribution."
+      },
+      "redistribution": "redistributable_reference",
+      "materialization": {
+        "mode": "git_sparse_checkout",
+        "command": "git clone --filter=blob:none https://github.com/riscv/riscv-isa-manual.git && git -C riscv-isa-manual checkout 971bc71be1429c97a6d3cc0c66a2bb2e6d5472ff",
+        "document_count": 80,
+        "expected_chunks": 3500
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "decision_assistance", "summary"],
+        "expected_questions": [
+          "Which RISC-V extension or privilege concept is relevant to vector workload behavior?",
+          "Summarize ISA evidence needed before claiming acceleration support.",
+          "Explain what cannot be inferred from ISA docs alone about a deployed scheduler."
+        ],
+        "expected_sources": ["riscv-isa-manual", "privileged", "unprivileged"],
+        "must_include_terms": ["extension", "privileged", "vector", "implementation-specific", "citation"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.88,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.82,
+          "hot_chat_p95_ms_max": 45000
+        }
+      }
+    },
+    {
+      "asset_id": "observability_prometheus_docs",
+      "domain": "observability",
+      "tier": "T2",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/prometheus/docs.git",
+        "pin": "9d9e0343a9e6d138204cfe316a125a860a271849"
+      },
+      "license": {
+        "status": "clear",
+        "name": "Apache-2.0",
+        "notes": "Use docs content with attribution."
+      },
+      "redistribution": "redistributable_reference",
+      "materialization": {
+        "mode": "git_sparse_checkout",
+        "command": "git clone --filter=blob:none https://github.com/prometheus/docs.git && git -C docs checkout 9d9e0343a9e6d138204cfe316a125a860a271849",
+        "document_count": 250,
+        "expected_chunks": 3000
+      },
+      "evaluation": {
+        "scenario_types": ["operation_guidance", "decision_assistance", "summary"],
+        "expected_questions": [
+          "How should missing Prometheus scrape data be investigated?",
+          "Which metric labels and alert rule evidence are needed before recommending a PromQL change?",
+          "Summarize the evidence for alerting vs recording rule usage."
+        ],
+        "expected_sources": ["prometheus/docs", "querying", "alerting", "configuration"],
+        "must_include_terms": ["scrape", "target", "PromQL", "alerting rule", "label"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.88,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.82,
+          "hot_chat_p95_ms_max": 45000
+        }
+      }
+    },
+    {
+      "asset_id": "software_engineering_rust_book",
+      "domain": "software_engineering",
+      "tier": "T1",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/rust-lang/book.git",
+        "pin": "917544888a55e4da7109bdba8c88c893c0da70f4"
+      },
+      "license": {
+        "status": "clear",
+        "name": "MIT OR Apache-2.0",
+        "notes": "Use docs content with attribution."
+      },
+      "redistribution": "redistributable_reference",
+      "materialization": {
+        "mode": "git_sparse_checkout",
+        "command": "git clone --filter=blob:none --sparse https://github.com/rust-lang/book.git && git -C book checkout 917544888a55e4da7109bdba8c88c893c0da70f4 && git -C book sparse-checkout set src",
+        "document_count": 25,
+        "expected_chunks": 900
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "summary"],
+        "expected_questions": [
+          "Explain ownership and borrowing using cited Rust Book sections.",
+          "How should a lifetime error be investigated from compiler evidence?",
+          "Summarize traits and generics with source references."
+        ],
+        "expected_sources": ["src/ch04", "src/ch10", "src/ch19"],
+        "must_include_terms": ["ownership", "borrow", "lifetime", "trait", "compiler error"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.9,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.85,
+          "hot_chat_p95_ms_max": 30000
+        }
+      }
+    },
+    {
+      "asset_id": "medical_imaging_eucaim_end_user_guide",
+      "domain": "medical_imaging",
+      "tier": "T2",
+      "source": {
+        "type": "gitbook",
+        "url": "https://eucaim.gitbook.io/enduserguide",
+        "snapshot_id": "gitbook-live-snapshot-required"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "GitBook public documentation, license not pinned",
+        "notes": "External-fetch-only medical imaging platform guide. Store fetch metadata and upstream URL in reports; do not redistribute normalized pages or derived vector DB."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "gitbook_html_snapshot",
+        "command": "python3 scripts/eval/materialize-gitbook-corpus.py --root-url https://eucaim.gitbook.io/enduserguide --out <workspace>",
+        "document_count": 100,
+        "expected_chunks": 1200
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "decision_assistance", "summary"],
+        "expected_questions": [
+          "How should an end user find the right EUCAIM guide section before submitting or accessing imaging data?",
+          "Which user roles, portal actions, and prerequisite evidence are needed before recommending an EUCAIM workflow?",
+          "Summarize the onboarding and data-access workflow with cited guide pages."
+        ],
+        "expected_sources": ["enduserguide", "portal", "data access", "user role"],
+        "must_include_terms": ["EUCAIM", "portal", "user", "data", "citation"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    },
+    {
+      "asset_id": "healthcare_emr_ugandaemr_gitbook",
+      "domain": "healthcare_emr",
+      "tier": "T2",
+      "source": {
+        "type": "gitbook",
+        "url": "https://mets-programme.gitbook.io/ugandaemr-documentation",
+        "snapshot_id": "gitbook-live-snapshot-required"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "GitBook public documentation, license not pinned",
+        "notes": "External-fetch-only EMR documentation. Suitable for product support and operational guidance tests; do not redistribute fetched pages."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "gitbook_html_snapshot",
+        "command": "python3 scripts/eval/materialize-gitbook-corpus.py --root-url https://mets-programme.gitbook.io/ugandaemr-documentation --out <workspace>",
+        "document_count": 150,
+        "expected_chunks": 1800
+      },
+      "evaluation": {
+        "scenario_types": ["operation_guidance", "troubleshooting", "summary", "negative_evidence"],
+        "expected_questions": [
+          "How should a UgandaEMR user locate configuration or workflow documentation before changing a clinical form?",
+          "What evidence should support troubleshooting a UgandaEMR registration, visit, or reporting issue?",
+          "If the documentation does not include the requested clinical policy, what evidence gap should be reported?"
+        ],
+        "expected_sources": ["ugandaemr-documentation", "registration", "reports", "configuration"],
+        "must_include_terms": ["UgandaEMR", "configuration", "report", "workflow", "citation"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    },
+    {
+      "asset_id": "embedded_radio_edgetx_user_manual_cn",
+      "domain": "embedded_radio",
+      "tier": "T2",
+      "source": {
+        "type": "gitbook",
+        "url": "https://zkl2333.gitbook.io/edgetx-user-manual/v2.10-cn/color-radios/radio-settings/hardware",
+        "snapshot_id": "gitbook-live-snapshot-required"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "GitBook public documentation, license not pinned",
+        "notes": "Chinese EdgeTX manual candidate. Use as external-fetch-only product/manual corpus."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "gitbook_html_snapshot",
+        "command": "python3 scripts/eval/materialize-gitbook-corpus.py --root-url https://zkl2333.gitbook.io/edgetx-user-manual/v2.10-cn --out <workspace>",
+        "document_count": 250,
+        "expected_chunks": 2500
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "decision_assistance", "summary"],
+        "expected_questions": [
+          "EdgeTX 彩屏遥控器的 Hardware 设置页包含哪些可配置项？",
+          "如果用户要调整硬件相关设置，应先收集哪些机型、固件版本和页面证据？",
+          "总结 EdgeTX v2.10 中文手册中 Radio Settings 相关内容，并引用页面。"
+        ],
+        "expected_sources": ["edgetx-user-manual", "v2.10-cn", "radio-settings", "hardware"],
+        "must_include_terms": ["EdgeTX", "Radio Settings", "Hardware", "固件", "引用"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    },
+    {
+      "asset_id": "fpga_pynq_z1_tutorial_gitbook_cn",
+      "domain": "fpga_education",
+      "tier": "T2",
+      "source": {
+        "type": "gitbook",
+        "url": "https://digilent-china.gitbook.io/pynq-z1_tutorial",
+        "snapshot_id": "gitbook-live-snapshot-required"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "GitBook public documentation, license not pinned",
+        "notes": "External-fetch-only PYNQ-Z1 tutorial corpus for FPGA/embedded education support tests."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "gitbook_html_snapshot",
+        "command": "python3 scripts/eval/materialize-gitbook-corpus.py --root-url https://digilent-china.gitbook.io/pynq-z1_tutorial --out <workspace>",
+        "document_count": 120,
+        "expected_chunks": 1600
+      },
+      "evaluation": {
+        "scenario_types": ["operation_guidance", "summary", "decision_assistance", "multiturn"],
+        "expected_questions": [
+          "PYNQ-Z1 教程中板卡环境准备和示例运行需要哪些步骤证据？",
+          "如果用户实验失败，应先检查哪些板卡、镜像、网络和 Notebook 证据？",
+          "总结 PYNQ-Z1 教程的学习路径，并给出引用来源。"
+        ],
+        "expected_sources": ["pynq-z1_tutorial", "board", "image", "notebook"],
+        "must_include_terms": ["PYNQ-Z1", "Jupyter", "board", "image", "citation"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    },
+    {
+      "asset_id": "medical_device_philips_ifu_text_pdf",
+      "domain": "medical_device_ifu",
+      "tier": "T1",
+      "source": {
+        "type": "pdf",
+        "url": "https://www.documents.philips.com/assets/Instruction%20for%20Use/20220324/75a72c84a3b848fc918fae620117d82b.pdf?feed=ifu_docs_feed",
+        "snapshot_id": "philips-ifu-20220324-75a72c84a3b848fc918fae620117d82b"
+      },
+      "license": {
+        "status": "review_required",
+        "name": "Philips public IFU PDF, product documentation rights not pinned",
+        "notes": "External-fetch-only PDF. Must pass text-layer extraction sampling before it can be a blocking no-OCR release asset."
+      },
+      "redistribution": "external_fetch_only",
+      "materialization": {
+        "mode": "pdf_text_layer_snapshot",
+        "command": "curl -fL 'https://www.documents.philips.com/assets/Instruction%20for%20Use/20220324/75a72c84a3b848fc918fae620117d82b.pdf?feed=ifu_docs_feed' -o philips-ifu.pdf && pdftotext philips-ifu.pdf philips-ifu.txt",
+        "document_count": 1,
+        "expected_chunks": 900
+      },
+      "evaluation": {
+        "scenario_types": ["real_time_qa", "operation_guidance", "negative_evidence", "summary"],
+        "expected_questions": [
+          "Which warnings, intended-use statements, or setup steps are present in the Philips IFU?",
+          "Before giving user guidance from the IFU, what device model, language, revision, and page evidence should be cited?",
+          "Summarize the IFU safety and operating constraints without adding unsupported medical advice."
+        ],
+        "expected_sources": ["philips-ifu.pdf", "Instruction for Use", "page"],
+        "must_include_terms": ["Instruction for Use", "warning", "device", "page", "citation"],
+        "metrics": {
+          "retrieval_hit_at_5_min": 0.85,
+          "citation_hit_rate_min": 0.9,
+          "answer_accuracy_min": 0.8,
+          "hot_chat_p95_ms_max": 60000
+        }
+      }
+    }
+  ]
+}

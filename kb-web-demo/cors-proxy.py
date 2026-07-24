@@ -13,6 +13,7 @@ TARGET = (
     os.environ.get("ATTUNE_TARGET_HOST", "127.0.0.1"),
     int(os.environ.get("ATTUNE_TARGET_PORT", "18906")),
 )
+RESPONSE_IDLE_TIMEOUT_SECONDS = int(os.environ.get("ATTUNE_PROXY_RESPONSE_IDLE_TIMEOUT_SECONDS", "300"))
 
 CORS_HEADERS = (
     "Access-Control-Allow-Origin: *\r\n"
@@ -67,7 +68,7 @@ def handle(conn):
         # Read response
         resp = b""
         while True:
-            r, _, _ = select.select([target], [], [], 30)
+            r, _, _ = select.select([target], [], [], RESPONSE_IDLE_TIMEOUT_SECONDS)
             if not r: break
             chunk = target.recv(65536)
             if not chunk: break

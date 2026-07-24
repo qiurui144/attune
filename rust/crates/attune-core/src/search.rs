@@ -24,6 +24,7 @@ const EXACT_SUBSTRING_SCAN_LIMIT: usize = 512;
 /// 候选数 < 此阈值时，RRF 排序比 cross-encoder 重排更稳定（cross-encoder
 /// 在小候选集上放大噪声 / 跨语言错配）。
 pub const RERANK_MIN_CANDIDATES: usize = 5;
+const RERANK_MIN_ACTIONABLE_SCORE: f32 = 0.001;
 
 /// Cross-lingual 降权系数。query 与 doc 语言不匹配时，该 doc 的 score 乘以此系数。
 /// 设为 0.3 而不是直接过滤：保留 cross-lingual 召回（专业术语常借用英文），
@@ -807,6 +808,12 @@ pub fn rerank(query_vec: &[f32], results: &mut [SearchResult], vector_index: &Ve
     });
 }
 
+fn reranker_scores_are_actionable(scores: &[f32]) -> bool {
+    scores
+        .iter()
+        .any(|score| score.is_finite() && *score >= RERANK_MIN_ACTIONABLE_SCORE)
+}
+
 /// 三阶段搜索：initial_k 粗召回 → intermediate_k RRF 融合 → Rerank → top_k 返回
 ///
 /// 同时被 search 端点和 chat 引擎调用，避免重复逻辑。
@@ -986,8 +993,12 @@ pub fn search_with_context(
             let docs: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
             match reranker.score(query, &docs) {
                 Ok(scores) => {
-                    for (r, s) in results.iter_mut().zip(scores.iter()) {
-                        r.score = *s;
+                    if reranker_scores_are_actionable(&scores) {
+                        for (r, s) in results.iter_mut().zip(scores.iter()) {
+                            r.score = *s;
+                        }
+                    } else {
+                        log::warn!("reranker returned no actionable scores, keeping RRF order");
                     }
                 }
                 Err(e) => {
@@ -1757,6 +1768,14 @@ mod tests {
         );
         // 0.72 是吴师兄推荐的"精度优先"档，未来 Settings 提供
         // 0.78 开始漏边缘 case，仅极端精度场景用
+    }
+
+    #[test]
+    fn reranker_scores_must_be_actionable_before_overriding_rrf() {
+        assert!(!reranker_scores_are_actionable(&[0.0, 0.0, f32::NAN]));
+        assert!(!reranker_scores_are_actionable(&[0.0001, 0.0009]));
+        assert!(reranker_scores_are_actionable(&[0.0, 0.001]));
+        assert!(reranker_scores_are_actionable(&[0.42, 0.0]));
     }
 
     // #9: search_with_context 三阶段管道（有 Reranker）

@@ -45,6 +45,28 @@ jobs:
       - name: Run scheduler-boundary-audit.sh
         run: bash scripts/scheduler-boundary-audit.sh
 
+  rag-eval-smoke:
+    # Hardware-free manifest and dry-run gate for the Attune RAG eval framework.
+    name: RAG Eval Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate manifests and dry-run PR suite
+        run: |
+          mkdir -p reports/eval
+          bash tests/scripts/eval_asset_registry_contract_test.sh
+          bash tests/scripts/eval_metric_system_contract_test.sh
+          bash tests/scripts/eval_single_industry_scale_contract_test.sh
+          bash tests/scripts/eval_web_demo_frontend_contract_test.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/eval/validate-manifests.py --root "$PWD" --suite pr_rag_smoke
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/eval/run-suite.py --root "$PWD" --suite pr_rag_smoke --base-url http://127.0.0.1:18905 --out reports/eval/pr-rag-smoke.json --dry-run
+      - name: Upload RAG eval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-smoke
+          path: reports/eval/pr-rag-smoke.json
+          retention-days: 14
+
   extension-build:
     runs-on: ubuntu-latest
     steps:

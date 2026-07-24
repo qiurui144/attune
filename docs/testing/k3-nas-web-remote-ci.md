@@ -134,6 +134,71 @@ CI 分层：
   跑 NAS Web API contract、scheduler contract、worker correctness、Attune vector/search/chat gates。
 - Scheduler CI: 在 scheduler 机器/仓库内从零 E2E，产出 worker/perf/acceleration 报告；Attune CI 不重新归因 scheduler 性能。
 
+## Attune RAG eval framework
+
+Attune RAG eval is the manifest-driven acceptance layer for industry scenarios,
+multi-document scale, Chat RAG, Summary RAG, and failure attribution. The
+operator guide is `docs/testing/attune-rag-evaluation-framework.md`.
+
+Local/PR smoke:
+
+```bash
+bash scripts/test-pyramid.sh --with-eval-smoke
+```
+
+This runs `scripts/eval/validate-manifests.py --suite pr_rag_smoke` and
+`scripts/eval/run-suite.py --suite pr_rag_smoke --dry-run`; it does not connect
+to K3.
+
+K3 release smoke suite id:
+
+```bash
+k3_rag_release_smoke
+```
+
+K3 `.deb` release script integration:
+
+```bash
+ATTUNE_K3_EVAL_SUITE=k3_rag_release_smoke \
+ATTUNE_K3_EVAL_OUT=reports/release/k3-rag-release-smoke.json \
+bash scripts/release/test-k3-nas-web-demo.sh \
+  --deb dist/release/riscv64-server-deb/attune-server_<version>_riscv64.deb
+```
+
+If `ATTUNE_K3_EVAL_SUITE` is unset, the K3 release script keeps the existing
+NAS Web API, scheduler, long-text, and optional UI gates only. If it is set, the
+manifest-driven RAG eval suite runs after the NAS Web API contract and before
+the script-local bind/chat smoke; failures block the `.deb` validation.
+
+Scale suite ids:
+
+```bash
+k3_rag_scale_thousand
+k3_rag_scale_ten_thousand
+```
+
+Both scale suites are single-industry security gates. They must not use
+`mixed_enterprise` or cross-industry documents to satisfy the thousand /
+ten-thousand document count. Mixed corpora are reserved for source-drift and
+routing专项 only.
+
+`kb-web-demo` is the standard frontend simulation surface. Its contract and
+live browser runner cover upload, vector chunk display, Chat RAG, Summary RAG,
+citations, and timing display:
+
+```bash
+bash tests/scripts/eval_web_demo_frontend_contract_test.sh
+python3 tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py \
+  --base-url http://<nas-ip>:8890 \
+  --api-url http://<nas-ip>:8889 \
+  --out reports/release/kb-web-demo-frontend.json
+```
+
+The generic runner currently supports generated Markdown corpora directly and
+polls async scheduler jobs surfaced by `/api/v1/chat`. Legacy airplane and
+mechanical-design long-text gates remain covered by `ATTUNE_K3_LONGTEXT_E2E=1`
+until their full live ingestion path is migrated to the generic eval runner.
+
 ## NAS Web API contract
 
 `scripts/release/probe-nas-web-api-contract.py` 是 K3 `.deb` 演示的严格接口门。默认由

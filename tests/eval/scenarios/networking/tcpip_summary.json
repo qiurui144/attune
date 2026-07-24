@@ -1,0 +1,25 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "networking_tcpip_summary",
+  "domain": "networking",
+  "scenario_type": "summary",
+  "difficulty": "easy",
+  "corpus_id": "networking_tcpip_smoke",
+  "turns": [
+    {
+      "turn_id": "grounded_summary",
+      "message": "请总结当前知识库中 TCP/IP 起源和排障流程的核心要点，必须给出引用。",
+      "answer_mode": "summary",
+      "requires_citations": true,
+      "expected_sources": ["tcpip_origin", "tcpip_troubleshooting", "tcpip_support_workflow"],
+      "must_include": ["ARPANET", "DARPA", "物理链路", "DNS", "抓包"],
+      "must_not_include": ["无来源总结", "不需要引用", "凭经验判断"],
+      "latency_budget_ms": 30000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

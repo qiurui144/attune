@@ -147,6 +147,16 @@ bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
   --skip-deb-check \
   --deb "$TMP/fake.deb" \
   --base-url http://127.0.0.1:18900 \
+  --reports-dir "$TMP/reports" \
+  >/tmp/attune-k3-release-dry-run.log
+ATTUNE_K3_EVAL_SUITE=k3_rag_release_smoke \
+ATTUNE_K3_WEB_DEMO_BASE_URL=http://127.0.0.1:8890 \
+ATTUNE_K3_WEB_DEMO_API_URL=http://127.0.0.1:8889 \
+bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
+  --dry-run \
+  --skip-deb-check \
+  --deb "$TMP/fake.deb" \
+  --base-url http://127.0.0.1:18900 \
   --reports-dir "$TMP/reports"
 test -f "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "K3 RVV Runtime Performance Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
@@ -168,6 +178,15 @@ grep -q "Long-text PDF OCR guard" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_LONGTEXT_PDF_OCR=0" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_LONGTEXT_MANIFEST" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "Remote CI topology" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "RAG Eval Suite Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "ATTUNE_K3_EVAL_SUITE" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "k3_rag_release_smoke" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "scripts/eval/validate-manifests.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "scripts/eval/run-suite.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "ATTUNE_K3_EVAL_OUT" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "KB Web Demo Frontend Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "ATTUNE_K3_WEB_DEMO_BASE_URL" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "kb_web_demo_eval_frontend_e2e.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 
 python3 "$ROOT/scripts/release/probe-nas-web-api-contract.py" \
   --dry-run \

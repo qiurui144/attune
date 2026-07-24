@@ -6,7 +6,7 @@
 <title>Attune KB Demo · K3</title>
 <style>
 :root{--bg:#f6f7f8;--surface:#fff;--surface2:#eef4f4;--text:#222831;--muted:#67707a;--accent:#4f7f7a;--accent2:#3d6763;--border:#d9dee2;--ok:#238636;--warn:#b7791f;--err:#c62828;--chip:#edf1f2;--radius:8px}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.app{max-width:1180px;margin:0 auto;padding:18px}.header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}.header h1{font-size:22px;margin:0;color:var(--accent)}.header p{margin:4px 0 0;color:var(--muted);font-size:12px}.statusbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{font-size:11px;padding:5px 8px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted)}.pill.ok{color:var(--ok);border-color:#bbdfc1}.pill.warn{color:var(--warn);border-color:#efd9a6}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0}.tab{min-height:42px;border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer}.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}.grid{display:grid;grid-template-columns:1fr 360px;gap:14px}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}.card h2{font-size:15px;margin:0 0 12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.grow{flex:1;min-width:180px}input,select,textarea{font:inherit;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--surface);padding:10px 12px;color:var(--text);outline:none}textarea{width:100%;resize:vertical;min-height:72px;line-height:1.55}input:focus,select:focus,textarea:focus{border-color:var(--accent)}button{border:0;border-radius:6px;background:var(--accent);color:#fff;padding:10px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}button:hover{background:var(--accent2)}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:var(--chip);color:var(--text);border:1px solid var(--border)}.secondary:hover{background:#e1e8e8}.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:34px 18px;text-align:center;background:#fbfcfc;cursor:pointer}.upload-zone.dragover,.upload-zone:hover{border-color:var(--accent);background:var(--surface2)}.upload-zone input{display:none}.upload-zone strong{display:block;font-size:15px;margin-bottom:5px}.muted{color:var(--muted);font-size:12px}.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}.step{border:1px solid var(--border);border-radius:6px;padding:10px;background:#fbfcfc;min-height:72px}.step .name{font-size:12px;font-weight:700}.step .time{font-size:18px;color:var(--accent);font-weight:800;margin-top:5px}.step .state{font-size:11px;color:var(--muted);margin-top:2px}.step.done{border-color:#b9dfc0;background:#f0fbf2}.step.active{border-color:var(--accent);background:var(--surface2)}.file-list,.chunk-list,.chat-msgs{display:flex;flex-direction:column;gap:8px}.file,.chunk,.msg{border:1px solid var(--border);border-radius:var(--radius);background:#fbfcfc;padding:11px 12px}.file{display:grid;grid-template-columns:1fr auto;gap:6px 10px}.file .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file .meta,.chunk .meta,.msg .meta{font-size:11px;color:var(--muted)}.file .right{text-align:right}.oktxt{color:var(--ok)}.warntxt{color:var(--warn)}.errtxt{color:var(--err)}.chunk{line-height:1.52}.chunk .title{font-weight:750;margin-bottom:4px}.chunk .body{font-size:12px;color:#343b43;max-height:130px;overflow:auto;white-space:pre-wrap}.chunk .score{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}.chat-msgs{max-height:520px;overflow:auto;margin-bottom:10px}.msg{max-width:88%;line-height:1.6;font-size:13px}.msg.user{align-self:flex-end;background:var(--accent);border-color:var(--accent);color:#fff}.msg.asst{align-self:flex-start}.msg.status{border-style:dashed;background:#fff8e8}.msg .role{font-weight:800;font-size:11px;margin-bottom:3px;opacity:.78}.cite{border-top:1px solid var(--border);margin-top:8px;padding-top:7px;display:flex;gap:5px;flex-wrap:wrap}.cite span{font-size:10px;background:var(--chip);border-radius:999px;padding:2px 7px;color:var(--muted)}.side-stat{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{background:#fbfcfc;border:1px solid var(--border);border-radius:6px;padding:10px}.stat b{display:block;color:var(--accent);font-size:20px}.empty{padding:26px 10px;text-align:center;color:var(--muted);font-size:13px}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #c8d0d6;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:860px){.header{display:block}.statusbar{justify-content:flex-start;margin-top:10px}.tabs{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr}.msg{max-width:100%}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.app{max-width:1180px;margin:0 auto;padding:18px}.header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}.header h1{font-size:22px;margin:0;color:var(--accent)}.header p{margin:4px 0 0;color:var(--muted);font-size:12px}.statusbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{font-size:11px;padding:5px 8px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted)}.pill.ok{color:var(--ok);border-color:#bbdfc1}.pill.warn{color:var(--warn);border-color:#efd9a6}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0}.tab{min-height:42px;border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer}.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}.grid{display:grid;grid-template-columns:1fr 360px;gap:14px}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}.card h2{font-size:15px;margin:0 0 12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.grow{flex:1;min-width:180px}input,select,textarea{font:inherit;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--surface);padding:10px 12px;color:var(--text);outline:none}textarea{width:100%;resize:vertical;min-height:72px;line-height:1.55}input:focus,select:focus,textarea:focus{border-color:var(--accent)}button{border:0;border-radius:6px;background:var(--accent);color:#fff;padding:10px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}button:hover{background:var(--accent2)}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:var(--chip);color:var(--text);border:1px solid var(--border)}.secondary:hover{background:#e1e8e8}.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:34px 18px;text-align:center;background:#fbfcfc;cursor:pointer}.upload-zone.dragover,.upload-zone:hover{border-color:var(--accent);background:var(--surface2)}.upload-zone input{display:none}.upload-zone strong{display:block;font-size:15px;margin-bottom:5px}.muted{color:var(--muted);font-size:12px}.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}.step{border:1px solid var(--border);border-radius:6px;padding:10px;background:#fbfcfc;min-height:72px}.step .name{font-size:12px;font-weight:700}.step .time{font-size:18px;color:var(--accent);font-weight:800;margin-top:5px}.step .state{font-size:11px;color:var(--muted);margin-top:2px}.step.done{border-color:#b9dfc0;background:#f0fbf2}.step.active{border-color:var(--accent);background:var(--surface2)}.file-list,.chunk-list,.chat-msgs{display:flex;flex-direction:column;gap:8px}.file,.chunk,.msg{border:1px solid var(--border);border-radius:var(--radius);background:#fbfcfc;padding:11px 12px}.file{display:grid;grid-template-columns:1fr auto;gap:6px 10px}.file .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file .meta,.chunk .meta,.msg .meta{font-size:11px;color:var(--muted)}.file .right{text-align:right}.oktxt{color:var(--ok)}.warntxt{color:var(--warn)}.errtxt{color:var(--err)}.chunk{line-height:1.52}.chunk .title{font-weight:750;margin-bottom:4px}.chunk .body{font-size:12px;color:#343b43;max-height:130px;overflow:auto;white-space:pre-wrap}.chunk .score{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}.chat-msgs{max-height:520px;overflow:auto;margin-bottom:10px}.msg{max-width:88%;line-height:1.6;font-size:13px}.msg.user{align-self:flex-end;background:var(--accent);border-color:var(--accent);color:#fff}.msg.asst{align-self:flex-start}.msg.status{border-style:dashed;background:#fff8e8}.msg .role{font-weight:800;font-size:11px;margin-bottom:3px;opacity:.78}.cite{border-top:1px solid var(--border);margin-top:8px;padding-top:7px;display:grid;gap:5px}.cite span{font-size:10px;background:var(--chip);border-radius:6px;padding:5px 7px;color:var(--muted)}.cite small{display:block;margin-top:2px;color:#343b43;line-height:1.4}.side-stat{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{background:#fbfcfc;border:1px solid var(--border);border-radius:6px;padding:10px}.stat b{display:block;color:var(--accent);font-size:20px}.empty{padding:26px 10px;text-align:center;color:var(--muted);font-size:13px}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #c8d0d6;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:860px){.header{display:block}.statusbar{justify-content:flex-start;margin-top:10px}.tabs{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr}.msg{max-width:100%}}
 </style>
 </head>
 <body>
@@ -98,9 +98,9 @@
   <section id="tab-summary" style="display:none">
     <div class="card">
       <div class="row" style="margin-bottom:10px">
-        <select id="summaryModel"><option value="llm-summary" selected>llm-summary · 快速总结</option><option value="llm-chat">llm-chat · 深度总结</option></select>
+        <select id="summaryModel"><option value="llm-chat" selected>llm-chat · 深度总结</option><option value="llm-summary">llm-summary · 快速总结</option></select>
         <button class="secondary" onclick="prepareModel('summary')">切换模型</button>
-        <span class="muted" id="summaryModelState">模型: llm-summary</span>
+        <span class="muted" id="summaryModelState">模型: llm-chat</span>
       </div>
       <div class="chat-msgs" id="summaryMsgs"><div class="msg asst"><div class="role">Attune Summary</div>这里同样走 RAG，只是默认用 summary 模型和总结提示词。</div></div>
       <textarea id="summaryInput" placeholder="输入总结目标，例如：总结刚上传文档的核心结论、风险点和待办。"></textarea>
@@ -256,13 +256,13 @@ async function refreshAll(){
 async function ensureKnowledgeReadyForRag(){
   await refreshAll();
   const pending = Number(latestStatus.pending_embeddings || 0);
-  if(pending > 0){
-    throw new Error(`知识库仍在向量化，Pending ${pending}。请等待索引完成后再提问。`);
-  }
   const localFiles = [...files.values()];
   const readyLocal = localFiles.some(f=>f.ready || f.status==='ready');
   if(localFiles.length && !readyLocal){
     throw new Error('已上传文件还没有可检索向量块。请在上传页等待状态变为 ready，或到向量库页确认能检索到 chunk。');
+  }
+  if(pending > 0 && !readyLocal){
+    throw new Error(`知识库仍在向量化，Pending ${pending}。请等待索引完成后再提问。`);
   }
 }
 
@@ -359,6 +359,29 @@ function modelFromApiPayload(payload, fallback){
     || fallback;
 }
 
+function ragLabelFromApiPayload(payload){
+  const parts = [];
+  if(payload?.answer_mode) parts.push(payload.answer_mode);
+  if(payload?.intent) parts.push(payload.intent);
+  if(payload?.rag_profile) parts.push(payload.rag_profile);
+  const coverage = payload?.retrieval?.coverage_status;
+  if(coverage && coverage !== 'sufficient') parts.push(coverage);
+  const score = Number(payload?.retrieval?.coverage_score);
+  if(Number.isFinite(score)) parts.push(`coverage ${score.toFixed(2)}`);
+  const passes = payload?.retrieval?.passes;
+  if(Array.isArray(passes) && passes.length) parts.push(`passes ${passes.join('+')}`);
+  return parts.join(' · ');
+}
+
+function citationPreview(c){
+  const label = c?.title || c?.item_id || c?.chunk_id || 'source';
+  const text = c?.snippet || c?.preview || c?.text || c?.content || c?.inject_content || '';
+  const compact = String(text).replace(/\s+/g,' ').trim();
+  if(!compact) return esc(label);
+  const short = compact.length > 160 ? `${compact.slice(0,160)}...` : compact;
+  return `${esc(label)}<small>${esc(short)}</small>`;
+}
+
 function providerFromApiPayload(payload){
   const job = payload?.job || payload || {};
   return payload?.cost?.provider
@@ -423,9 +446,10 @@ async function sendRag(kind){
       displayedModel = modelFromApiPayload(done.payload, displayedModel);
       displayedProvider = providerFromApiPayload(done.payload) || displayedProvider;
     }
-    const cites = (d.citations||[]).slice(0,8).map(c=>`<span>${esc(c.title || c.item_id || c.chunk_id || 'source')}</span>`).join('');
+    const cites = (d.citations||[]).slice(0,8).map(c=>`<span>${citationPreview(c)}</span>`).join('');
     const modelLabel = displayedProvider ? `${displayedProvider}/${displayedModel}` : displayedModel;
-    const meta = `<div class="meta">耗时 ${fmtMs(displayedLatency)} · ${esc(modelLabel)}${jobId ? ` · ${jobId}` : ''} · knowledge ${d.knowledge_count ?? (d.citations||[]).length}</div>${cites?`<div class="cite">${cites}</div>`:''}`;
+    const ragLabel = ragLabelFromApiPayload(d);
+    const meta = `<div class="meta">耗时 ${fmtMs(displayedLatency)} · ${esc(modelLabel)}${ragLabel ? ` · ${esc(ragLabel)}` : ''}${jobId ? ` · ${jobId}` : ''} · knowledge ${d.knowledge_count ?? (d.citations||[]).length}</div>${cites?`<div class="cite">${cites}</div>`:''}`;
     appendMsg(kind, isChat ? 'Attune Chat RAG' : 'Attune Summary RAG', answer, meta);
   }catch(err){
     document.getElementById(waitId)?.remove();

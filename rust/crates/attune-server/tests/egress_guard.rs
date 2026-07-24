@@ -53,10 +53,13 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
     ),
     (
         "attune-core/src/llm.rs",
-        2,
-        "LLM providers (Ollama / OpenAI-compat). Egress is enforced at call \
-         sites: chat.rs F-17 gate + RedactingLlmProvider, documents.rs I1/I2 \
-         privacy-gate; provider itself is the transport.",
+        3,
+        "LLM providers (Ollama / OpenAI-compat / local-scheduler-native infer). \
+         Egress is enforced at call sites: chat.rs F-17 gate + RedactingLlmProvider, \
+         documents.rs I1/I2 privacy-gate; provider itself is the transport. \
+         Local-scheduler-native normalizes the scheduler base, defaults to loopback, \
+         disables ambient proxies, and is reached only after Attune has applied \
+         retrieval/admission/cloud-spill policy.",
     ),
     (
         "attune-core/src/cloud_client.rs",
@@ -208,10 +211,7 @@ fn count_egress_points(path: &Path) -> usize {
         }
 
         if !t.starts_with("//") && !t.starts_with('*') {
-            count += PATTERNS
-                .iter()
-                .filter(|pat| line.contains(*pat))
-                .count();
+            count += PATTERNS.iter().filter(|pat| line.contains(*pat)).count();
         }
         brace_depth += opens - closes;
     }

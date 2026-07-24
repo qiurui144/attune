@@ -329,10 +329,7 @@ mod tests {
         assert!(sent.get("deadline_ms").is_none(), "sent={sent}");
         assert!(sent.get("timeout_ms").is_none(), "sent={sent}");
         assert!(sent.get("ttl_ms").is_none(), "sent={sent}");
-        assert_eq!(
-            sent.get("max_output_tokens").and_then(Value::as_u64),
-            Some(24)
-        );
+        assert!(sent.get("max_output_tokens").is_none(), "sent={sent}");
         handle.join().unwrap();
     }
 

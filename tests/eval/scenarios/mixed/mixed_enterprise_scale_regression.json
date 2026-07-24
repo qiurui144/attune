@@ -1,0 +1,25 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "mixed_enterprise_scale_regression",
+  "domain": "mixed_enterprise",
+  "scenario_type": "high_complexity_longtext",
+  "difficulty": "stress",
+  "corpus_id": "generated_ten_thousand_docs",
+  "turns": [
+    {
+      "turn_id": "wrong_domain_resistance",
+      "message": "在万级混合知识库中，只基于 networking 域证据说明 packet capture 排查路径，并避免引用 finance 或 mechanical 文档。",
+      "answer_mode": "domain_scoped_guidance",
+      "requires_citations": true,
+      "expected_sources": ["networking::packet-capture"],
+      "must_include": ["networking", "packet capture", "证据", "引用"],
+      "must_not_include": ["finance", "mechanical", "无引用结论"],
+      "latency_budget_ms": 60000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

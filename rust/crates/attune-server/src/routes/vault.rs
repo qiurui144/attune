@@ -94,6 +94,7 @@ fn warm_retrieval_after_unlock(state: &SharedState) {
         let (mut params, _) = crate::retrieval_policy::build_search_params(
             state.hardware.form_factor,
             true,
+            false,
             query,
             None,
             top_k,

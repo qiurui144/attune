@@ -1,0 +1,35 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "networking_tcpip_troubleshooting",
+  "domain": "networking",
+  "scenario_type": "operation_guidance",
+  "difficulty": "medium",
+  "corpus_id": "networking_tcpip_smoke",
+  "turns": [
+    {
+      "turn_id": "initial_grounded_steps",
+      "message": "如何排查 TCP/IP 连接失败？请只基于知识库证据回答。",
+      "answer_mode": "grounded_steps",
+      "requires_citations": true,
+      "expected_sources": ["tcpip_troubleshooting", "tcpip_support_workflow"],
+      "must_include": ["物理链路", "IP", "路由", "DNS", "抓包"],
+      "must_not_include": ["编造引用", "无需证据", "直接断言硬件损坏"],
+      "latency_budget_ms": 30000
+    },
+    {
+      "turn_id": "evidence_boundary_followup",
+      "message": "如果这些证据不足，应该继续向用户索取哪些材料？",
+      "answer_mode": "grounded_escalation",
+      "requires_citations": true,
+      "expected_sources": ["tcpip_support_workflow"],
+      "must_include": ["拓扑", "路由", "DNS", "端口", "日志"],
+      "must_not_include": ["编造抓包结论", "跳过证据"],
+      "latency_budget_ms": 30000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

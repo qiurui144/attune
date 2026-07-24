@@ -1,0 +1,25 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "mixed_enterprise_support",
+  "domain": "mixed_enterprise",
+  "scenario_type": "operation_guidance",
+  "difficulty": "stress",
+  "corpus_id": "generated_thousand_docs",
+  "turns": [
+    {
+      "turn_id": "support_workflow_lookup",
+      "message": "在混合企业知识库中，如何根据用户症状定位 support workflow 并避免编造结论？",
+      "answer_mode": "grounded_support_workflow",
+      "requires_citations": true,
+      "expected_sources": ["generated:domain-support-workflow"],
+      "must_include": ["用户症状", "证据", "日志", "不要编造"],
+      "must_not_include": ["无引用结论", "跨域漂移"],
+      "latency_budget_ms": 30000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

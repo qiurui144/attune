@@ -8,6 +8,7 @@ use crate::eval::ParsedEvalHeaders;
 pub(crate) fn build_search_params(
     form_factor: FormFactor,
     use_local_scheduler_profile: bool,
+    rerank_enabled: bool,
     query: &str,
     detected_domain: Option<&str>,
     top_k: usize,
@@ -53,16 +54,16 @@ pub(crate) fn build_search_params(
         }
     }
 
-    if use_edge_profile
-        && !env_bool_any(
+    let rerank_enabled = rerank_enabled
+        || env_bool_any(
             &[
                 "ATTUNE_RERANK_ENABLED",
                 "ATTUNE_SCHEDULER_RERANK_ENABLED",
                 "ATTUNE_LOCAL_RERANK_ENABLED",
             ],
             false,
-        )
-    {
+        );
+    if use_edge_profile && !rerank_enabled {
         params.skip_rerank = true;
     }
     if let Some(eval) = eval {
@@ -84,6 +85,14 @@ pub(crate) fn build_search_params(
     }
 
     (params, retrieval_plan)
+}
+
+pub(crate) fn rerank_enabled_from_settings(settings: Option<&serde_json::Value>) -> bool {
+    settings
+        .and_then(|settings| settings.get("rerank"))
+        .and_then(|rerank| rerank.get("enabled"))
+        .and_then(|enabled| enabled.as_bool())
+        .unwrap_or(false)
 }
 
 fn env_bool_any(keys: &[&str], default: bool) -> bool {
@@ -142,6 +151,7 @@ mod tests {
         let (params, plan) = build_search_params(
             FormFactor::LocalSchedulerAppliance,
             false,
+            true,
             "ACME-2026-001 合同条款",
             Some("legal"),
             100,
@@ -167,6 +177,7 @@ mod tests {
         let (params, plan) = build_search_params(
             FormFactor::Laptop,
             false,
+            false,
             "ordinary query",
             Some("tech"),
             12,
@@ -188,6 +199,7 @@ mod tests {
         let (params, plan) = build_search_params(
             FormFactor::Server,
             true,
+            false,
             "A320 QRH abnormal procedure",
             Some("aviation"),
             50,
@@ -204,5 +216,34 @@ mod tests {
         assert_eq!(params.intermediate_k, 40);
         assert_eq!(params.domain_hint.as_deref(), Some("aviation"));
         assert!(params.skip_rerank);
+    }
+
+    #[test]
+    fn local_scheduler_search_params_honor_settings_rerank_enabled() {
+        let (params, plan) = build_search_params(
+            FormFactor::Server,
+            true,
+            true,
+            "TCP/IP troubleshooting workflow",
+            None,
+            20,
+            None,
+            None,
+            None,
+        );
+
+        assert!(plan.is_some());
+        assert!(!params.skip_rerank);
+    }
+
+    #[test]
+    fn rerank_enabled_from_settings_uses_rerank_flag_only() {
+        assert!(rerank_enabled_from_settings(Some(&serde_json::json!({
+            "rerank": {"enabled": true}
+        }))));
+        assert!(!rerank_enabled_from_settings(Some(&serde_json::json!({
+            "rerank": {"enabled": false}
+        }))));
+        assert!(!rerank_enabled_from_settings(Some(&serde_json::json!({}))));
     }
 }

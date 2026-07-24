@@ -243,8 +243,51 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
             "总结",
             "详细",
             "解释",
+            "如何",
+            "怎么",
+            "怎样",
+            "排查",
+            "诊断",
+            "操作",
+            "流程",
             "对比",
             "差异",
+        ],
+    );
+    let asks_diagnostic = contains_any_ascii(
+        &query_l,
+        &[
+            "troubleshoot",
+            "diagnose",
+            "debug",
+            "failure",
+            "runbook",
+            "procedure",
+            "排查",
+            "诊断",
+            "故障",
+            "操作指导",
+            "流程问题",
+        ],
+    );
+    let asks_decision_or_comparison = contains_any_ascii(
+        &query_l,
+        &[
+            "between",
+            "which",
+            "should",
+            "recommend",
+            "recommendation",
+            "decision",
+            "compare",
+            "contrast",
+            "tradeoff",
+            "之间",
+            "应该",
+            "建议",
+            "决策",
+            "对比",
+            "取舍",
         ],
     );
     let asks_source_lookup = local_scheduler_source_lookup_query(query);
@@ -252,10 +295,14 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
     let (profile, tokens, min_contexts, min_chars) =
         if local_scheduler_operational_safety_query(query) {
             ("safety", 64, 3, 96)
+        } else if asks_diagnostic {
+            ("diagnostic", 192, 6, 320)
+        } else if asks_decision_or_comparison {
+            ("synthesis", 160, 6, 240)
         } else if asks_detailed && multi_source {
             ("synthesis", 160, 5, 160)
         } else if asks_detailed || multi_source {
-            ("balanced", 128, 4, 144)
+            ("balanced", 128, 4, 192)
         } else if asks_source_lookup {
             ("lookup", 72, 3, 112)
         } else {
@@ -368,6 +415,461 @@ fn source_diversity_query(query: &str) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RagAnswerMode {
+    Fact,
+    HowTo,
+    Troubleshooting,
+    Decision,
+    Summary,
+    Comparison,
+    NegativeEvidence,
+    Followup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RagCoveragePolicy {
+    SingleBest,
+    SourceDiverse,
+    PerTopic,
+    PriorSources,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RagTopic {
+    phrase: String,
+}
+
+#[derive(Debug, Clone)]
+struct RagIntentPlan {
+    answer_mode: RagAnswerMode,
+    coverage_policy: RagCoveragePolicy,
+    topics: Vec<RagTopic>,
+    sub_queries: Vec<String>,
+    obligations: Vec<&'static str>,
+}
+
+fn normalize_topic_phrase(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c: char| {
+            c.is_ascii_punctuation()
+                || matches!(
+                    c,
+                    '。' | '，' | '、' | '；' | '：' | '？' | '！' | '“' | '”'
+                )
+        })
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let lowered = lowered
+        .trim_start_matches("the ")
+        .trim_start_matches("a ")
+        .trim_start_matches("an ")
+        .trim();
+    if lowered.chars().count() < 2 {
+        return None;
+    }
+    Some(lowered.to_string())
+}
+
+fn add_topic(topics: &mut Vec<RagTopic>, phrase: &str) {
+    let Some(phrase) = normalize_topic_phrase(phrase) else {
+        return;
+    };
+    if topics.iter().any(|topic| topic.phrase == phrase) {
+        return;
+    }
+    topics.push(RagTopic { phrase });
+}
+
+fn extract_between_topics(message: &str, topics: &mut Vec<RagTopic>) {
+    let lower = message.to_ascii_lowercase();
+    if let Some(after_between) = lower.split("between ").nth(1) {
+        let end = after_between
+            .find(',')
+            .or_else(|| after_between.find('?'))
+            .unwrap_or(after_between.len());
+        let segment = &after_between[..end];
+        if let Some((left, right)) = segment.split_once(" and ") {
+            add_topic(topics, left);
+            add_topic(topics, right);
+        }
+    }
+    if let Some(after_between) = message.split("在 ").nth(1) {
+        let end = after_between
+            .find('，')
+            .or_else(|| after_between.find(','))
+            .or_else(|| after_between.find('？'))
+            .unwrap_or(after_between.len());
+        let segment = &after_between[..end];
+        if let Some((left, right)) = segment.split_once(" 和 ") {
+            add_topic(topics, left);
+            add_topic(
+                topics,
+                right.trim_end_matches(" 之间").trim_end_matches("之间"),
+            );
+        } else if let Some((left, right)) = segment.split_once(" 与 ") {
+            add_topic(topics, left);
+            add_topic(
+                topics,
+                right.trim_end_matches(" 之间").trim_end_matches("之间"),
+            );
+        }
+    }
+}
+
+fn extract_list_topics(message: &str, topics: &mut Vec<RagTopic>) {
+    let mut segment = message.trim();
+    for prefix in ["请总结", "总结", "summarize", "overview of"] {
+        if segment
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+        {
+            segment = segment[prefix.len()..].trim();
+            break;
+        }
+    }
+    for suffix in [
+        "的核心要点。",
+        "的核心要点",
+        "核心要点。",
+        "核心要点",
+        "的要点。",
+        "的要点",
+    ] {
+        if let Some(rest) = segment.strip_suffix(suffix) {
+            segment = rest.trim();
+            break;
+        }
+    }
+    let segment = segment
+        .replace(" and ", "、")
+        .replace(" 和 ", "、")
+        .replace(" 与 ", "、")
+        .replace(",", "、")
+        .replace("，", "、")
+        .replace("；", "、");
+    for part in segment.split('、') {
+        add_topic(topics, part);
+    }
+}
+
+fn extract_rag_topics(message: &str, answer_mode: RagAnswerMode) -> Vec<RagTopic> {
+    let mut topics = Vec::new();
+    extract_between_topics(message, &mut topics);
+    if matches!(
+        answer_mode,
+        RagAnswerMode::Summary | RagAnswerMode::Comparison | RagAnswerMode::Decision
+    ) {
+        extract_list_topics(message, &mut topics);
+    }
+    topics.truncate(6);
+    topics
+}
+
+fn rag_answer_mode(message: &str, history: &[HistoryMessage]) -> RagAnswerMode {
+    let q = message.to_ascii_lowercase();
+    if contains_any_ascii(&q, &["继续", "上一问", "刚才", "前述", "prior", "previous"])
+        && !history.is_empty()
+    {
+        return RagAnswerMode::Followup;
+    }
+    if contains_any_ascii(
+        &q,
+        &[
+            "cannot",
+            "missing",
+            "insufficient",
+            "能否直接",
+            "不能直接",
+            "没有",
+            "缺少",
+            "证据不足",
+        ],
+    ) {
+        return RagAnswerMode::NegativeEvidence;
+    }
+    if contains_any_ascii(
+        &q,
+        &["summary", "summarize", "overview", "总结", "概括", "综述"],
+    ) {
+        return RagAnswerMode::Summary;
+    }
+    if contains_any_ascii(
+        &q,
+        &[
+            "between",
+            "which",
+            "should",
+            "recommend",
+            "decision",
+            "应该",
+            "建议",
+            "决策",
+            "取舍",
+        ],
+    ) {
+        return RagAnswerMode::Decision;
+    }
+    if contains_any_ascii(
+        &q,
+        &["compare", "contrast", "versus", " vs ", "对比", "比较"],
+    ) {
+        return RagAnswerMode::Comparison;
+    }
+    if contains_any_ascii(
+        &q,
+        &["troubleshoot", "diagnose", "debug", "排查", "诊断", "故障"],
+    ) {
+        return RagAnswerMode::Troubleshooting;
+    }
+    if contains_any_ascii(&q, &["how", "procedure", "如何", "怎么", "怎样", "步骤"]) {
+        return RagAnswerMode::HowTo;
+    }
+    RagAnswerMode::Fact
+}
+
+fn rag_answer_obligations(mode: RagAnswerMode) -> Vec<&'static str> {
+    match mode {
+        RagAnswerMode::HowTo | RagAnswerMode::Troubleshooting => vec![
+            "preserve user-named domain and topic terms verbatim",
+            "identify user symptom or problem when present",
+            "cite logs or evidence when present",
+            "provide ordered steps",
+            "do not invent unsupported actions",
+        ],
+        RagAnswerMode::Decision | RagAnswerMode::Comparison => vec![
+            "preserve user-named domain and topic terms verbatim",
+            "collect evidence before recommendation",
+            "compare cited sides or options",
+            "state missing evidence before final judgment",
+        ],
+        RagAnswerMode::Summary => vec![
+            "preserve user-named domain and topic terms verbatim",
+            "summarize by topic or source group",
+            "attach citations to claims",
+            "avoid unsupported cross-topic conclusions",
+        ],
+        RagAnswerMode::NegativeEvidence => vec![
+            "preserve user-named domain and topic terms verbatim",
+            "state that missing evidence prevents direct determination",
+            "identify evidence gaps",
+            "request or collect the missing materials",
+        ],
+        RagAnswerMode::Followup => {
+            vec!["preserve the prior cited subject unless the new message explicitly changes it"]
+        }
+        RagAnswerMode::Fact => Vec::new(),
+    }
+}
+
+fn rag_response_contract_prompt_block(plan: Option<&RagIntentPlan>) -> String {
+    let topic_line = plan
+        .filter(|plan| !plan.topics.is_empty())
+        .map(|plan| {
+            format!(
+                "- Explicitly address these user-named topics, preserving the exact tokens at least once: {}.\n",
+                plan.topics
+                    .iter()
+                    .map(|topic| topic.phrase.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "RAG response contract:\n\
+         - Use only cited refs for factual claims and attach citation markers to concrete claims.\n\
+         - Preserve user-named domain, product, component, standard, source-key, and topic terms verbatim at least once; if you translate them, keep the original token beside the translation.\n\
+         {topic_line}\
+         - For operation, troubleshooting, and support guidance: include the problem/symptom, the cited evidence, the logs/configuration/topology/screenshots/timelines/approvals or other missing materials to collect, ordered next steps, and an explicit warning not to invent unsupported operational conclusions.\n\
+         - For decisions, compliance, diagnosis, negative-evidence, or out-of-manual questions: explicitly say evidence is insufficient when required evidence is absent, say the conclusion cannot be made directly, and name what to request or collect next.\n\
+         - If the requested practice is industry-general but not directly covered by the refs, label it as industry-general guidance and do not present it as a manual/source conclusion.\n"
+    )
+}
+
+fn text_contains_any(text: &str, needles: &[&str]) -> bool {
+    let folded = text.to_ascii_lowercase();
+    needles
+        .iter()
+        .any(|needle| text.contains(needle) || folded.contains(&needle.to_ascii_lowercase()))
+}
+
+fn text_has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+}
+
+fn query_requests_out_of_manual_boundary(query: &str) -> bool {
+    text_contains_any(
+        query,
+        &[
+            "未直接覆盖",
+            "没有直接覆盖",
+            "手册没有",
+            "资料没有",
+            "知识库没有",
+            "out-of-manual",
+            "not directly covered",
+            "not covered",
+            "industry-general",
+            "行业通用",
+        ],
+    )
+}
+
+fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str) -> String {
+    if answer.trim().is_empty() {
+        return answer.to_string();
+    }
+    let chinese = text_has_cjk(query) || text_has_cjk(answer);
+    let mut additions = Vec::new();
+
+    if matches!(
+        plan.answer_mode,
+        RagAnswerMode::HowTo | RagAnswerMode::Troubleshooting
+    ) && !text_contains_any(answer, &["证据", "evidence", "引用", "source"])
+        || matches!(
+            plan.answer_mode,
+            RagAnswerMode::HowTo | RagAnswerMode::Troubleshooting
+        ) && !text_contains_any(answer, &["日志", "logs", "configuration", "配置", "拓扑"])
+        || matches!(
+            plan.answer_mode,
+            RagAnswerMode::HowTo | RagAnswerMode::Troubleshooting
+        ) && !text_contains_any(answer, &["不要编造", "不能编造", "unsupported", "not invent"])
+    {
+        additions.push(if chinese {
+            "补充约束：请以引用证据为准；排查前继续收集日志、配置、拓扑、截图、时间线、审批或其他材料；不要编造未被引用支持的操作结论。"
+        } else {
+            "Additional constraint: rely on cited evidence; collect logs, configuration, topology, screenshots, timelines, approvals, or other missing materials before troubleshooting; do not invent unsupported operational conclusions."
+        });
+    }
+
+    if matches!(plan.answer_mode, RagAnswerMode::NegativeEvidence)
+        || text_contains_any(
+            query,
+            &["没有", "缺少", "缺失", "能否直接", "直接判定", "missing", "without"],
+        )
+    {
+        let missing_boundary = !text_contains_any(
+            answer,
+            &["证据不足", "证据不充分", "insufficient evidence"],
+        ) || !text_contains_any(answer, &["继续索取", "补充材料", "收集", "request", "collect"]);
+        if missing_boundary {
+            additions.push(if chinese {
+                "结论边界：证据不足时不能直接判定；应继续索取或收集缺失的日志、记录、审批、测量或其他材料。"
+            } else {
+                "Conclusion boundary: insufficient evidence prevents a direct determination; request or collect the missing logs, records, approvals, measurements, or other materials."
+            });
+        }
+    }
+
+    if query_requests_out_of_manual_boundary(query) {
+        let missing_boundary = !text_contains_any(answer, &["证据不足", "insufficient evidence"])
+            || !text_contains_any(
+                answer,
+                &["不能当作手册结论", "不能作为手册结论", "not a manual conclusion"],
+            );
+        if missing_boundary {
+            additions.push(if chinese {
+                "范围边界：知识库未直接覆盖该做法；可以作为行业通用建议讨论，但证据不足时不能当作手册结论或来源结论。"
+            } else {
+                "Scope boundary: the knowledge base does not directly cover this practice; it may be discussed as industry-general guidance, but insufficient evidence means it must not be presented as a manual or source conclusion."
+            });
+        }
+    }
+
+    if matches!(plan.answer_mode, RagAnswerMode::Followup)
+        && text_contains_any(query, &["继续", "continue"])
+        && !text_contains_any(answer, &["继续", "continue"])
+    {
+        additions.push(if chinese {
+            "连续性说明：继续基于上一轮引用来源回答，未更换到无关主题。"
+        } else {
+            "Continuity note: continuing from the prior cited sources without switching to an unrelated topic."
+        });
+    }
+
+    if additions.is_empty() {
+        answer.to_string()
+    } else {
+        format!("{}\n\n{}", answer.trim_end(), additions.join("\n"))
+    }
+}
+
+fn build_rag_sub_queries(message: &str, topics: &[RagTopic], mode: RagAnswerMode) -> Vec<String> {
+    let mut queries = vec![message.trim().to_string()];
+    for topic in topics.iter().take(5) {
+        queries.push(topic.phrase.clone());
+    }
+    if matches!(mode, RagAnswerMode::Decision | RagAnswerMode::Comparison) && topics.len() >= 2 {
+        queries.push(format!(
+            "{} evidence before recommendation",
+            topics
+                .iter()
+                .take(4)
+                .map(|t| t.phrase.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    queries
+        .into_iter()
+        .filter(|query| !query.trim().is_empty())
+        .filter(|query| seen.insert(query.to_ascii_lowercase()))
+        .take(6)
+        .collect()
+}
+
+fn build_rag_intent_plan(message: &str, history: &[HistoryMessage]) -> RagIntentPlan {
+    let answer_mode = rag_answer_mode(message, history);
+    let topics = extract_rag_topics(message, answer_mode);
+    let coverage_policy = if matches!(answer_mode, RagAnswerMode::Followup) {
+        RagCoveragePolicy::PriorSources
+    } else if !topics.is_empty()
+        && matches!(
+            answer_mode,
+            RagAnswerMode::Decision | RagAnswerMode::Summary | RagAnswerMode::Comparison
+        )
+    {
+        RagCoveragePolicy::PerTopic
+    } else if source_diversity_query(message) {
+        RagCoveragePolicy::SourceDiverse
+    } else {
+        RagCoveragePolicy::SingleBest
+    };
+    let sub_queries = build_rag_sub_queries(message, &topics, answer_mode);
+    let obligations = rag_answer_obligations(answer_mode);
+    RagIntentPlan {
+        answer_mode,
+        coverage_policy,
+        topics,
+        sub_queries,
+        obligations,
+    }
+}
+
+fn rag_intent_plan_json(
+    plan: &RagIntentPlan,
+    selection: Option<&RagCoverageSelection>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "answer_mode": rag_answer_mode_label(plan.answer_mode),
+        "coverage_policy": rag_coverage_policy_label(plan.coverage_policy),
+        "topics": plan.topics.iter().map(|topic| topic.phrase.clone()).collect::<Vec<_>>(),
+        "sub_queries": plan.sub_queries.clone(),
+        "obligations": plan.obligations.clone(),
+        "selection": selection.map(|selection| serde_json::json!({
+            "selected_topic_hits": selection.selected_topic_hits,
+            "missing_topics": selection.missing_topics,
+        })),
+    })
+}
+
 fn select_local_scheduler_context_knowledge<'a>(
     query: &str,
     knowledge: &'a [Value],
@@ -435,6 +937,7 @@ fn local_scheduler_context_text(title: &str, evidence: &str, max_chars: usize) -
 fn build_chat_search_params(
     form_factor: attune_core::platform::FormFactor,
     use_local_scheduler_profile: bool,
+    rerank_enabled: bool,
     expanded_query: &str,
     detected_domain: Option<&str>,
     top_k: usize,
@@ -445,6 +948,7 @@ fn build_chat_search_params(
     crate::retrieval_policy::build_search_params(
         form_factor,
         use_local_scheduler_profile,
+        rerank_enabled,
         expanded_query,
         detected_domain,
         top_k,
@@ -452,6 +956,17 @@ fn build_chat_search_params(
         None,
         None,
     )
+}
+
+fn rerank_enabled(state: &SharedState) -> bool {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let settings = vault
+        .store()
+        .get_meta("app_settings")
+        .ok()
+        .flatten()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
+    crate::retrieval_policy::rerank_enabled_from_settings(settings.as_ref())
 }
 
 #[cfg(test)]
@@ -505,8 +1020,116 @@ fn build_local_scheduler_kb_contexts_with_budget(
     .collect()
 }
 
-fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> Vec<ChatMessage> {
-    let mut user = format!("Q: {query}");
+#[cfg(test)]
+fn build_local_scheduler_admission_messages(
+    query: &str,
+    history: &[HistoryMessage],
+    contexts: &[Value],
+    system_prompt: &str,
+) -> Vec<ChatMessage> {
+    build_local_scheduler_admission_messages_with_plan(
+        query,
+        history,
+        contexts,
+        system_prompt,
+        None,
+    )
+}
+
+fn rag_answer_mode_label(mode: RagAnswerMode) -> &'static str {
+    match mode {
+        RagAnswerMode::Fact => "fact",
+        RagAnswerMode::HowTo => "how_to",
+        RagAnswerMode::Troubleshooting => "troubleshooting",
+        RagAnswerMode::Decision => "decision",
+        RagAnswerMode::Summary => "summary",
+        RagAnswerMode::Comparison => "comparison",
+        RagAnswerMode::NegativeEvidence => "negative_evidence",
+        RagAnswerMode::Followup => "followup",
+    }
+}
+
+fn rag_coverage_policy_label(policy: RagCoveragePolicy) -> &'static str {
+    match policy {
+        RagCoveragePolicy::SingleBest => "single_best",
+        RagCoveragePolicy::SourceDiverse => "source_diverse",
+        RagCoveragePolicy::PerTopic => "per_topic",
+        RagCoveragePolicy::PriorSources => "prior_sources",
+    }
+}
+
+fn rag_intent_plan_prompt_block(plan: &RagIntentPlan) -> Option<String> {
+    if plan.obligations.is_empty()
+        && plan.topics.is_empty()
+        && matches!(plan.coverage_policy, RagCoveragePolicy::SingleBest)
+    {
+        return None;
+    }
+
+    let topics = if plan.topics.is_empty() {
+        "none".to_string()
+    } else {
+        plan.topics
+            .iter()
+            .map(|topic| topic.phrase.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let obligations = if plan.obligations.is_empty() {
+        "none".to_string()
+    } else {
+        plan.obligations.join("; ")
+    };
+
+    Some(format!(
+        "RAG intent plan:\n- Answer mode: {}\n- Coverage policy: {}\n- Required topics: {}\n- Answer obligations: {}\n",
+        rag_answer_mode_label(plan.answer_mode),
+        rag_coverage_policy_label(plan.coverage_policy),
+        topics,
+        obligations,
+    ))
+}
+
+fn build_local_scheduler_admission_messages_with_plan(
+    query: &str,
+    history: &[HistoryMessage],
+    contexts: &[Value],
+    system_prompt: &str,
+    intent_plan: Option<&RagIntentPlan>,
+) -> Vec<ChatMessage> {
+    let mut user = String::new();
+    if !history.is_empty() {
+        user.push_str("Recent conversation:\n");
+        for h in history
+            .iter()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let role = if h.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
+            user.push_str(role);
+            user.push_str(": ");
+            user.push_str(h.content.trim());
+            user.push('\n');
+        }
+        user.push_str(
+            "Use the recent conversation to resolve follow-up references, omitted subjects, and pronouns. Keep the same cited subject unless the current question explicitly changes it. If the current question only asks to continue from the prior answer/source, continue the prior user task and do not introduce an unrelated topic.\n",
+        );
+        user.push('\n');
+    }
+    user.push_str(&format!("Current Q: {query}"));
+    if let Some(plan) = intent_plan.and_then(rag_intent_plan_prompt_block) {
+        user.push_str("\n\n");
+        user.push_str(&plan);
+    }
+    user.push_str("\n\n");
+    user.push_str(&rag_response_contract_prompt_block(intent_plan));
     if !contexts.is_empty() {
         user.push_str("\n\nRefs:\n");
         for (idx, ctx) in contexts.iter().enumerate() {
@@ -516,10 +1139,56 @@ fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> 
             }
         }
     }
-    vec![
-        ChatMessage::system(LOCAL_SCHEDULER_KB_ASK_SYSTEM),
-        ChatMessage::user(&user),
-    ]
+    vec![ChatMessage::system(system_prompt), ChatMessage::user(&user)]
+}
+
+#[cfg(test)]
+fn local_scheduler_source_summary_line(knowledge: &[Value]) -> Option<String> {
+    local_scheduler_source_summary_line_with_limit(knowledge, 3)
+}
+
+fn local_scheduler_source_summary_line_with_limit(
+    knowledge: &[Value],
+    limit: usize,
+) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut parts = Vec::new();
+    for item in knowledge {
+        let key = local_scheduler_source_key(item);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        let title = local_scheduler_source_title(item).trim();
+        if title.is_empty() {
+            continue;
+        }
+        let evidence = item
+            .get("inject_content")
+            .and_then(|v| v.as_str())
+            .or_else(|| item.get("content").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let evidence = if evidence.chars().count() > 120 {
+            evidence.chars().take(120).collect::<String>()
+        } else {
+            evidence
+        };
+        if evidence.is_empty() {
+            parts.push(format!("[{}] {title}", parts.len() + 1));
+        } else {
+            parts.push(format!("[{}] {title} - {evidence}", parts.len() + 1));
+        }
+        if parts.len() >= limit.max(1) {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("引用来源：{}", parts.join("；")))
+    }
 }
 
 fn plugin_rag_prompt<'a>(
@@ -540,6 +1209,213 @@ fn plugin_rag_prompt<'a>(
         .map(|plugin| plugin.prompt.trim())
 }
 
+fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
+    if let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn search_results_to_knowledge_values(
+    results: &[attune_core::search::SearchResult],
+) -> Vec<serde_json::Value> {
+    results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "item_id": r.item_id,
+                "title": r.title,
+                "inject_content": r.inject_content,
+                "content": r.content,
+                "score": r.score,
+                "source_type": r.source_type,
+                "breadcrumb": r.breadcrumb,
+                "chunk_offset_start": r.chunk_offset_start,
+                "chunk_offset_end": r.chunk_offset_end,
+            })
+        })
+        .collect()
+}
+
+fn retrieval_result_key(r: &attune_core::search::SearchResult) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        r.item_id,
+        r.title,
+        r.chunk_offset_start
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        r.chunk_offset_end
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+struct RagCoverageSelection {
+    selected_topic_hits: Vec<String>,
+    missing_topics: Vec<String>,
+}
+
+fn search_result_text_for_topic(r: &attune_core::search::SearchResult) -> String {
+    [
+        r.title.as_str(),
+        r.content.as_str(),
+        r.inject_content.as_deref().unwrap_or(""),
+        r.source_type.as_str(),
+    ]
+    .join(" ")
+    .to_ascii_lowercase()
+}
+
+fn topic_matches_result(topic: &RagTopic, r: &attune_core::search::SearchResult) -> bool {
+    search_result_text_for_topic(r).contains(&topic.phrase)
+}
+
+fn apply_rag_intent_plan_to_results(
+    plan: &RagIntentPlan,
+    results: &mut Vec<attune_core::search::SearchResult>,
+    limit: usize,
+) -> RagCoverageSelection {
+    let limit = limit.max(1);
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut selection = RagCoverageSelection::default();
+    if plan.coverage_policy != RagCoveragePolicy::PerTopic || plan.topics.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        results.retain(|r| seen.insert(retrieval_result_key(r)));
+        results.truncate(limit);
+        return selection;
+    }
+
+    let mut selected_keys = std::collections::HashSet::new();
+    let mut selected = Vec::new();
+    for topic in &plan.topics {
+        let candidate = results
+            .iter()
+            .filter(|r| !selected_keys.contains(&retrieval_result_key(r)))
+            .filter(|r| topic_matches_result(topic, r))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned();
+        if let Some(candidate) = candidate {
+            selected_keys.insert(retrieval_result_key(&candidate));
+            selected.push(candidate);
+            selection.selected_topic_hits.push(topic.phrase.clone());
+            if selected.len() >= limit {
+                break;
+            }
+        } else {
+            selection.missing_topics.push(topic.phrase.clone());
+        }
+    }
+
+    if selected.len() < limit {
+        for result in results.iter() {
+            let key = retrieval_result_key(result);
+            if selected_keys.insert(key) {
+                selected.push(result.clone());
+                if selected.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    *results = selected;
+    selection
+}
+
+fn fuse_retrieval_results(
+    existing: &mut Vec<attune_core::search::SearchResult>,
+    additional: Vec<attune_core::search::SearchResult>,
+    limit: usize,
+) {
+    let mut seen = existing
+        .iter()
+        .map(retrieval_result_key)
+        .collect::<std::collections::HashSet<_>>();
+    for result in additional {
+        if seen.insert(retrieval_result_key(&result)) {
+            existing.push(result);
+        }
+    }
+    existing.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    existing.truncate(limit.max(1));
+}
+
+fn answer_mode_for_model(model: &str) -> &'static str {
+    match model {
+        "llm-chat" => "llm-chat",
+        "llm-summary" => "llm-summary",
+        LOCAL_EXTRACTIVE_MODEL_ID => "extractive-answer",
+        _ => "llm-chat",
+    }
+}
+
+fn answer_mode_for_local_task(task: &str) -> &'static str {
+    match task {
+        "local.extractive.summary" => "extractive-summary",
+        "local.extractive.answer" => "extractive-answer",
+        "local.safety.refusal" => "refusal-insufficient-evidence",
+        _ => "extractive-answer",
+    }
+}
+
+fn build_deterministic_local_scheduler_answer(
+    message: &str,
+    knowledge: &[Value],
+    allow_extractive_repair: bool,
+) -> Option<(String, &'static str, &'static str, &'static str)> {
+    build_local_scheduler_safety_refusal(message, knowledge)
+        .map(|content| {
+            (
+                content,
+                "local.safety.refusal",
+                "deterministic_operational_safety_refusal",
+                "OperationalSafetyRefusal",
+            )
+        })
+        .or_else(|| {
+            if !allow_extractive_repair {
+                return None;
+            }
+            build_local_scheduler_extractive_summary(message, knowledge).map(|content| {
+                (
+                    content,
+                    "local.extractive.summary",
+                    "high_confidence_retrieval_extractive_summary",
+                    "ExtractiveLocalSummary",
+                )
+            })
+        })
+        .or_else(|| {
+            if !allow_extractive_repair {
+                return None;
+            }
+            build_local_scheduler_extractive_answer(message, knowledge).map(|content| {
+                (
+                    content,
+                    "local.extractive.answer",
+                    "high_confidence_retrieval_extractive_answer",
+                    "ExtractiveLocalAnswer",
+                )
+            })
+        })
+}
+
 fn local_scheduler_ask_matches_llm_model(
     profiles: &attune_core::edge_cloud::RuntimeProfileSet,
     desired_model: &str,
@@ -552,6 +1428,28 @@ fn local_scheduler_ask_matches_llm_model(
         .task(LOCAL_SCHEDULER_KB_ASK_TASK)
         .map(|task| {
             task.model_id.trim().is_empty() || task.model_id.eq_ignore_ascii_case(desired_model)
+        })
+        .unwrap_or(true)
+}
+
+fn local_scheduler_ask_compatible_with_llm_model(
+    profiles: &attune_core::edge_cloud::RuntimeProfileSet,
+    desired_model: &str,
+    message: &str,
+) -> bool {
+    let desired_model = desired_model.trim();
+    if desired_model.is_empty() {
+        return true;
+    }
+    profiles
+        .task(LOCAL_SCHEDULER_KB_ASK_TASK)
+        .map(|task| {
+            let task_model = task.model_id.trim();
+            task_model.is_empty()
+                || task_model.eq_ignore_ascii_case(desired_model)
+                || (task_model.eq_ignore_ascii_case("llm-chat")
+                    && desired_model.eq_ignore_ascii_case("llm-summary")
+                    && local_scheduler_summary_query(message))
         })
         .unwrap_or(true)
 }
@@ -594,11 +1492,18 @@ fn history_source_followup_query(query: &str) -> bool {
             "last answer",
             "上一轮",
             "上轮",
+            "上次",
             "之前",
             "前文",
             "引用",
             "已引用",
             "来源",
+            "这些证据",
+            "证据不足",
+            "这些材料",
+            "继续基于",
+            "继续使用",
+            "同一来源",
         ],
     )
 }
@@ -669,6 +1574,9 @@ fn source_hint_line(line: &str) -> Option<String> {
         return None;
     }
     let lower = bullet.to_ascii_lowercase();
+    if lower.starts_with("source:") || lower.starts_with("source ") {
+        return normalize_source_hint_text(bullet);
+    }
     if !contains_any_ascii(
         &lower,
         &[
@@ -864,18 +1772,19 @@ fn local_scheduler_async_content(job_id: Option<&str>, eta_ms: Option<u32>) -> S
 }
 
 fn local_scheduler_chat_job_poll_timeout(eta_ms: Option<u32>) -> std::time::Duration {
-    const DEFAULT_MS: u64 = 15_000;
+    const DEFAULT_MS: u64 = 30_000;
     const ETA_CUSHION_MS: u64 = 5_000;
     const MIN_MS: u64 = 1_000;
-    const MAX_MS: u64 = 60_000;
+    const MAX_MS: u64 = 180_000;
     let from_env = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value > 0);
-    let ms = from_env
-        .or_else(|| eta_ms.map(|eta| u64::from(eta).saturating_add(ETA_CUSHION_MS)))
+    let inferred_ms = eta_ms
+        .map(|eta| u64::from(eta).saturating_add(ETA_CUSHION_MS))
         .unwrap_or(DEFAULT_MS)
-        .clamp(MIN_MS, MAX_MS);
+        .max(DEFAULT_MS);
+    let ms = from_env.unwrap_or(inferred_ms).clamp(MIN_MS, MAX_MS);
     std::time::Duration::from_millis(ms)
 }
 
@@ -1089,6 +1998,10 @@ pub async fn chat(
         body.history.drain(..drop);
     }
     let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
+    let rag_policy = crate::rag_guardrails::runtime_policy_for_intent(
+        crate::rag_guardrails::classify_rag_intent(&body.message),
+        &plugin_registry,
+    );
 
     // Sprint 1 Phase B: chat keyword trigger for project recommendation
     // 纯 observer：检测当前 user message 中的项目相关关键词，命中即通过 broadcast 推 ws hint，
@@ -1386,6 +2299,7 @@ pub async fn chat(
     let retrieval_query = build_history_aware_retrieval_query(&body.message, &body.history);
     let expanded_query =
         attune_core::skill_evolution::expand_query(&retrieval_query, &app_settings);
+    let rag_intent_plan = build_rag_intent_plan(&body.message, &body.history);
 
     // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty。
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro）。
@@ -1407,9 +2321,11 @@ pub async fn chat(
     let native_scheduler_ask = if native_scheduler_ask_requested {
         let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
         let desired_model = llm.model_name().to_string();
+        let message = body.message.clone();
         tokio::task::spawn_blocking(move || {
             let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
-            let matches = local_scheduler_ask_matches_llm_model(&profiles, &desired_model);
+            let matches =
+                local_scheduler_ask_compatible_with_llm_model(&profiles, &desired_model, &message);
             if !matches {
                 let task_model = profiles
                     .task(LOCAL_SCHEDULER_KB_ASK_TASK)
@@ -1421,6 +2337,19 @@ pub async fn chat(
                     desired_model,
                     "chat: scheduler native KB ask does not match configured chat model; using direct local-scheduler LLM RAG"
                 );
+            } else {
+                let task_model = profiles
+                    .task(LOCAL_SCHEDULER_KB_ASK_TASK)
+                    .map(|task| task.model_id.as_str())
+                    .unwrap_or("unknown");
+                if !task_model.eq_ignore_ascii_case(&desired_model) {
+                    tracing::info!(
+                        task = LOCAL_SCHEDULER_KB_ASK_TASK,
+                        task_model,
+                        desired_model,
+                        "chat: using scheduler native KB ask task model as compatible summary fallback"
+                    );
+                }
             }
             matches
         })
@@ -1436,9 +2365,10 @@ pub async fn chat(
     let (search_params, retrieval_plan) = build_chat_search_params(
         state.hardware.form_factor,
         native_scheduler_kb_profile,
+        rerank_enabled(&state),
         &expanded_query,
         detected_domain.as_deref(),
-        chat_kb_top_k(),
+        rag_policy.top_k,
     );
     if let Some(plan) = retrieval_plan.as_ref() {
         tracing::debug!(
@@ -1450,11 +2380,14 @@ pub async fn chat(
             "local scheduler retrieval planner applied to chat search"
         );
     }
+    let mut rag_final_top_k = search_params.top_k;
+    let mut rag_retrieval_passes: Vec<&'static str> = vec!["first_pass"];
+    let mut rag_retrieval_queries: Vec<String> = vec![expanded_query.clone()];
     let search_results = crate::routes::search::search_with_state_blocking(
         state.clone(),
         dek.clone(),
         expanded_query,
-        search_params,
+        search_params.clone(),
         true,
     )
     .await
@@ -1465,8 +2398,9 @@ pub async fn chat(
     if search_results.is_empty() && local_scheduler_summary_query(&body.message) {
         let state_recent = state.clone();
         let dek_recent = dek.clone();
+        let summary_top_k = rag_policy.top_k;
         let recent_results = tokio::task::spawn_blocking(move || {
-            load_recent_knowledge_results_for_summary(state_recent, dek_recent, chat_kb_top_k())
+            load_recent_knowledge_results_for_summary(state_recent, dek_recent, summary_top_k)
         })
         .await
         .map_err(|e| AppError::Internal(format!("summary recent knowledge join error: {e}")))?
@@ -1477,8 +2411,115 @@ pub async fn chat(
                 "chat: summary query used recent knowledge fallback after empty retrieval"
             );
             search_results = recent_results;
+            rag_retrieval_passes.push("recent_summary_fallback");
         }
     }
+    let rag_intent_candidate_top_k = search_params
+        .top_k
+        .max(rag_policy.recovery_top_k)
+        .max((rag_intent_plan.topics.len().max(1) * 3).min(MAX_CHAT_KB_TOP_K as usize))
+        .min(MAX_CHAT_KB_TOP_K as usize);
+    if matches!(
+        rag_intent_plan.coverage_policy,
+        RagCoveragePolicy::PerTopic | RagCoveragePolicy::SourceDiverse
+    ) {
+        for sub_query in rag_intent_plan.sub_queries.iter().skip(1).take(5) {
+            let mut sub_params = search_params.clone();
+            sub_params.top_k = rag_intent_candidate_top_k;
+            sub_params.initial_k = sub_params.initial_k.max(40);
+            sub_params.intermediate_k = sub_params.intermediate_k.max(sub_params.top_k * 2);
+            if let Some(min_score) = sub_params.min_score {
+                sub_params.min_score = Some((min_score - 0.05).max(0.40));
+            }
+            match crate::routes::search::search_with_state_blocking(
+                state.clone(),
+                dek.clone(),
+                sub_query.clone(),
+                sub_params,
+                true,
+            )
+            .await
+            {
+                Ok(intent_results) if !intent_results.is_empty() => {
+                    rag_retrieval_passes.push("intent_sub_query");
+                    rag_retrieval_queries.push(sub_query.clone());
+                    rag_final_top_k = rag_final_top_k.max(rag_intent_candidate_top_k);
+                    fuse_retrieval_results(
+                        &mut search_results,
+                        intent_results,
+                        rag_intent_candidate_top_k,
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("chat: RAG intent sub-query retrieval failed: {e}");
+                }
+            }
+        }
+    }
+    let mut rag_coverage = crate::rag_guardrails::evaluate_evidence_coverage(
+        &body.message,
+        &search_results_to_knowledge_values(&search_results),
+    );
+    if !rag_coverage.sufficient() {
+        let expansion_queries =
+            crate::rag_guardrails::expanded_retrieval_queries(&body.message, rag_coverage.intent);
+        if let Some(recovery_query) = expansion_queries.first().cloned() {
+            let mut recovery_params = search_params.clone();
+            recovery_params.top_k = recovery_params.top_k.max(rag_policy.recovery_top_k);
+            recovery_params.initial_k = recovery_params.initial_k.max(40);
+            recovery_params.intermediate_k = recovery_params
+                .intermediate_k
+                .max(recovery_params.top_k * 2);
+            if let Some(min_score) = recovery_params.min_score {
+                recovery_params.min_score = Some((min_score - 0.10).max(0.45));
+            }
+            match crate::routes::search::search_with_state_blocking(
+                state.clone(),
+                dek.clone(),
+                recovery_query.clone(),
+                recovery_params.clone(),
+                true,
+            )
+            .await
+            {
+                Ok(recovery_results) if !recovery_results.is_empty() => {
+                    rag_retrieval_passes.push("expanded_retrieval");
+                    rag_retrieval_queries.push(recovery_query);
+                    rag_final_top_k = recovery_params.top_k.max(search_params.top_k);
+                    fuse_retrieval_results(
+                        &mut search_results,
+                        recovery_results,
+                        recovery_params.top_k.max(search_params.top_k),
+                    );
+                    rag_coverage = crate::rag_guardrails::evaluate_evidence_coverage(
+                        &body.message,
+                        &search_results_to_knowledge_values(&search_results),
+                    );
+                    tracing::info!(
+                        intent = ?rag_coverage.intent,
+                        score = rag_coverage.score,
+                        status = rag_coverage.status,
+                        "chat: RAG recovery retrieval pass completed"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("chat: RAG recovery retrieval pass failed: {e}");
+                }
+            }
+        }
+    }
+    let rag_intent_final_top_k = search_params
+        .top_k
+        .max(rag_intent_plan.topics.len().max(1))
+        .min(MAX_CHAT_KB_TOP_K as usize);
+    let _ = apply_rag_intent_plan_to_results(
+        &rag_intent_plan,
+        &mut search_results,
+        rag_intent_final_top_k,
+    );
+    rag_final_top_k = rag_final_top_k.max(search_results.len());
     {
         let hist_pairs: Vec<(String, String)> = body
             .history
@@ -1593,6 +2634,11 @@ pub async fn chat(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let _ = apply_rag_intent_plan_to_results(
+        &rag_intent_plan,
+        &mut search_results,
+        rag_intent_final_top_k,
+    );
     if weight_stats.items_boosted > 0 || weight_stats.items_dropped > 0 {
         tracing::info!(
             "chat: annotation weighting {} items ({} boosted, {} dropped, {} kept)",
@@ -1711,6 +2757,16 @@ pub async fn chat(
             );
         }
     }
+
+    let rag_intent_selection = apply_rag_intent_plan_to_results(
+        &rag_intent_plan,
+        &mut search_results,
+        rag_intent_final_top_k,
+    );
+    rag_coverage = crate::rag_guardrails::evaluate_evidence_coverage(
+        &body.message,
+        &search_results_to_knowledge_values(&search_results),
+    );
 
     // 2a. 本地无结果时记录失败信号（后台技能进化的驱动数据），非阻塞
     if search_results.is_empty() {
@@ -2075,45 +3131,131 @@ pub async fn chat(
         );
     }
 
+    if web_search_used {
+        rag_coverage = crate::rag_guardrails::evaluate_evidence_coverage(&body.message, &knowledge);
+    }
+    let rag_trace = crate::rag_guardrails::RagRetrievalTrace {
+        profile_id: rag_policy.profile_id.clone(),
+        strategy: rag_policy.retrieval_strategy.clone(),
+        passes: rag_retrieval_passes.clone(),
+        queries: rag_retrieval_queries.clone(),
+        final_top_k: rag_final_top_k,
+        vector_results: None,
+        bm25_results: None,
+        citations_required: rag_policy.min_citations,
+    };
+    if !web_search_used
+        && !rag_coverage.sufficient()
+        && matches!(
+            rag_coverage.intent,
+            crate::rag_guardrails::RagIntent::Diagnostic
+        )
+    {
+        let content = crate::rag_guardrails::build_insufficient_evidence_refusal(
+            &body.message,
+            &rag_coverage,
+            &knowledge,
+        );
+        let citations: Vec<serde_json::Value> =
+            knowledge.iter().map(eval_surface::build_citation).collect();
+        let tokens_in = knowledge
+            .iter()
+            .map(|k| {
+                k.get("inject_content")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                    .map(|s| cost::estimate_tokens(s, LOCAL_EXTRACTIVE_MODEL_ID))
+                    .unwrap_or(0)
+            })
+            .sum::<usize>();
+        let tokens_out = cost::estimate_tokens(&content, LOCAL_EXTRACTIVE_MODEL_ID);
+        let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+        let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+        let cost_block =
+            eval_surface::build_cost_block(tokens_in, tokens_out, LOCAL_EXTRACTIVE_MODEL_ID, true);
+        let mut response_json = serde_json::json!({
+            "content": content,
+            "citations": citations,
+            "knowledge_count": knowledge.len(),
+            "session_id": body.session_id,
+            "web_search_used": false,
+            "confidence": 2,
+            "context_tier": context_tier,
+            "cost_estimate": {
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cost_usd": null,
+                "is_local": true,
+                "input_rate_per_k": null,
+                "cache_hit": true,
+                "cached_tokens": tokens_in,
+                "vendor_tokens_in": 0,
+                "vendor_tokens_out": 0,
+            },
+            "cost": cost_block,
+            "grounding": null,
+            "eval": eval_block,
+            "latency_ms": chat_latency_ms,
+            "weight_stats": {
+                "items_total": weight_stats.items_total,
+                "items_boosted": weight_stats.items_boosted,
+                "items_dropped": weight_stats.items_dropped,
+                "items_kept": weight_stats.items_kept,
+            },
+            "compression_stats": {
+                "chunks": compression_stats.0,
+                "cache_hits": compression_stats.1,
+                "orig_chars": compression_stats.2,
+                "strategy": strategy_str,
+            },
+            "local_scheduler": {
+                "task": "local.safety.refusal",
+                "scheduled_as": "sync",
+                "job_id": null,
+                "status": "done",
+                "reason": "insufficient_evidence",
+                "eta_ms": 0,
+                "model": LOCAL_EXTRACTIVE_MODEL_ID,
+                "service_class": "realtime_answer",
+                "device_used": "attune",
+                "latency_ms": chat_latency_ms,
+                "queue_wait_ms": 0,
+                "admission": {
+                    "task_name": "local.safety.refusal",
+                    "model_id": LOCAL_EXTRACTIVE_MODEL_ID,
+                    "service_class": "realtime_answer",
+                    "context_tokens": tokens_in,
+                    "max_output_tokens": tokens_out,
+                    "reason": "InsufficientEvidenceRefusal",
+                    "explicit_async": false,
+                }
+            },
+        });
+        response_json["rag_intent_plan"] =
+            rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+        merge_json_object(
+            &mut response_json,
+            crate::rag_guardrails::rag_metadata_with_trace(
+                &rag_coverage,
+                "refusal-insufficient-evidence",
+                Some("insufficient_evidence"),
+                knowledge.len(),
+                &rag_trace,
+            ),
+        );
+        return Ok(Json(response_json));
+    }
+
     // Local scheduler path: answer generation goes through scheduler-native `/kb/tasks`,
     // not through the legacy OpenAI-compatible `/v1/chat/completions` path.
     if native_scheduler_ask && !web_search_used {
         let answer_budget = local_scheduler_answer_budget(&body.message, &knowledge);
         let answer_budget_json = local_scheduler_answer_budget_json(answer_budget);
-        let deterministic_local_answer =
-            build_local_scheduler_safety_refusal(&body.message, &knowledge)
-                .map(|content| {
-                    (
-                        content,
-                        "local.safety.refusal",
-                        "deterministic_operational_safety_refusal",
-                        "OperationalSafetyRefusal",
-                    )
-                })
-                .or_else(|| {
-                    build_local_scheduler_extractive_summary(&body.message, &knowledge).map(
-                        |content| {
-                            (
-                                content,
-                                "local.extractive.summary",
-                                "high_confidence_retrieval_extractive_summary",
-                                "ExtractiveLocalSummary",
-                            )
-                        },
-                    )
-                })
-                .or_else(|| {
-                    build_local_scheduler_extractive_answer(&body.message, &knowledge).map(
-                        |content| {
-                            (
-                                content,
-                                "local.extractive.answer",
-                                "high_confidence_retrieval_extractive_answer",
-                                "ExtractiveLocalAnswer",
-                            )
-                        },
-                    )
-                });
+        let deterministic_local_answer = build_deterministic_local_scheduler_answer(
+            &body.message,
+            &knowledge,
+            rag_policy.allow_extractive_repair,
+        );
 
         if let Some((content, local_task, local_reason, admission_reason)) =
             deterministic_local_answer
@@ -2140,7 +3282,7 @@ pub async fn chat(
                 true,
             );
 
-            return Ok(Json(serde_json::json!({
+            let mut response_json = serde_json::json!({
                 "content": content,
                 "citations": citations,
                 "knowledge_count": knowledge.len(),
@@ -2198,17 +3340,51 @@ pub async fn chat(
                         "explicit_async": false,
                     }
                 }
-            })));
+            });
+            response_json["rag_intent_plan"] =
+                rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+            merge_json_object(
+                &mut response_json,
+                crate::rag_guardrails::rag_metadata_with_trace(
+                    &rag_coverage,
+                    answer_mode_for_local_task(local_task),
+                    None,
+                    knowledge.len(),
+                    &rag_trace,
+                ),
+            );
+            return Ok(Json(response_json));
         }
 
         let contexts =
             build_local_scheduler_kb_contexts_with_budget(&body.message, &knowledge, answer_budget);
-        let admission_messages = build_local_scheduler_admission_messages(&body.message, &contexts);
+        let scheduler_prompt_intent = match rag_coverage.intent {
+            crate::rag_guardrails::RagIntent::Diagnostic => "chat.rag.diagnostic",
+            crate::rag_guardrails::RagIntent::Summary => "chat.rag.summary",
+            crate::rag_guardrails::RagIntent::Comparison => "chat.rag.comparison",
+            crate::rag_guardrails::RagIntent::Lookup => "chat.rag.question",
+        };
+        let scheduler_system_prompt = plugin_rag_prompt(&plugin_registry, scheduler_prompt_intent)
+            .unwrap_or(LOCAL_SCHEDULER_KB_ASK_SYSTEM);
+        let admission_messages = build_local_scheduler_admission_messages_with_plan(
+            &body.message,
+            &body.history,
+            &contexts,
+            scheduler_system_prompt,
+            Some(&rag_intent_plan),
+        );
         let task_body = serde_json::json!({
             "query": body.message,
+            "history": body.history.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().map(|h| {
+                serde_json::json!({
+                    "role": h.role.clone(),
+                    "content": h.content.clone(),
+                })
+            }).collect::<Vec<_>>(),
             "contexts": contexts,
             "answer_profile": answer_budget.profile,
             "answer_budget": answer_budget_json.clone(),
+            "rag_intent_plan": rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection)),
         });
         let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
         let scheduler_base_for_poll = scheduler_base.clone();
@@ -2216,7 +3392,7 @@ pub async fn chat(
         let scheduler_outcome = tokio::task::spawn_blocking(move || {
             let client = attune_core::edge_cloud::scheduler::LocalSchedulerClient::with_base(
                 &scheduler_base,
-                crate::local_scheduler::SUBMIT_TIMEOUT,
+                crate::local_scheduler::kb_ask_submit_timeout(),
             );
             let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
             let adapter = attune_core::edge_cloud::SchedulerKbTaskAdapter::new(&client, &profiles);
@@ -2258,12 +3434,9 @@ pub async fn chat(
                             Err(error) => {
                                 tracing::warn!(
                                     %error,
-                                    "chat: local scheduler async job did not finish within realtime poll budget; returning job handle"
+                                    "chat: local scheduler async job did not finish within realtime poll budget"
                                 );
-                                local_scheduler_async_content(
-                                    response.effective_job_id(),
-                                    response.eta_ms,
-                                )
+                                return Err(local_scheduler_submit_error(error));
                             }
                         }
                     } else {
@@ -2280,11 +3453,32 @@ pub async fn chat(
                 } else {
                     attune_core::parse_confidence(&content)
                 };
-                let content = if async_exposed {
+                let mut content = if async_exposed {
                     content
                 } else {
                     attune_core::strip_confidence_marker(&content).to_string()
                 };
+                if !async_exposed
+                    && !content.contains("引用来源：")
+                    && !content.contains("Cited sources:")
+                {
+                    let source_summary_limit =
+                        if rag_intent_plan.coverage_policy == RagCoveragePolicy::PerTopic {
+                            rag_intent_plan.topics.len().clamp(3, 6)
+                        } else {
+                            3
+                        };
+                    if let Some(source_line) = local_scheduler_source_summary_line_with_limit(
+                        &knowledge,
+                        source_summary_limit,
+                    ) {
+                        content = format!("{source_line}\n\n{content}");
+                    }
+                }
+                if !async_exposed {
+                    content =
+                        finalize_rag_answer_contract(&body.message, &rag_intent_plan, &content);
+                }
                 let citations: Vec<serde_json::Value> =
                     knowledge.iter().map(eval_surface::build_citation).collect();
                 let tokens_in = local.admission.context_tokens as usize;
@@ -2332,7 +3526,7 @@ pub async fn chat(
                     }
                 });
 
-                return Ok(Json(serde_json::json!({
+                let mut response_json = serde_json::json!({
                     "content": content,
                     "citations": citations,
                     "knowledge_count": knowledge.len(),
@@ -2369,7 +3563,25 @@ pub async fn chat(
                     },
                     "answer_budget": answer_budget_json,
                     "local_scheduler": local_scheduler_meta
-                })));
+                });
+                response_json["rag_intent_plan"] =
+                    rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+                let answer_mode = if async_exposed {
+                    "async-job"
+                } else {
+                    answer_mode_for_model(&local.admission.model_id)
+                };
+                merge_json_object(
+                    &mut response_json,
+                    crate::rag_guardrails::rag_metadata_with_trace(
+                        &rag_coverage,
+                        answer_mode,
+                        None,
+                        knowledge.len(),
+                        &rag_trace,
+                    ),
+                );
+                return Ok(Json(response_json));
             }
             attune_core::edge_cloud::SchedulerKbTaskSubmitOutcome::UseCloudIfAllowed(ctx) => {
                 return Err(AppError::detailed(
@@ -2446,6 +3658,12 @@ pub async fn chat(
         }
         system_prompt.push_str("=== 参考内容结束 ===\n");
     }
+    if let Some(plan_block) = rag_intent_plan_prompt_block(&rag_intent_plan) {
+        system_prompt.push('\n');
+        system_prompt.push_str(&plan_block);
+    }
+    system_prompt.push('\n');
+    system_prompt.push_str(&rag_response_contract_prompt_block(Some(&rag_intent_plan)));
 
     // ── F-17 PII redact 全路径拦截 (修复 v0.6.3 BUG: 之前 server chat 路径直接发原文) ──
     // 收集所有出网内容到 segments[], 一次 redact_batch 保证 placeholder 全局唯一
@@ -2778,6 +3996,7 @@ pub async fn chat(
             Some(rc)
         })
         .collect();
+    let response = finalize_rag_answer_contract(&body.message, &rag_intent_plan, &response);
     let reliability_report = evaluate_response(
         &response,
         &reliability_chunks,
@@ -2853,6 +4072,19 @@ pub async fn chat(
     if let Some(flow_json) = acp_flow {
         response_json["acp_flow"] = flow_json;
     }
+    response_json["rag_intent_plan"] =
+        rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+
+    merge_json_object(
+        &mut response_json,
+        crate::rag_guardrails::rag_metadata_with_trace(
+            &rag_coverage,
+            answer_mode_for_model(&llm_model_name),
+            None,
+            knowledge.len(),
+            &rag_trace,
+        ),
+    );
 
     // 本地无结果 + 浏览器不可用：明确告知用户而非静默失败
     if knowledge.is_empty() {
@@ -3212,6 +4444,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn realtime_chat_job_poll_timeout_ignores_underestimated_eta() {
+        let _guard = env_lock();
+        let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
+        std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS");
+
+        let timeout = local_scheduler_chat_job_poll_timeout(Some(1_000));
+
+        match saved {
+            Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
+            None => std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS"),
+        }
+
+        assert!(
+            timeout >= std::time::Duration::from_millis(30_000),
+            "timeout must cover hot long-context chat even when scheduler ETA is low, got {timeout:?}"
+        );
+    }
+
+    #[test]
+    fn realtime_chat_job_poll_timeout_covers_cold_start_eta() {
+        let _guard = env_lock();
+        let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
+        std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS");
+
+        let timeout = local_scheduler_chat_job_poll_timeout(Some(71_100));
+
+        match saved {
+            Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
+            None => std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS"),
+        }
+
+        assert!(
+            timeout >= std::time::Duration::from_millis(76_100),
+            "timeout must not expose scheduler async job handles before cold-start ETA, got {timeout:?}"
+        );
+        assert!(
+            timeout <= std::time::Duration::from_millis(180_000),
+            "timeout must remain bounded for interactive chat, got {timeout:?}"
+        );
+    }
+
     fn status_of(e: VaultError) -> u16 {
         match llm_upstream_error(e) {
             AppError::Detailed { status, .. } => status.as_u16(),
@@ -3463,6 +4737,7 @@ mod tests {
         let (params, plan) = build_chat_search_params(
             attune_core::platform::FormFactor::LocalSchedulerAppliance,
             false,
+            true,
             "总结法律合同里的违约责任",
             Some("legal"),
             5,
@@ -3474,13 +4749,39 @@ mod tests {
         assert_eq!(params.intermediate_k, 20);
         assert_eq!(params.min_score, Some(0.65));
         assert_eq!(params.domain_hint.as_deref(), Some("legal"));
-        assert!(params.skip_rerank);
+        assert!(!params.skip_rerank);
+    }
+
+    #[test]
+    fn rag_recovery_fusion_deduplicates_and_truncates_results() {
+        fn result(id: &str, score: f32) -> attune_core::search::SearchResult {
+            attune_core::search::SearchResult {
+                item_id: id.to_string(),
+                score,
+                title: format!("doc {id}"),
+                content: format!("content {id}"),
+                source_type: "doc".to_string(),
+                ..Default::default()
+            }
+        }
+
+        let mut existing = vec![result("a", 0.4), result("b", 0.7)];
+        let additional = vec![result("a", 0.9), result("c", 0.8), result("d", 0.6)];
+
+        fuse_retrieval_results(&mut existing, additional, 3);
+
+        let ids = existing
+            .iter()
+            .map(|r| r.item_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["c", "b", "d"]);
     }
 
     #[test]
     fn non_scheduler_chat_search_params_keep_legacy_defaults() {
         let (params, plan) = build_chat_search_params(
             attune_core::platform::FormFactor::Laptop,
+            false,
             false,
             "总结法律合同里的违约责任",
             Some("legal"),
@@ -3492,6 +4793,83 @@ mod tests {
         assert_eq!(params.intermediate_k, 10);
         assert_eq!(params.min_score, None);
         assert_eq!(params.domain_hint.as_deref(), Some("legal"));
+    }
+
+    #[test]
+    fn rag_intent_plan_detects_decision_topics_without_domain_hardcoding() {
+        let plan = build_rag_intent_plan(
+            "Between alpha control and beta evidence, which material should be collected before advice?",
+            &[],
+        );
+
+        assert_eq!(plan.answer_mode, RagAnswerMode::Decision);
+        assert_eq!(plan.coverage_policy, RagCoveragePolicy::PerTopic);
+        assert!(plan.topics.iter().any(|t| t.phrase == "alpha control"));
+        assert!(plan.topics.iter().any(|t| t.phrase == "beta evidence"));
+        assert!(plan.sub_queries.iter().any(|q| q.contains("alpha control")));
+        assert!(plan.sub_queries.iter().any(|q| q.contains("beta evidence")));
+    }
+
+    #[test]
+    fn rag_intent_plan_detects_summary_topic_list() {
+        let plan = build_rag_intent_plan(
+            "请总结 alpha control、beta evidence、gamma response 和 delta review 的核心要点。",
+            &[],
+        );
+
+        assert_eq!(plan.answer_mode, RagAnswerMode::Summary);
+        assert_eq!(plan.coverage_policy, RagCoveragePolicy::PerTopic);
+        assert!(plan.topics.len() >= 4, "topics={:?}", plan.topics);
+    }
+
+    #[test]
+    fn rag_intent_fusion_preserves_per_topic_representatives() {
+        fn result(
+            id: &str,
+            title: &str,
+            content: &str,
+            score: f32,
+        ) -> attune_core::search::SearchResult {
+            attune_core::search::SearchResult {
+                item_id: id.to_string(),
+                title: title.to_string(),
+                content: content.to_string(),
+                inject_content: Some(content.to_string()),
+                score,
+                source_type: "file".to_string(),
+                ..Default::default()
+            }
+        }
+
+        let plan = build_rag_intent_plan(
+            "Summarize alpha control, beta evidence, gamma response, and delta review.",
+            &[],
+        );
+        let mut results = vec![
+            result("a1", "alpha control guide", "alpha control", 0.99),
+            result("a2", "alpha control notes", "alpha control", 0.98),
+            result("b1", "beta evidence guide", "beta evidence", 0.50),
+            result("g1", "gamma response guide", "gamma response", 0.49),
+            result("d1", "delta review guide", "delta review", 0.48),
+        ];
+
+        let selection = apply_rag_intent_plan_to_results(&plan, &mut results, 4);
+        let ids = results
+            .iter()
+            .map(|r| r.item_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["a1", "b1", "g1", "d1"]);
+        assert_eq!(
+            selection.selected_topic_hits,
+            vec![
+                "alpha control",
+                "beta evidence",
+                "gamma response",
+                "delta review"
+            ]
+        );
+        assert!(selection.missing_topics.is_empty());
     }
 
     #[test]
@@ -3666,6 +5044,138 @@ mod tests {
     }
 
     #[test]
+    fn history_aware_retrieval_query_uses_chinese_followup_source_labels() {
+        let history = vec![HistoryMessage {
+            role: "assistant".into(),
+            content: [
+                "排查 TCP/IP 连接失败应检查物理链路、DNS 和抓包。",
+                "Cited sources:",
+                "- source: tcpip_troubleshooting",
+                "- source: tcpip_support_workflow",
+            ]
+            .join("\n"),
+        }];
+        let query = build_history_aware_retrieval_query(
+            "如果这些证据不足，应该继续向用户索取哪些材料？",
+            &history,
+        );
+
+        assert!(query.contains("Prior cited source hints"));
+        assert!(query.contains("tcpip_troubleshooting"));
+        assert!(query.contains("tcpip_support_workflow"));
+    }
+
+    #[test]
+    fn local_scheduler_admission_messages_include_recent_history() {
+        let history = vec![
+            HistoryMessage {
+                role: "user".into(),
+                content: "只基于机械设计手册说明齿轮传动资料如何检索。".into(),
+            },
+            HistoryMessage {
+                role: "assistant".into(),
+                content: "应优先查阅机械设计手册第3卷的齿轮传动章节。[1]".into(),
+            },
+        ];
+        let contexts = vec![serde_json::json!({
+            "text": "机械设计手册第3卷包含齿轮传动设计资料。",
+        })];
+        let messages = build_local_scheduler_admission_messages(
+            "继续基于上一轮引用的卷册回答。",
+            &history,
+            &contexts,
+            "Use refs.",
+        );
+        let user = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message");
+
+        assert!(user.content.contains("Recent conversation:"));
+        assert!(user.content.contains("机械设计手册第3卷"));
+        assert!(user.content.contains("continue the prior user task"));
+        assert!(user
+            .content
+            .contains("Current Q: 继续基于上一轮引用的卷册回答。"));
+        assert!(user.content.contains("Refs:"));
+    }
+
+    #[test]
+    fn rag_answer_obligations_are_added_to_admission_prompt() {
+        let plan = build_rag_intent_plan(
+            "Between alpha control and beta evidence, which option should be recommended?",
+            &[],
+        );
+        let messages = build_local_scheduler_admission_messages_with_plan(
+            "Between alpha control and beta evidence, which option should be recommended?",
+            &[],
+            &[serde_json::json!({
+                "text": "alpha control and beta evidence are both present.",
+            })],
+            "Use refs.",
+            Some(&plan),
+        );
+        let user = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message");
+
+        assert!(user.content.contains("RAG intent plan:"));
+        assert!(user.content.contains("Answer mode: decision"));
+        assert!(user.content.contains("Coverage policy: per_topic"));
+        assert!(user
+            .content
+            .contains("Required topics: alpha control; beta evidence"));
+        assert!(user
+            .content
+            .contains("collect evidence before recommendation"));
+        assert!(user.content.contains("RAG response contract:"));
+        assert!(user.content.contains(
+            "preserving the exact tokens at least once: alpha control; beta evidence"
+        ));
+        assert!(user
+            .content
+            .contains("industry-general guidance and do not present it as a manual/source conclusion"));
+    }
+
+    #[test]
+    fn rag_answer_finalizer_adds_generic_boundaries_without_domain_hardcoding() {
+        let diagnostic = build_rag_intent_plan("如何排查 incident response 流程问题？", &[]);
+        let answer = finalize_rag_answer_contract(
+            "如何排查 incident response 流程问题？",
+            &diagnostic,
+            "先检查事件响应计划 [1]。",
+        );
+        assert!(answer.contains("日志"));
+        assert!(answer.contains("不要编造"));
+
+        let boundary = build_rag_intent_plan("手册没有直接覆盖某个行业通用做法，能否建议？", &[]);
+        let answer = finalize_rag_answer_contract(
+            "手册没有直接覆盖某个行业通用做法，能否建议？",
+            &boundary,
+            "可作为补充方向 [1]。",
+        );
+        assert!(answer.contains("知识库未直接覆盖"));
+        assert!(answer.contains("不能当作手册结论"));
+    }
+
+    #[test]
+    fn local_scheduler_source_summary_line_includes_readable_source_evidence() {
+        let knowledge = vec![serde_json::json!({
+            "item_id": "mechanical_design_volume_3_item",
+            "title": "mechanical_design_volume_3",
+            "inject_content": "mechanical_design_volume_3 是机械设计手册 第3卷 齿轮传动资料。",
+        })];
+
+        let line = local_scheduler_source_summary_line(&knowledge).expect("source line");
+
+        assert!(line.starts_with("引用来源："));
+        assert!(line.contains("mechanical_design_volume_3"));
+        assert!(line.contains("机械设计手册"));
+        assert!(line.contains("第3卷"));
+    }
+
+    #[test]
     fn local_scheduler_native_kb_profile_and_ask_use_distinct_provider_settings() {
         let hardware = attune_core::platform::HardwareProfile::default();
         let settings = serde_json::json!({
@@ -3697,6 +5207,30 @@ mod tests {
         ));
         assert!(!local_scheduler_ask_matches_llm_model(
             &profiles, "llm-chat"
+        ));
+    }
+
+    #[test]
+    fn local_scheduler_native_ask_allows_summary_fallback_to_chat_task_model() {
+        let mut profiles =
+            attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(
+                "http://127.0.0.1:8090",
+            );
+        profiles
+            .tasks
+            .get_mut(LOCAL_SCHEDULER_KB_ASK_TASK)
+            .expect("kb.query.ask task")
+            .model_id = "llm-chat".to_string();
+
+        assert!(local_scheduler_ask_compatible_with_llm_model(
+            &profiles,
+            "llm-summary",
+            "请总结这份知识库文档"
+        ));
+        assert!(!local_scheduler_ask_compatible_with_llm_model(
+            &profiles,
+            "llm-summary",
+            "解释 TCP/IP 起源"
         ));
     }
 
@@ -3843,6 +5377,59 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_answer_budget_expands_for_decision_evidence_queries() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
+
+        let budget = local_scheduler_answer_budget(
+            "在 risk assessment 和 audit evidence 之间，应该先收集哪些证据再给建议？",
+            &[],
+        );
+        assert_eq!(budget.profile, "synthesis");
+        assert_eq!(budget.max_output_tokens, 160);
+        assert!(budget.context_top_k >= 6);
+        assert!(budget.context_chunk_max_chars >= 240);
+
+        restore_env(previous);
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_does_not_over_expand_simple_evidence_lookup() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
+
+        let budget = local_scheduler_answer_budget(
+            "在 security 知识库中，access control 主题的证据要点是什么？",
+            &[],
+        );
+        assert_ne!(budget.profile, "synthesis");
+        assert!(budget.context_top_k <= 4);
+        assert!(budget.context_chunk_max_chars <= 192);
+
+        restore_env(previous);
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_expands_context_for_diagnostic_queries() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
+
+        let budget = local_scheduler_answer_budget(
+            "如何基于 security 知识库证据排查 incident response 流程问题？",
+            &[],
+        );
+        assert_eq!(budget.profile, "diagnostic");
+        assert_eq!(budget.max_output_tokens, 192);
+        assert!(budget.context_top_k >= 6);
+        assert!(budget.context_chunk_max_chars >= 320);
+
+        restore_env(previous);
+    }
+
+    #[test]
     fn local_scheduler_context_builder_prefers_distinct_sources_for_cross_document_queries() {
         let budget = LocalSchedulerAnswerBudget {
             profile: "test",
@@ -3963,6 +5550,40 @@ mod tests {
         assert!(answer.contains("TCP Origin"));
         assert!(answer.contains("ARPANET"));
         assert!(answer.contains("DARPA"));
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn deterministic_local_answer_respects_extractive_policy() {
+        let _env = env_lock();
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "tcp-origin",
+            "title": "TCP Origin",
+            "inject_content": "TCP/IP 起源于美国 DARPA 资助的 ARPANET 研究。"
+        })];
+
+        let lookup =
+            build_deterministic_local_scheduler_answer("tcp/ip 起源于哪里？", &knowledge, true)
+                .expect("lookup policy should allow grounded extractive answer");
+        assert_eq!(lookup.1, "local.extractive.answer");
+        assert!(lookup.0.contains("ARPANET"));
+
+        assert!(
+            build_deterministic_local_scheduler_answer(
+                "如何排查 TCP/IP 连接不通，并综合说明起源背景？",
+                &knowledge,
+                false,
+            )
+            .is_none(),
+            "diagnostic policy must not be intercepted by extractive answer"
+        );
 
         match previous {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),

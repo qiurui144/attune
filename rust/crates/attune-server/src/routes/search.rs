@@ -37,6 +37,17 @@ fn local_scheduler_native_kb_enabled(state: &SharedState) -> bool {
     crate::local_scheduler::native_kb_enabled(&settings, &state.hardware)
 }
 
+fn rerank_enabled(state: &SharedState) -> bool {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let settings = vault
+        .store()
+        .get_meta("app_settings")
+        .ok()
+        .flatten()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
+    crate::retrieval_policy::rerank_enabled_from_settings(settings.as_ref())
+}
+
 /// 若开关开启且 LLM 可用，改写 query；失败或关闭时降级返回原始 query。
 async fn maybe_rewrite_query(state: &SharedState, query: &str) -> String {
     if !query_rewrite_enabled(state) {
@@ -215,6 +226,7 @@ pub async fn search(
     let (search_params, retrieval_plan) = crate::retrieval_policy::build_search_params(
         state.hardware.form_factor,
         local_scheduler_native_kb_enabled(&state),
+        rerank_enabled(&state),
         &effective_query,
         detected_domain.as_deref(),
         params.top_k,
@@ -321,6 +333,7 @@ pub async fn search_relevant(
     let (search_params, retrieval_plan) = crate::retrieval_policy::build_search_params(
         state.hardware.form_factor,
         local_scheduler_native_kb_enabled(&state),
+        rerank_enabled(&state),
         &effective_query,
         detected_domain.as_deref(),
         top_k,

@@ -11,6 +11,10 @@ pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
+fn status_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// D-R13 ARCH-A reference migration: 用 AppError + AppResult 代替 (StatusCode, Json)
 /// tuple style. 客户端拿到统一 {"error": msg, "code": kebab} shape.
 pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
@@ -56,8 +60,16 @@ pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_js
         "embedding_available": has_embedding,
         "vector_index": has_vectors,
         "fulltext_index": has_fulltext,
-        "version": attune_core::version(),
+        "version": status_version(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn status_version_uses_server_package_version() {
+        assert_eq!(super::status_version(), env!("CARGO_PKG_VERSION"));
+    }
 }
 
 #[derive(Debug, Default)]

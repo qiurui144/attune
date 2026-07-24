@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attune.eval.scenario.v1",
+  "title": "Attune Eval Scenario Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "domain",
+    "scenario_type",
+    "difficulty",
+    "corpus_id",
+    "turns"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "attune.eval.scenario.v1"
+    },
+    "scenario_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scenario_type": {
+      "enum": [
+        "real_time_qa",
+        "operation_guidance",
+        "decision_assistance",
+        "summary",
+        "multiturn",
+        "negative_evidence",
+        "high_complexity_longtext",
+        "concurrency"
+      ]
+    },
+    "difficulty": {
+      "enum": ["easy", "medium", "hard", "stress"]
+    },
+    "corpus_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "turns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "turn_id",
+          "message",
+          "answer_mode",
+          "requires_citations",
+          "expected_sources",
+          "must_include",
+          "must_not_include",
+          "latency_budget_ms"
+        ],
+        "properties": {
+          "turn_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "answer_mode": {
+            "type": "string"
+          },
+          "requires_citations": {
+            "type": "boolean"
+          },
+          "expected_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "must_include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "must_not_include": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "latency_budget_ms": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "scheduler": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

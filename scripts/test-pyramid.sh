@@ -10,10 +10,12 @@
 #   4. Corpus        — scripts/run-benchmark-corpus.sh  (~5min, 可选 --with-corpus)
 #   5. Quality       — cargo test --release rag_quality_benchmark  (~10s, 必跑)
 #   6. E2E (browser) — repo tests/e2e (~5min, 可选 --with-e2e)
+#   6a. RAG Eval Smoke — manifest schema + pr_rag_smoke dry-run (~5s, 可选 --with-eval-smoke)
 #   6b. Long-text E2E — airplane manuals vector DB + chat gate, 可选 --with-longtext-e2e
 #
 # 默认: 跑 1+2+3+5（必跑层），合计 ~3-4 min。
 # 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层；
+#       --with-eval-smoke 加 RAG eval manifest/dry-run 门禁；
 #       --with-longtext-e2e 加长文本向量库/对话门禁；
 #       --headed-e2e 用可见 Chrome 跑 E2E/UI 子门禁。
 #
@@ -22,6 +24,7 @@
 #   bash scripts/test-pyramid.sh --with-corpus  # + 真语料检索
 #   bash scripts/test-pyramid.sh --with-e2e     # + 浏览器 e2e
 #   bash scripts/test-pyramid.sh --headed-e2e   # + 有头浏览器 e2e
+#   bash scripts/test-pyramid.sh --with-eval-smoke  # + RAG eval schema/dry-run
 #   bash scripts/test-pyramid.sh --with-longtext-e2e  # + 飞机手册长文本 KB E2E
 #   bash scripts/test-pyramid.sh --all          # 标准全跑，不含长文本大语料
 #
@@ -43,15 +46,17 @@ phase() { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 # ── 解析参数 ──────────────────────────────────────────────────
 WITH_CORPUS=false
 WITH_E2E=false
+WITH_EVAL_SMOKE=false
 WITH_LONGTEXT_E2E=false
 HEADED_E2E=false
 for arg in "$@"; do
     case "$arg" in
         --with-corpus)       WITH_CORPUS=true ;;
         --with-e2e)          WITH_E2E=true ;;
+        --with-eval-smoke)   WITH_EVAL_SMOKE=true ;;
         --headed-e2e)        WITH_E2E=true; HEADED_E2E=true ;;
         --with-longtext-e2e) WITH_E2E=true; WITH_LONGTEXT_E2E=true ;;
-        --all)               WITH_CORPUS=true; WITH_E2E=true ;;
+        --all)               WITH_CORPUS=true; WITH_E2E=true; WITH_EVAL_SMOKE=true ;;
         -h|--help)
             sed -n '3,32p' "$0" | sed 's/^# *//; s/^#//'
             exit 0 ;;
@@ -72,6 +77,7 @@ cat > "$REPORT" <<EOF
 - Commit:    $(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 - With corpus: $WITH_CORPUS
 - With e2e:    $WITH_E2E
+- With eval smoke: $WITH_EVAL_SMOKE
 - With longtext e2e: $WITH_LONGTEXT_E2E
 - Headed e2e:  $HEADED_E2E
 
@@ -144,6 +150,18 @@ else
     warn "Layer 4: Corpus Integration (skipped, 加 --with-corpus 启用)"
 fi
 
+# ── 6a. RAG Eval Smoke (manifest + dry-run report) ─────────────
+if [ "$WITH_EVAL_SMOKE" = "true" ]; then
+    EVAL_OUT="$REPORT_DIR/eval-pr-rag-smoke-$TS.json"
+    run_layer "eval_smoke" "Layer 6a: RAG Eval Smoke (manifest + dry-run)" \
+        "bash tests/scripts/eval_asset_registry_contract_test.sh && bash tests/scripts/eval_metric_system_contract_test.sh && bash tests/scripts/eval_single_industry_scale_contract_test.sh && bash tests/scripts/eval_web_demo_frontend_contract_test.sh && bash tests/scripts/eval_run_suite_generated_live_test.sh && PYTHONDONTWRITEBYTECODE=1 python3 scripts/eval/validate-manifests.py --root '$PROJECT_DIR' --suite pr_rag_smoke && PYTHONDONTWRITEBYTECODE=1 python3 scripts/eval/run-suite.py --root '$PROJECT_DIR' --suite pr_rag_smoke --base-url http://127.0.0.1:18905 --out '$EVAL_OUT' --dry-run"
+else
+    RESULTS[eval_smoke]="⏭️ SKIP"
+    TIMINGS[eval_smoke]="-"
+    COUNTS[eval_smoke]="-"
+    warn "Layer 6a: RAG Eval Smoke (skipped, 加 --with-eval-smoke 启用)"
+fi
+
 # ── 6. E2E Browser Tests ──────────────────────────────────────
 if [ "$WITH_E2E" = "true" ]; then
     E2E_CMD="bash $PROJECT_DIR/tests/e2e/run_all.sh"
@@ -169,6 +187,7 @@ fi
     echo "| 3. Smoke         | ${RESULTS[smoke]} | ${COUNTS[smoke]} | ${TIMINGS[smoke]} | binary + API ping |"
     echo "| 4. Corpus        | ${RESULTS[corpus]} | ${COUNTS[corpus]} | ${TIMINGS[corpus]} | real GitHub corpus |"
     echo "| 5. Quality       | ${RESULTS[quality]} | ${COUNTS[quality]} | ${TIMINGS[quality]} | golden set MRR |"
+    echo "| 6a. RAG Eval     | ${RESULTS[eval_smoke]} | ${COUNTS[eval_smoke]} | ${TIMINGS[eval_smoke]} | pr_rag_smoke manifest + dry-run |"
     echo "| 6. E2E           | ${RESULTS[e2e]} | ${COUNTS[e2e]} | ${TIMINGS[e2e]} | tests/e2e |"
     echo ""
     echo "## Summary"
@@ -181,7 +200,7 @@ fi
     fi
     echo ""
     echo "Reports for failed layers (if any):"
-    for name in unit integration smoke quality corpus e2e; do
+    for name in unit integration smoke quality corpus eval_smoke e2e; do
         if [[ "${RESULTS[$name]:-}" == *FAIL* ]]; then
             echo "- $name: \`/tmp/test-pyramid-${name}.log\`"
         fi
@@ -203,6 +222,9 @@ for name in unit integration smoke quality; do
     fi
 done
 if [ "$WITH_CORPUS" = "true" ] && [[ "${RESULTS[corpus]:-}" == *FAIL* ]]; then
+    ANY_FAIL=true
+fi
+if [ "$WITH_EVAL_SMOKE" = "true" ] && [[ "${RESULTS[eval_smoke]:-}" == *FAIL* ]]; then
     ANY_FAIL=true
 fi
 if [ "$WITH_E2E" = "true" ] && [[ "${RESULTS[e2e]:-}" == *FAIL* ]]; then

@@ -1,0 +1,44 @@
+{
+  "schema_version": "attune.eval.corpus.v1",
+  "corpus_id": "mechanical_design_handbook",
+  "domain": "mechanical",
+  "license": "upstream-repository-license",
+  "source": {
+    "type": "legacy_manifest",
+    "path": "tests/e2e/mechanical_design_longtext_cases.json",
+    "url": "https://github.com/GEQfa/handbook-of-mechanical-design.git",
+    "commit": "86832fd643cb1f9cfa1188d242d34b62dd52e41f",
+    "lfs_required": true
+  },
+  "scale": {
+    "tier": "T2",
+    "documents": 5,
+    "bytes": 302692419,
+    "expected_chunks": 30000,
+    "ocr_ratio": 0.8,
+    "languages": ["zh"]
+  },
+  "profiles": {
+    "smoke": {
+      "documents": ["mechanical_design_volume_3"],
+      "purpose": "fast no-OCR Chinese mechanical-design release smoke"
+    },
+    "edge_scheduler_comprehensive": {
+      "documents_from_legacy_profile": "edge_scheduler_comprehensive",
+      "purpose": "existing mechanical-design long-text K3 profile"
+    }
+  },
+  "indexing": {
+    "parser_modes": ["pdf", "ocr", "markdown"],
+    "max_pending_seconds": 2400,
+    "delete_rescan_required": true
+  },
+  "generated_documents": [
+    {
+      "id": "mechanical_design_volume_3",
+      "title": "mechanical_design_volume_3",
+      "filename": "mechanical_design_volume_3.md",
+      "content": "mechanical_design_volume_3 是 release-smoke 无 OCR 机械设计手册 fixture。机械设计手册 第3卷 覆盖齿轮和传动相关设计资料。检索齿轮传动设计资料时，应优先限定来源 mechanical_design_volume_3，并围绕 机械设计手册、第3卷、齿轮、传动 这些证据词回答；多轮追问必须保持该卷册来源连续，不应切换到航空手册。"
+    }
+  ]
+}

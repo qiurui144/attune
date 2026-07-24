@@ -89,11 +89,11 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 #[test]
-fn async_only_task_submits_only_application_owned_output_limit() {
+fn interactive_ask_task_submits_sync_without_scheduler_owned_hints() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let (base, recorded) = spawn_one_request_scheduler(
-        "HTTP/1.1 202 Accepted",
-        r#"{"job_id":"job_ask","status":"queued","task":"kb.query.ask","model":"llm-summary","service_class":"realtime_answer","scheduled_as":"async","reason":"task_async_only","eta_ms":1200}"#,
+        "HTTP/1.1 200 OK",
+        r#"{"status":"done","task":"kb.query.ask","model":"llm-summary","service_class":"realtime_answer","scheduled_as":"sync","outputs":{"text":"answer"}}"#,
     );
     let client = LocalSchedulerClient::with_base(&base, Duration::from_secs(2));
     let adapter = SchedulerKbTaskAdapter::new(&client, &profiles);
@@ -109,19 +109,19 @@ fn async_only_task_submits_only_application_owned_output_limit() {
 
     match outcome {
         SchedulerKbTaskSubmitOutcome::Local(local) => {
-            assert!(local.explicit_async);
-            assert_eq!(local.response.job_id.as_deref(), Some("job_ask"));
-            assert_eq!(local.admission.reason, AdmissionReason::TaskAsyncOnly);
+            assert!(!local.explicit_async);
+            assert_eq!(local.response.job_id.as_deref(), None);
+            assert_eq!(local.admission.reason, AdmissionReason::FitsSync);
             assert_eq!(local.admission.max_output_tokens, 128);
         }
-        other => panic!("expected local async outcome, got {other:?}"),
+        other => panic!("expected local sync outcome, got {other:?}"),
     }
 
     let req = recorded.lock().unwrap().clone().expect("request recorded");
-    assert_eq!(req.path, "/kb/tasks/kb.query.ask:async");
-    assert_eq!(req.body["max_output_tokens"], 128);
+    assert_eq!(req.path, "/kb/tasks/kb.query.ask");
     for scheduler_owned in [
         "context_tokens",
+        "max_output_tokens",
         "timeout_ms",
         "deadline_ms",
         "ttl_ms",
@@ -137,18 +137,18 @@ fn async_only_task_submits_only_application_owned_output_limit() {
 }
 
 #[test]
-fn explicit_async_request_rejects_legacy_200_without_job_id() {
+fn large_ask_task_submits_async_and_rejects_legacy_200_without_job_id() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let (base, recorded) =
         spawn_one_request_scheduler("HTTP/1.1 200 OK", r#"{"outputs":{"text":"untrackable"}}"#);
     let client = LocalSchedulerClient::with_base(&base, Duration::from_secs(2));
     let adapter = SchedulerKbTaskAdapter::new(&client, &profiles);
-    let messages = vec![ChatMessage::user("question with compact evidence")];
+    let messages = vec![ChatMessage::user(&"长".repeat(5000))];
 
     let error = adapter
         .submit(SchedulerKbTaskSubmitRequest::interactive(
             "kb.query.ask",
-            json!({"query":"q","contexts":["evidence"]}),
+            json!({"query":"q","contexts":["长".repeat(5000)]}),
             &messages,
         ))
         .expect_err(":async response without job id must fail closed");

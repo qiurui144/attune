@@ -9,6 +9,7 @@ pub(crate) mod job_worker;
 pub(crate) mod local_scheduler;
 pub mod mcp;
 pub(crate) mod middleware;
+pub(crate) mod rag_guardrails;
 #[doc(hidden)]
 pub mod rag_orchestrator;
 pub(crate) mod retrieval_policy;

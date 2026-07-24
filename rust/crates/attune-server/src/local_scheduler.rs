@@ -4,6 +4,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) const SUBMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const DEFAULT_KB_ASK_SUBMIT_TIMEOUT_MS: u32 = 120_000;
+const MIN_KB_ASK_SUBMIT_TIMEOUT_MS: u64 = 2_000;
+const MAX_KB_ASK_SUBMIT_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_PROFILE_CACHE_TTL_MS: u32 = 60_000;
 const DEFAULT_PROFILE_PROBE_TIMEOUT_MS: u32 = 500;
 static RUNTIME_PROFILE_CACHE: OnceLock<Mutex<attune_core::edge_cloud::RuntimeProfileCache>> =
@@ -144,6 +147,18 @@ pub(crate) fn ingest_options_from_state(
             120_000,
         ) as u64)
         .with_chunking(attune_core::chunker::ChunkingOptions::scheduler_from_env())
+}
+
+pub(crate) fn kb_ask_submit_timeout() -> Duration {
+    let ms = env_u32_any(
+        &[
+            "ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS",
+            "ATTUNE_SCHEDULER_KB_ASK_SUBMIT_TIMEOUT_MS",
+            "ATTUNE_LOCAL_SCHEDULER_KB_ASK_SUBMIT_TIMEOUT_MS",
+        ],
+        DEFAULT_KB_ASK_SUBMIT_TIMEOUT_MS,
+    ) as u64;
+    Duration::from_millis(ms.clamp(MIN_KB_ASK_SUBMIT_TIMEOUT_MS, MAX_KB_ASK_SUBMIT_TIMEOUT_MS))
 }
 
 pub(crate) fn runtime_profiles_for_base(base: &str) -> attune_core::edge_cloud::RuntimeProfileSet {
@@ -444,6 +459,11 @@ pub(crate) fn env_bool_any(keys: &[&str], default: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK.lock().expect("test env lock")
+    }
+
     #[test]
     fn scheduler_native_provider_names_are_generic() {
         assert!(provider_is_scheduler_native("local_scheduler"));
@@ -632,6 +652,27 @@ mod tests {
         assert_eq!(body["component"], "ocr");
         assert_eq!(body["degradation_policy"], "honest_failure");
         assert_eq!(body["degradation_allowed"], false);
+    }
+
+    #[test]
+    fn kb_ask_submit_timeout_has_sync_answer_headroom_and_env_override() {
+        let _guard = env_lock();
+        let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS").ok();
+        std::env::remove_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS");
+
+        assert_eq!(
+            kb_ask_submit_timeout(),
+            Duration::from_secs(120),
+            "sync kb.query.ask may include 30B model generation and must cover high-complexity RAG turns"
+        );
+
+        std::env::set_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS", "45000");
+        assert_eq!(kb_ask_submit_timeout(), Duration::from_secs(45));
+
+        match saved {
+            Some(value) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS", value),
+            None => std::env::remove_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS"),
+        }
     }
 
     #[test]

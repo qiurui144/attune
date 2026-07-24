@@ -44,11 +44,11 @@ curl -sf -X POST http://127.0.0.1:18906/api/v1/vault/unlock \
     -H "Content-Type: application/json" -d "{\"password\":\"${PASSWORD}\"}" > /dev/null 2>&1 || true
 curl -sf -X PATCH http://127.0.0.1:18906/api/v1/settings \
     -H "Content-Type: application/json" \
-    -d '{"llm":{"provider":"local_scheduler","endpoint":"http://127.0.0.1:8090","model":"llm-chat"}}' > /dev/null 2>&1 || true
+    -d '{"llm":{"provider":"local_scheduler","endpoint":"http://127.0.0.1:8090","model":"llm-chat"},"rerank":{"enabled":true,"task":"kb.query.rerank"}}' > /dev/null 2>&1 || true
 
 # ── 2. CORS Proxy ──
 log "proxy" "Starting CORS proxy on :8889 → :18906..."
-ATTUNE_PROXY_PORT=8889 ATTUNE_TARGET_HOST=127.0.0.1 ATTUNE_TARGET_PORT=18906 \
+ATTUNE_PROXY_PORT=8889 ATTUNE_TARGET_HOST=127.0.0.1 ATTUNE_TARGET_PORT=18906 ATTUNE_PROXY_RESPONSE_IDLE_TIMEOUT_SECONDS=600 \
     nohup python3 "$DEMO_DIR/cors-proxy.py" > /tmp/cors-proxy.log 2>&1 &
 sleep 2
 if curl -sf http://127.0.0.1:8889/api/v1/vault/status > /dev/null 2>&1; then

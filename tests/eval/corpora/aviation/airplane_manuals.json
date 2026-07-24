@@ -1,0 +1,43 @@
+{
+  "schema_version": "attune.eval.corpus.v1",
+  "corpus_id": "airplane_manuals",
+  "domain": "aviation",
+  "license": "upstream-repository-license",
+  "source": {
+    "type": "legacy_manifest",
+    "path": "tests/e2e/airplane_manual_longtext_cases.json",
+    "url": "https://github.com/shiroinekotfs/airplane-manual-collection.git",
+    "commit": "afe8288495338880e165f77bb9afe9946f366a52"
+  },
+  "scale": {
+    "tier": "T2",
+    "documents": 74,
+    "bytes": 1279735540,
+    "expected_chunks": 50000,
+    "ocr_ratio": 0.1,
+    "languages": ["en"]
+  },
+  "profiles": {
+    "smoke": {
+      "documents": ["airbus-a320-qrh-qrh320"],
+      "purpose": "fast aviation long-text operation-guidance smoke"
+    },
+    "edge_scheduler_comprehensive": {
+      "documents_from_legacy_profile": "edge_scheduler_comprehensive",
+      "purpose": "existing airplane manual long-text K3 profile"
+    }
+  },
+  "indexing": {
+    "parser_modes": ["pdf", "ocr", "text"],
+    "max_pending_seconds": 1800,
+    "delete_rescan_required": true
+  },
+  "generated_documents": [
+    {
+      "id": "airbus-a320-qrh-qrh320",
+      "title": "airbus-a320-qrh-qrh320",
+      "filename": "airbus-a320-qrh-qrh320.md",
+      "content": "airbus-a320-qrh-qrh320 is the release-smoke no-OCR fixture for A320 QRH abnormal procedure retrieval. A320 QRH abnormal procedure material corresponds to 异常处置资料 in Chinese. To locate abnormal procedure material, search the A320 QRH source by aircraft family, QRH manual type, abnormal procedure title, and section evidence. The answer must explicitly cite airbus-a320-qrh-qrh320 as the source and include 引用 when explaining the grounded retrieval path."
+    }
+  ]
+}

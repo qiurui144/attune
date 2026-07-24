@@ -38,6 +38,11 @@ CHAT_JOB_TIMEOUT="${ATTUNE_K3_CHAT_JOB_TIMEOUT:-60}"
 RVV_REQUIRE_PERF="${ATTUNE_K3_RVV_REQUIRE_PERF:-0}"
 API_CONTRACT="${ATTUNE_K3_API_CONTRACT:-1}"
 API_CONTRACT_BIND_DIR="${ATTUNE_K3_API_CONTRACT_BIND_DIR:-}"
+EVAL_SUITE="${ATTUNE_K3_EVAL_SUITE:-}"
+EVAL_OUT="${ATTUNE_K3_EVAL_OUT:-}"
+WEB_DEMO_BASE_URL="${ATTUNE_K3_WEB_DEMO_BASE_URL:-}"
+WEB_DEMO_API_URL="${ATTUNE_K3_WEB_DEMO_API_URL:-}"
+WEB_DEMO_OUT="${ATTUNE_K3_WEB_DEMO_OUT:-}"
 SKIP_DEB_CHECK=0
 SKIP_INSTALL=0
 SKIP_UI=0
@@ -144,6 +149,12 @@ Environment:
   ATTUNE_K3_LONGTEXT_MANIFEST   Local JSON manifest for the optional long-text UI gate.
                                 The corpus must already be materialized and indexed
                                 on the NAS host before the UI-only gate runs.
+  ATTUNE_K3_EVAL_SUITE          Optional Attune RAG eval suite id, for example
+                                k3_rag_release_smoke.
+  ATTUNE_K3_EVAL_OUT            Optional JSON output path for the RAG eval suite.
+  ATTUNE_K3_WEB_DEMO_BASE_URL   Optional kb-web-demo frontend URL for Playwright simulation.
+  ATTUNE_K3_WEB_DEMO_API_URL    Optional kb-web-demo API proxy URL. Defaults to ATTUNE_K3_BASE_URL.
+  ATTUNE_K3_WEB_DEMO_OUT        Optional JSON output path for kb-web-demo frontend metrics.
 HELP
       exit 0
       ;;
@@ -239,6 +250,15 @@ if [ "$DRY_RUN" = "1" ]; then
 else
   REPORT="$REPORTS_DIR/k3-nas-web-demo-$TS.md"
 fi
+if [ -n "$EVAL_SUITE" ] && [ -z "$EVAL_OUT" ]; then
+  EVAL_OUT="$REPORTS_DIR/k3-rag-eval-$EVAL_SUITE-$TS.json"
+fi
+if [ -n "$WEB_DEMO_BASE_URL" ] && [ -z "$WEB_DEMO_API_URL" ]; then
+  WEB_DEMO_API_URL="$BASE_URL"
+fi
+if [ -n "$WEB_DEMO_BASE_URL" ] && [ -z "$WEB_DEMO_OUT" ]; then
+  WEB_DEMO_OUT="$REPORTS_DIR/kb-web-demo-frontend-$TS.json"
+fi
 
 SSH_TARGET="$SSH_USER@$HOST"
 SSH_OPTS=()
@@ -281,6 +301,11 @@ report_header() {
     echo "- Require scheduler chat metadata: $REQUIRE_SCHEDULER_CHAT"
     echo "- Require scheduler performance thresholds: $RVV_REQUIRE_PERF"
     echo "- Run NAS Web API contract: $API_CONTRACT"
+    echo "- RAG eval suite: ${EVAL_SUITE:-<disabled>}"
+    echo "- RAG eval output: ${EVAL_OUT:-<auto>}"
+    echo "- KB web-demo frontend URL: ${WEB_DEMO_BASE_URL:-<disabled>}"
+    echo "- KB web-demo API URL: ${WEB_DEMO_API_URL:-<auto>}"
+    echo "- KB web-demo output: ${WEB_DEMO_OUT:-<auto>}"
     echo "- Long-text manifest: ${LONGTEXT_MANIFEST:-<none>}"
     echo "- Long-text E2E: $LONGTEXT_E2E"
     echo "- Long-text corpora: $LONGTEXT_CORPORA"
@@ -398,6 +423,41 @@ configure_longtext_pdf_ocr_guard() {
   remote "mkdir -p /etc/systemd/system/attune-server.service.d && printf '%s\n' '[Service]' 'Environment=ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_LOCAL_SCHEDULER_PDF_OCR_ENABLED=0' 'Environment=ATTUNE_PDF_OCR_ENABLED=0' > /etc/systemd/system/attune-server.service.d/90-attune-k3-longtext-pdf-ocr.conf && systemctl daemon-reload && systemctl restart attune-server.service && systemctl is-active attune-server.service"
 }
 
+run_rag_eval_suite_gate() {
+  append_report "## RAG Eval Suite Gate"
+  if [ -z "$EVAL_SUITE" ]; then
+    append_report "Skipped because ATTUNE_K3_EVAL_SUITE is not set."
+    return
+  fi
+  if [ -z "$BASE_URL" ]; then
+    echo "--base-url or ATTUNE_K3_BASE_URL is required for ATTUNE_K3_EVAL_SUITE=$EVAL_SUITE" >&2
+    exit 2
+  fi
+
+  append_report "- Suite: $EVAL_SUITE"
+  append_report "- Output: $EVAL_OUT"
+  run python3 "$ROOT/scripts/eval/validate-manifests.py" --root "$ROOT" --suite "$EVAL_SUITE"
+  run python3 "$ROOT/scripts/eval/run-suite.py" --root "$ROOT" --suite "$EVAL_SUITE" --base-url "$BASE_URL" --token "$TOKEN" --out "$EVAL_OUT"
+  append_report "- Result: pass"
+}
+
+run_kb_web_demo_frontend_gate() {
+  append_report "## KB Web Demo Frontend Gate"
+  if [ -z "$WEB_DEMO_BASE_URL" ]; then
+    append_report "Skipped because ATTUNE_K3_WEB_DEMO_BASE_URL is not set."
+    return
+  fi
+  append_report "- Frontend URL: $WEB_DEMO_BASE_URL"
+  append_report "- API URL: $WEB_DEMO_API_URL"
+  append_report "- Output: $WEB_DEMO_OUT"
+  run python3 "$ROOT/tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py" \
+    --base-url "$WEB_DEMO_BASE_URL" \
+    --api-url "$WEB_DEMO_API_URL" \
+    --out "$WEB_DEMO_OUT" \
+    --headless "${ATTUNE_HEADLESS:-1}"
+  append_report "- Result: pass"
+}
+
 report_header
 
 if [ "$DRY_RUN" = "1" ]; then
@@ -409,6 +469,8 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
   append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, and chat scheduler metadata."
+  append_report "- RAG Eval Suite Gate: when ATTUNE_K3_EVAL_SUITE is set, validate manifests with scripts/eval/validate-manifests.py and run scripts/eval/run-suite.py against the Attune Web/API base URL, writing ATTUNE_K3_EVAL_OUT or an auto reports/release JSON path."
+  append_report "- KB Web Demo Frontend Gate: when ATTUNE_K3_WEB_DEMO_BASE_URL is set, run tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py against kb-web-demo to validate upload, vector chunk display, Chat RAG, Summary RAG, citations, and timing display; output goes to ATTUNE_K3_WEB_DEMO_OUT."
   append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=1 clears any OCR-disabling systemd drop-in before corpus bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=0 only to isolate retrieval/vector behavior."
   append_report "- Airplane GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1 and ATTUNE_K3_LONGTEXT_CORPORA includes airplane, run it on the NAS host with source repo $AIRPLANE_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized corpus under $LONGTEXT_CORPUS_DIR, then copy the generated manifest back for the optional UI gate."
   append_report "- Mechanical Design GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1 and ATTUNE_K3_LONGTEXT_CORPORA includes mechanical_design, run it on the NAS host with source repo $MECHANICAL_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized Git LFS corpus under $MECHANICAL_LONGTEXT_CORPUS_DIR, then include it in repeat chat and multiturn stability data."
@@ -635,6 +697,9 @@ if [ "$API_CONTRACT" = "1" ]; then
 else
   append_report "Skipped because ATTUNE_K3_API_CONTRACT=0."
 fi
+
+run_rag_eval_suite_gate
+run_kb_web_demo_frontend_gate
 
 if [ -n "$HOST" ]; then
   remote "rm -rf '$BIND_DIR' && mkdir -p '$BIND_DIR' && printf '# Attune K3 NAS Web gate\n\nattune-k3-nas-web-bind-token\n' > '$BIND_DIR/k3-nas-web-gate.md'"

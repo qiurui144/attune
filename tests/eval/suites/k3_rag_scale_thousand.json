@@ -1,0 +1,35 @@
+{
+  "schema_version": "attune.eval.suite.v1",
+  "suite_id": "k3_rag_scale_thousand",
+  "purpose": "K3 thousand-document single-industry security RAG scale validation.",
+  "corpora": ["security_generated_thousand_docs"],
+  "scenarios": ["security_scale_coverage"],
+  "gates": [
+    "manifest",
+    "generated_corpus_materialization",
+    "ingest",
+    "embedding_drain",
+    "search",
+    "chat",
+    "summary",
+    "delete_rescan"
+  ],
+  "thresholds": {
+    "retrieval_hit_at_5_min": 0.85,
+    "citation_hit_rate_min": 0.9,
+    "answer_accuracy_min": 0.8,
+    "summary_coverage_min": 0.8,
+    "multiturn_source_continuity_min": 0.85,
+    "negative_evidence_refusal_rate_min": 0.9,
+    "out_of_manual_boundary_rate_min": 0.8,
+    "terminal_error_rate_max": 0.02,
+    "search_p95_ms_max": 8000,
+    "hot_chat_p95_ms_max": 60000,
+    "summary_p95_ms_max": 45000,
+    "pending_embeddings_drain_seconds_max": 900
+  },
+  "ci": {
+    "hardware_required": true,
+    "default_runner": "k3_weekly_scale"
+  }
+}

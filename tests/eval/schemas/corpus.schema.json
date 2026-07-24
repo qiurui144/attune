@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attune.eval.corpus.v1",
+  "title": "Attune Eval Corpus Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "corpus_id",
+    "domain",
+    "license",
+    "source",
+    "scale",
+    "profiles",
+    "indexing"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "attune.eval.corpus.v1"
+    },
+    "corpus_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["git", "http", "generated", "local", "legacy_manifest"]
+        },
+        "url": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "checksums": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": true
+    },
+    "scale": {
+      "type": "object",
+      "required": ["tier", "documents", "expected_chunks"],
+      "properties": {
+        "tier": {
+          "enum": ["T0", "T1", "T2", "T3", "T4"]
+        },
+        "documents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_chunks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ocr_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "indexing": {
+      "type": "object",
+      "required": ["parser_modes", "max_pending_seconds"],
+      "properties": {
+        "parser_modes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_pending_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "delete_rescan_required": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
