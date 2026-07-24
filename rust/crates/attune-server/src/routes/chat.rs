@@ -13,7 +13,8 @@ use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
 use crate::rag_orchestrator::{
     build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
-    build_local_scheduler_safety_refusal, local_scheduler_operational_safety_query,
+    build_local_scheduler_out_of_manual_boundary, build_local_scheduler_safety_refusal,
+    local_scheduler_operational_safety_query, local_scheduler_out_of_manual_boundary_query,
     local_scheduler_source_lookup_query, local_scheduler_summary_query,
 };
 use crate::state::SharedState;
@@ -295,6 +296,8 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
     let (profile, tokens, min_contexts, min_chars) =
         if local_scheduler_operational_safety_query(query) {
             ("safety", 64, 3, 96)
+        } else if local_scheduler_out_of_manual_boundary_query(query) {
+            ("boundary", 64, 3, 112)
         } else if asks_diagnostic {
             ("diagnostic", 192, 6, 320)
         } else if asks_decision_or_comparison {
@@ -739,7 +742,10 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
         || matches!(
             plan.answer_mode,
             RagAnswerMode::HowTo | RagAnswerMode::Troubleshooting
-        ) && !text_contains_any(answer, &["不要编造", "不能编造", "unsupported", "not invent"])
+        ) && !text_contains_any(
+            answer,
+            &["不要编造", "不能编造", "unsupported", "not invent"],
+        )
     {
         additions.push(if chinese {
             "补充约束：请以引用证据为准；排查前继续收集日志、配置、拓扑、截图、时间线、审批或其他材料；不要编造未被引用支持的操作结论。"
@@ -751,13 +757,23 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
     if matches!(plan.answer_mode, RagAnswerMode::NegativeEvidence)
         || text_contains_any(
             query,
-            &["没有", "缺少", "缺失", "能否直接", "直接判定", "missing", "without"],
+            &[
+                "没有",
+                "缺少",
+                "缺失",
+                "能否直接",
+                "直接判定",
+                "missing",
+                "without",
+            ],
         )
     {
-        let missing_boundary = !text_contains_any(
-            answer,
-            &["证据不足", "证据不充分", "insufficient evidence"],
-        ) || !text_contains_any(answer, &["继续索取", "补充材料", "收集", "request", "collect"]);
+        let missing_boundary =
+            !text_contains_any(answer, &["证据不足", "证据不充分", "insufficient evidence"])
+                || !text_contains_any(
+                    answer,
+                    &["继续索取", "补充材料", "收集", "request", "collect"],
+                );
         if missing_boundary {
             additions.push(if chinese {
                 "结论边界：证据不足时不能直接判定；应继续索取或收集缺失的日志、记录、审批、测量或其他材料。"
@@ -771,7 +787,11 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
         let missing_boundary = !text_contains_any(answer, &["证据不足", "insufficient evidence"])
             || !text_contains_any(
                 answer,
-                &["不能当作手册结论", "不能作为手册结论", "not a manual conclusion"],
+                &[
+                    "不能当作手册结论",
+                    "不能作为手册结论",
+                    "not a manual conclusion",
+                ],
             );
         if missing_boundary {
             additions.push(if chinese {
@@ -1369,6 +1389,7 @@ fn answer_mode_for_local_task(task: &str) -> &'static str {
     match task {
         "local.extractive.summary" => "extractive-summary",
         "local.extractive.answer" => "extractive-answer",
+        "local.boundary.industry_general" => "out-of-manual-boundary",
         "local.safety.refusal" => "refusal-insufficient-evidence",
         _ => "extractive-answer",
     }
@@ -1387,6 +1408,19 @@ fn build_deterministic_local_scheduler_answer(
                 "deterministic_operational_safety_refusal",
                 "OperationalSafetyRefusal",
             )
+        })
+        .or_else(|| {
+            if !allow_extractive_repair {
+                return None;
+            }
+            build_local_scheduler_out_of_manual_boundary(message, knowledge).map(|content| {
+                (
+                    content,
+                    "local.boundary.industry_general",
+                    "deterministic_out_of_manual_boundary",
+                    "OutOfManualBoundary",
+                )
+            })
         })
         .or_else(|| {
             if !allow_extractive_repair {
@@ -5130,12 +5164,12 @@ mod tests {
             .content
             .contains("collect evidence before recommendation"));
         assert!(user.content.contains("RAG response contract:"));
-        assert!(user.content.contains(
-            "preserving the exact tokens at least once: alpha control; beta evidence"
-        ));
         assert!(user
             .content
-            .contains("industry-general guidance and do not present it as a manual/source conclusion"));
+            .contains("preserving the exact tokens at least once: alpha control; beta evidence"));
+        assert!(user.content.contains(
+            "industry-general guidance and do not present it as a manual/source conclusion"
+        ));
     }
 
     #[test]
@@ -5584,6 +5618,38 @@ mod tests {
             .is_none(),
             "diagnostic policy must not be intercepted by extractive answer"
         );
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn deterministic_local_answer_handles_out_of_manual_boundary_without_llm_generation() {
+        let _env = env_lock();
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "asset-inventory",
+            "title": "Asset Inventory Manual",
+            "inject_content": "Asset inventory evidence supports access control review, but this source does not directly define zero trust segmentation."
+        })];
+
+        let answer = build_deterministic_local_scheduler_answer(
+            "知识库未直接覆盖零信任网络分段，它能作为行业通用整改建议吗？",
+            &knowledge,
+            true,
+        )
+        .expect("out-of-manual boundary should use local deterministic answer");
+
+        assert_eq!(answer.1, "local.boundary.industry_general");
+        assert_eq!(answer.2, "deterministic_out_of_manual_boundary");
+        assert!(answer.0.contains("知识库未直接覆盖"));
+        assert!(answer.0.contains("行业通用"));
+        assert!(answer.0.contains("不能当作手册结论"));
+        assert!(answer.0.contains("Asset Inventory Manual"));
 
         match previous {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),

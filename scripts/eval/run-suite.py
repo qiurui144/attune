@@ -649,6 +649,8 @@ def build_live_report(
                 negative_evidence_turns += 1
             if is_out_of_manual_turn:
                 out_of_manual_turns += 1
+            turn_search_latency_ms: float | None = None
+            turn_search_result_count: int | None = None
             try:
                 search_query = followup_search_query(message, scenario_history)
                 encoded = urllib.parse.quote(search_query)
@@ -662,8 +664,10 @@ def build_live_report(
                 search_count += 1
                 search_latency = search_payload.get("latency_ms")
                 if isinstance(search_latency, (int, float)) and not isinstance(search_latency, bool):
-                    search_latencies.append(float(search_latency))
+                    turn_search_latency_ms = float(search_latency)
+                    search_latencies.append(turn_search_latency_ms)
                 results = search_payload.get("results")
+                turn_search_result_count = len(results) if isinstance(results, list) else 0
                 if results:
                     retrieval_hits += 1
                 else:
@@ -746,6 +750,20 @@ def build_live_report(
             cold_start_wait = scheduler_number(chat_payload, "cold_start_wait_ms")
             if cold_start_wait is not None:
                 scheduler_cold_start_wait_ms.append(cold_start_wait)
+            local_scheduler = (
+                chat_payload.get("local_scheduler")
+                if isinstance(chat_payload.get("local_scheduler"), dict)
+                else {}
+            )
+            admission = (
+                local_scheduler.get("admission")
+                if isinstance(local_scheduler.get("admission"), dict)
+                else {}
+            )
+            cost_payload = chat_payload.get("cost") if isinstance(chat_payload.get("cost"), dict) else {}
+            knowledge_count = chat_payload.get("knowledge_count")
+            if not isinstance(knowledge_count, int) or isinstance(knowledge_count, bool):
+                knowledge_count = None
             text = response_text(chat_payload)
             labels = citation_labels(chat_payload)
             history_answer = text
@@ -834,6 +852,24 @@ def build_live_report(
                     "turn_id": turn_id,
                     "answer_mode": answer_mode,
                     "latency_ms": latency_ms,
+                    "timing": {
+                        "search_latency_ms": turn_search_latency_ms,
+                        "chat_latency_ms": latency_ms,
+                        "scheduler_queue_wait_ms": queue_wait,
+                        "scheduler_generation_latency_ms": generation_latency,
+                        "scheduler_cold_start_wait_ms": cold_start_wait,
+                        "scheduler_realtime_job_poll_ms": local_scheduler.get("realtime_job_poll_ms"),
+                    },
+                    "observability": {
+                        "answer_mode": chat_payload.get("answer_mode") or cost_payload.get("model") or answer_mode or None,
+                        "knowledge_count": knowledge_count,
+                        "search_result_count": turn_search_result_count,
+                        "scheduled_as": local_scheduler.get("scheduled_as"),
+                        "scheduler_task": local_scheduler.get("task"),
+                        "scheduler_status": local_scheduler.get("status"),
+                        "context_tokens": admission.get("context_tokens"),
+                        "max_output_tokens": admission.get("max_output_tokens"),
+                    },
                     "content_excerpt": text[:1000],
                     "citation_labels": labels,
                     "expected_sources": expected_sources,

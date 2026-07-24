@@ -168,6 +168,46 @@ pub fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value])
     ))
 }
 
+pub fn local_scheduler_out_of_manual_boundary_query(query: &str) -> bool {
+    contains_any_ascii(
+        query,
+        &[
+            "未直接覆盖",
+            "没有直接覆盖",
+            "手册没有",
+            "资料没有",
+            "知识库没有",
+            "out-of-manual",
+            "not directly covered",
+            "not covered",
+            "industry-general",
+            "行业通用",
+        ],
+    )
+}
+
+pub fn build_local_scheduler_out_of_manual_boundary(
+    query: &str,
+    knowledge: &[Value],
+) -> Option<String> {
+    if knowledge.is_empty()
+        || !local_scheduler_extractive_answer_enabled()
+        || !local_scheduler_out_of_manual_boundary_query(query)
+    {
+        return None;
+    }
+
+    let source_lines = local_scheduler_source_lines(knowledge, 5);
+    if source_lines.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "知识库未直接覆盖该做法，因此不能当作手册结论或来源结论。可以作为行业通用建议讨论，但必须明确证据不足，并继续索取或收集缺失的日志、记录、审批、配置、测量或其他材料。\n\n已检索到的相关知识库来源：\n{}",
+        source_lines.join("\n")
+    ))
+}
+
 pub fn local_scheduler_summary_query(query: &str) -> bool {
     contains_any_ascii(
         query,

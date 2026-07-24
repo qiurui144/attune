@@ -146,6 +146,11 @@ assert report["metrics"]["performance"]["chat_p95_ms"] == 123
 assert len(report["artifacts"]["turn_results"]) == 3
 assert report["artifacts"]["turn_results"][0]["content_excerpt"]
 assert report["artifacts"]["turn_results"][0]["citation_labels"]
+assert report["artifacts"]["turn_results"][0]["timing"]["search_latency_ms"] == 4
+assert report["artifacts"]["turn_results"][0]["timing"]["chat_latency_ms"] == 123
+assert report["artifacts"]["turn_results"][0]["timing"]["scheduler_queue_wait_ms"] is None
+assert report["artifacts"]["turn_results"][0]["observability"]["knowledge_count"] == 2
+assert report["artifacts"]["turn_results"][0]["observability"]["answer_mode"] == "llm-chat"
 assert "/api/v1/upload" in paths
 assert "/api/v1/status" in paths
 assert "/api/v1/search" in paths
