@@ -752,14 +752,25 @@ pub fn rrf_fuse(
     top_k: usize,
 ) -> Vec<(String, f32)> {
     let mut scores: HashMap<String, f32> = HashMap::new();
+    let mut representative_by_item: HashMap<String, String> = HashMap::new();
 
     for (rank, (id, _score)) in vector_results.iter().enumerate() {
         let rrf = vector_weight / (RRF_K + rank as f32 + 1.0);
-        *scores.entry(id.clone()).or_default() += rrf;
+        let item_id = hit_key_item_id(id).to_string();
+        let representative = representative_by_item
+            .entry(item_id)
+            .or_insert_with(|| id.clone())
+            .clone();
+        *scores.entry(representative).or_default() += rrf;
     }
     for (rank, (id, _score)) in fulltext_results.iter().enumerate() {
         let rrf = fulltext_weight / (RRF_K + rank as f32 + 1.0);
-        *scores.entry(id.clone()).or_default() += rrf;
+        let item_id = hit_key_item_id(id).to_string();
+        let representative = representative_by_item
+            .entry(item_id)
+            .or_insert_with(|| id.clone())
+            .clone();
+        *scores.entry(representative).or_default() += rrf;
     }
 
     let mut sorted: Vec<(String, f32)> = scores.into_iter().collect();

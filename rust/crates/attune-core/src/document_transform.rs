@@ -114,6 +114,9 @@ fn is_heading_line(line: &str) -> bool {
     if line.len() > 120 || line.ends_with(';') || line.ends_with('{') || line.ends_with('}') {
         return false;
     }
+    if is_markdown_atx_heading(line) {
+        return true;
+    }
     if starts_with_numbered_heading(line) {
         return true;
     }
@@ -128,6 +131,17 @@ fn is_heading_line(line: &str) -> bool {
             | "build"
             | "overview"
     )
+}
+
+fn is_markdown_atx_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    (1..=6).contains(&hashes)
+        && trimmed
+            .chars()
+            .nth(hashes)
+            .is_some_and(|c| c.is_whitespace())
+        && trimmed[hashes..].trim().chars().count() <= 100
 }
 
 fn starts_with_numbered_heading(line: &str) -> bool {

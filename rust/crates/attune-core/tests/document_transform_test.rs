@@ -71,3 +71,31 @@ fn transform_does_not_treat_plain_numbered_operations_as_sections() {
         n.kind != NodeKind::Section && n.text == "1 Call open_device with a valid handle"
     }));
 }
+
+#[test]
+fn transform_detects_markdown_atx_headings_as_sections() {
+    let outline = transform_document(TransformInput {
+        document_id: "markdown-manual".to_string(),
+        title: "Manual".to_string(),
+        source_path: None,
+        text: "\
+# Heading One
+
+First body paragraph.
+
+## Heading Two
+
+Second body paragraph.
+"
+        .to_string(),
+    });
+
+    assert!(outline
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Section && n.text == "# Heading One"));
+    assert!(outline
+        .nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Section && n.text == "## Heading Two"));
+}

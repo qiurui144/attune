@@ -329,11 +329,7 @@ fn structured_node_is_indexable(node: &DocumentNode) -> bool {
     }
     !matches!(
         node.kind,
-        NodeKind::Title
-            | NodeKind::Section
-            | NodeKind::Toc
-            | NodeKind::HeaderFooter
-            | NodeKind::FigureCaption
+        NodeKind::Title | NodeKind::Toc | NodeKind::HeaderFooter | NodeKind::FigureCaption
     )
 }
 
