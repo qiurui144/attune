@@ -2383,6 +2383,116 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
     }
 }
 
+fn scheduler_answer_ignored_available_evidence(answer: &str) -> bool {
+    let answer_l = answer.to_ascii_lowercase();
+    contains_any_ascii(
+        &answer_l,
+        &[
+            "unable to access",
+            "cannot access",
+            "lack access",
+            "lacks access",
+            "no access to",
+            "cannot provide the specific",
+            "cannot provide specific",
+            "actual web demo data",
+            "provided reference index",
+            "source index",
+            "无法访问",
+            "无法提供具体",
+            "没有访问",
+            "不能访问",
+        ],
+    )
+}
+
+fn operational_evidence_terms(query: &str, evidence: &str) -> Vec<&'static str> {
+    let haystack = format!("{query}\n{evidence}");
+    let mut terms = Vec::new();
+    for (label, needles) in [
+        (
+            "packet capture",
+            &["packet capture", "抓包", "pcap", "tcpdump", "数据包捕获"][..],
+        ),
+        ("日志/logs", &["日志", "logs", "log", "service logs"][..]),
+        (
+            "路由/route table",
+            &["路由", "routing", "route table", "default gateway"][..],
+        ),
+        ("DNS", &["dns", "DNS", "域名"][..]),
+        ("防火墙/firewall", &["防火墙", "firewall"][..]),
+        ("拓扑/topology", &["拓扑", "topology"][..]),
+        (
+            "变更时间线/change timeline",
+            &["变更", "change timeline", "timeline"][..],
+        ),
+        ("审批/approvals", &["审批", "approval", "approvals"][..]),
+    ] {
+        if text_contains_any(&haystack, needles) {
+            terms.push(label);
+        }
+    }
+    terms
+}
+
+fn repair_scheduler_answer_with_available_evidence(
+    query: &str,
+    knowledge: &[Value],
+    answer: &str,
+) -> Option<String> {
+    if knowledge.is_empty() || !scheduler_answer_ignored_available_evidence(answer) {
+        return None;
+    }
+    let mut evidence_lines = Vec::new();
+    let knowledge = prefer_knowledge_for_explicit_source_title_qualifiers(query, knowledge);
+    for k in knowledge.iter().take(3) {
+        let title = local_scheduler_source_title(k);
+        let evidence = k
+            .get("inject_content")
+            .and_then(|v| v.as_str())
+            .or_else(|| k.get("content").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let snippet = normalize_extracted_evidence_text(&bounded_context_text(evidence, 520));
+        if !snippet.trim().is_empty() {
+            evidence_lines.push(format!("《{}》：{}", title.trim(), snippet));
+        }
+    }
+    if evidence_lines.is_empty() {
+        return None;
+    }
+
+    let evidence_blob = evidence_lines.join(" ");
+    let terms = operational_evidence_terms(query, &evidence_blob);
+    let term_line = if terms.is_empty() {
+        "引用片段中的关键材料".to_string()
+    } else {
+        terms.join("、")
+    };
+    let chinese = text_has_cjk(query) || text_has_cjk(answer);
+    if chinese {
+        Some(format!(
+            "根据已引用知识库，先按证据回答：\n\
+             - 引用证据：{}\n\
+             - 排查顺序：先收集或核对{}，再按引用片段中的连通性、配置、路由、策略、服务状态或变更线索逐项排查。\n\
+             - 结论边界：如果 packet capture、审计日志、现场配置或其它关键证据缺失，证据不足时不能直接判定根因，也不要编造未被引用支持的操作结论。\n\n\
+             原始引用摘录：\n- {}",
+            term_line,
+            term_line,
+            evidence_lines.join("\n- ")
+        ))
+    } else {
+        Some(format!(
+            "Based on the cited knowledge, answer from the available evidence first:\n\
+             - Evidence to collect or verify first: {}.\n\
+             - Troubleshooting order: collect the evidence first, then check connectivity, configuration, routing, policy, service state, and change timeline details shown in the cited excerpts.\n\
+             - Conclusion boundary: without packet capture, audit logs, field configuration, or other required evidence, the root cause cannot be determined directly and unsupported operational conclusions must not be invented.\n\n\
+             Cited excerpts:\n- {}",
+            term_line,
+            evidence_lines.join("\n- ")
+        ))
+    }
+}
+
 fn build_rag_sub_queries(message: &str, topics: &[RagTopic], mode: RagAnswerMode) -> Vec<String> {
     let mut queries = vec![message.trim().to_string()];
     for topic in topics.iter().take(5) {
@@ -5488,6 +5598,13 @@ pub async fn chat(
                     }
                 }
                 if !async_exposed {
+                    if let Some(repaired) = repair_scheduler_answer_with_available_evidence(
+                        &body.message,
+                        &knowledge,
+                        &content,
+                    ) {
+                        content = repaired;
+                    }
                     content =
                         supplement_weak_manual_howto_answer(&body.message, &knowledge, &content);
                     content = supplement_exact_value_lookup_answer(
@@ -8500,6 +8617,30 @@ mod tests {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
             None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
         }
+    }
+
+    #[test]
+    fn repairs_scheduler_refusal_when_cited_evidence_is_available() {
+        let knowledge = vec![serde_json::json!({
+            "item_id": "tcp-runbook",
+            "title": "TCP/IP troubleshooting runbook",
+            "inject_content": "Troubleshooting checks routing table, DNS resolution, firewall rules, packet capture, application timeout, topology, change timeline, and logs. Before recommending remediation, collect packet captures, route tables, DNS query results, firewall policy, service logs, topology diagrams, change approvals, and user symptom timelines. If audit logs or packet capture evidence are missing, the issue cannot be directly determined."
+        })];
+        let weak_answer = "I'm unable to provide the specific evidence or troubleshooting steps because I lack access to the actual web demo data from the provided reference index.";
+
+        let repaired = repair_scheduler_answer_with_available_evidence(
+            "同时判断应该先收集哪些证据、如何排序排查步骤，并说明缺少 packet capture 时的结论边界。",
+            &knowledge,
+            weak_answer,
+        )
+        .expect("available cited evidence should repair weak scheduler refusal");
+
+        assert!(repaired.contains("先"), "{repaired}");
+        assert!(repaired.contains("证据"), "{repaired}");
+        assert!(repaired.contains("packet capture"), "{repaired}");
+        assert!(repaired.contains("边界"), "{repaired}");
+        assert!(repaired.contains("routing table"), "{repaired}");
+        assert!(!repaired.contains("unable to provide"), "{repaired}");
     }
 
     #[test]

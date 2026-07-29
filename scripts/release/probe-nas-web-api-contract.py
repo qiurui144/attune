@@ -51,6 +51,9 @@ CORE_READ_ENDPOINTS = [
 
 TERMINAL_JOB_STATUSES = {"done", "completed", "complete", "success", "succeeded", "failed", "error", "cancelled", "canceled", "expired"}
 FAILED_JOB_STATUSES = {"failed", "error", "cancelled", "canceled", "expired"}
+TRANSIENT_CORE_READ_ERRORS = {
+    "tags": "vault locked or tag index unavailable",
+}
 
 
 class ProbeError(RuntimeError):
@@ -137,6 +140,29 @@ def request_json(
         raise ProbeError(f"{method} {path} failed HTTP {exc.code}: {payload}") from exc
     except Exception as exc:  # noqa: BLE001
         raise ProbeError(f"{method} {path} failed: {exc}") from exc
+
+
+def is_transient_core_read_error(label: str, exc: ProbeError) -> bool:
+    marker = TRANSIENT_CORE_READ_ERRORS.get(label)
+    return bool(marker and marker in str(exc))
+
+
+def request_core_read_json(
+    base_url: str,
+    label: str,
+    path: str,
+    *,
+    token: str,
+    timeout: float,
+) -> tuple[int, Any]:
+    deadline = time.monotonic() + min(max(timeout, 1.0), 15.0)
+    while True:
+        try:
+            return request_json(base_url, "GET", path, token=token, timeout=timeout)
+        except ProbeError as exc:
+            if not is_transient_core_read_error(label, exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
 
 
 def request_raw(
@@ -511,7 +537,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
     def core_reads_gate() -> dict[str, Any]:
         ok: list[str] = []
         for label, path, keys in CORE_READ_ENDPOINTS:
-            _, data = request_json(base_url, "GET", path, token=token(), timeout=args.timeout)
+            _, data = request_core_read_json(base_url, label, path, token=token(), timeout=args.timeout)
             if isinstance(data, dict):
                 require_keys(data, keys, label)
             elif keys:
