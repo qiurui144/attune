@@ -19,6 +19,7 @@ pub const DEFAULT_FULLTEXT_WEIGHT: f32 = 0.4;
 pub const INJECTION_BUDGET: usize = 2000;
 const METADATA_SOURCE_SCAN_LIMIT: usize = 4096;
 const EXACT_SUBSTRING_SCAN_LIMIT: usize = 512;
+const LEXICAL_EXCERPT_MAX_BYTES: usize = 2400;
 
 /// 启用 cross-encoder reranker 的最小候选数。
 /// 候选数 < 此阈值时，RRF 排序比 cross-encoder 重排更稳定（cross-encoder
@@ -164,7 +165,9 @@ fn normalized_ascii_tokens(s: &str) -> HashSet<String> {
         "and", "are", "for", "from", "give", "into", "local", "many", "now", "source", "the",
         "this", "while", "with", "without",
     ];
+    const STEM_EXCEPTIONS: &[&str] = &["dos", "ios", "rtos", "windows"];
     let stopwords: HashSet<&str> = STOPWORDS.iter().copied().collect();
+    let stem_exceptions: HashSet<&str> = STEM_EXCEPTIONS.iter().copied().collect();
     s.to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter_map(|tok| {
@@ -172,7 +175,7 @@ fn normalized_ascii_tokens(s: &str) -> HashSet<String> {
             if tok.len() < 2 || stopwords.contains(tok) {
                 return None;
             }
-            let stemmed = if tok.len() > 3 && tok.ends_with('s') {
+            let stemmed = if tok.len() > 3 && tok.ends_with('s') && !stem_exceptions.contains(tok) {
                 &tok[..tok.len() - 1]
             } else {
                 tok
@@ -195,6 +198,13 @@ fn source_hint_text(r: &SearchResult) -> String {
         out.push('\n');
     }
     out.to_ascii_lowercase()
+}
+
+fn token_matches_with_prefix(query_token: &str, source_token: &str) -> bool {
+    query_token == source_token
+        || query_token.len() >= 3
+            && source_token.len() >= 3
+            && (query_token.starts_with(source_token) || source_token.starts_with(query_token))
 }
 
 fn source_phrase_boost(query: &str, source: &str) -> f32 {
@@ -437,10 +447,141 @@ pub fn apply_source_hint_boost(query: &str, results: &mut [SearchResult]) {
         let source_tokens = normalized_ascii_tokens(&source);
         let overlap = query_tokens
             .iter()
-            .filter(|tok| source_tokens.contains(*tok))
+            .filter(|tok| {
+                source_tokens
+                    .iter()
+                    .any(|source_tok| token_matches_with_prefix(tok, source_tok))
+            })
             .count();
         let token_boost = (overlap as f32 * 0.018).min(0.12);
         r.score += token_boost + source_phrase_boost(query, &source);
+    }
+}
+
+fn platform_hints(query: &str) -> HashSet<&'static str> {
+    let tokens = normalized_ascii_tokens(query);
+    let mut hints = HashSet::new();
+    if tokens.contains("rtos") || tokens.contains("freertos") {
+        hints.insert("rtos");
+    }
+    if tokens.contains("linux") || tokens.contains("tina") {
+        hints.insert("linux");
+    }
+    if tokens.contains("android") {
+        hints.insert("android");
+    }
+    if tokens.contains("windows") || tokens.contains("win") {
+        hints.insert("windows");
+    }
+    hints
+}
+
+fn source_platforms(result: &SearchResult) -> HashSet<&'static str> {
+    let source = source_hint_text(result);
+    let tokens = normalized_ascii_tokens(&source);
+    let mut platforms = HashSet::new();
+    if tokens.contains("rtos") || tokens.contains("freertos") {
+        platforms.insert("rtos");
+    }
+    if tokens.contains("linux") || tokens.contains("tina") {
+        platforms.insert("linux");
+    }
+    if tokens.contains("android") {
+        platforms.insert("android");
+    }
+    if tokens.contains("windows") || tokens.contains("win") {
+        platforms.insert("windows");
+    }
+    platforms
+}
+
+pub fn apply_platform_hint_adjustment(query: &str, results: &mut [SearchResult]) {
+    let hints = platform_hints(query);
+    if hints.is_empty() {
+        return;
+    }
+    for result in results {
+        let platforms = source_platforms(result);
+        if platforms.is_empty() {
+            continue;
+        }
+        let matches = hints.iter().any(|hint| platforms.contains(hint));
+        let conflicts = platforms.iter().any(|platform| !hints.contains(platform));
+        if matches {
+            result.score += 0.70;
+        }
+        if conflicts && !matches {
+            result.score -= 0.90;
+        } else if conflicts {
+            result.score -= 0.20;
+        }
+    }
+}
+
+fn lexical_needle_weight(needle: &str) -> f32 {
+    let has_identifier_punct = needle
+        .chars()
+        .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#' | ':'));
+    if has_identifier_punct && needle.len() >= 8 {
+        6.0
+    } else if has_identifier_punct {
+        4.0
+    } else if needle.len() >= 12 {
+        4.0
+    } else if needle.len() >= 6 {
+        2.0
+    } else {
+        1.0
+    }
+}
+
+fn query_coverage_boost(query: &str, result: &SearchResult) -> f32 {
+    let needles = lexical_needles(query);
+    if needles.is_empty() {
+        return 0.0;
+    }
+
+    let mut haystack = String::new();
+    haystack.push_str(&result.title);
+    haystack.push('\n');
+    if let Some(path) = &result.source_path {
+        haystack.push_str(path);
+        haystack.push('\n');
+    }
+    haystack.push_str(&result.content);
+    let haystack = haystack.to_ascii_lowercase();
+
+    let total_weight: f32 = needles
+        .iter()
+        .map(|needle| lexical_needle_weight(needle))
+        .sum();
+    if total_weight <= 0.0 {
+        return 0.0;
+    }
+
+    let matched_weight: f32 = needles
+        .iter()
+        .filter(|needle| haystack.contains(needle.as_str()))
+        .map(|needle| lexical_needle_weight(needle))
+        .sum();
+    let coverage = matched_weight / total_weight;
+    let absolute = (matched_weight * 0.05).min(0.55);
+    let identifier_hits = needles
+        .iter()
+        .filter(|needle| {
+            needle
+                .chars()
+                .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#' | ':'))
+                && haystack.contains(needle.as_str())
+        })
+        .count();
+
+    (coverage * 0.45) + absolute + (identifier_hits as f32 * 0.10).min(0.30)
+}
+
+pub fn apply_query_coverage_boost(query: &str, results: &mut [SearchResult]) {
+    for result in results {
+        result.score += query_coverage_boost(query, result);
     }
 }
 
@@ -448,6 +589,8 @@ pub fn apply_source_hint_boost(query: &str, results: &mut [SearchResult]) {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchResult {
     pub item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_idx: Option<usize>,
     pub score: f32,
     pub title: String,
     pub content: String,
@@ -578,6 +721,26 @@ pub struct SearchContext<'a> {
     pub reranker: Option<Arc<dyn RerankProvider>>,
     pub store: &'a Store,
     pub dek: &'a crate::crypto::Key32,
+}
+
+const CHUNK_KEY_SEP: &str = "\u{1f}";
+
+fn chunk_hit_key(item_id: &str, chunk_idx: usize) -> String {
+    format!("{item_id}{CHUNK_KEY_SEP}{chunk_idx}")
+}
+
+fn parse_hit_key(key: &str) -> (&str, Option<usize>) {
+    let Some((item_id, chunk)) = key.rsplit_once(CHUNK_KEY_SEP) else {
+        return (key, None);
+    };
+    match chunk.parse::<usize>() {
+        Ok(idx) => (item_id, Some(idx)),
+        Err(_) => (key, None),
+    }
+}
+
+fn hit_key_item_id(key: &str) -> &str {
+    parse_hit_key(key).0
 }
 
 /// RRF 融合两组排名结果
@@ -725,6 +888,217 @@ fn exact_substring_candidates(
     out
 }
 
+fn lexical_content_candidates(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let needles = lexical_needles(query);
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    let total_weight: f32 = needles
+        .iter()
+        .map(|needle| lexical_needle_weight(needle))
+        .sum();
+    if total_weight <= 0.0 {
+        return Vec::new();
+    }
+
+    let Ok(items) = ctx.store.list_items(EXACT_SUBSTRING_SCAN_LIMIT, 0) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Ok(Some(full)) = ctx.store.get_item(ctx.dek, &item.id) else {
+            continue;
+        };
+        let mut source_text = String::new();
+        source_text.push_str(&full.title);
+        source_text.push('\n');
+        if let Some(path) = &full.url {
+            source_text.push_str(path);
+            source_text.push('\n');
+        }
+        let source_text = source_text.to_ascii_lowercase();
+        let content = full.content.to_ascii_lowercase();
+
+        let source_weight: f32 = needles
+            .iter()
+            .filter(|needle| source_text.contains(needle.as_str()))
+            .map(|needle| lexical_needle_weight(needle))
+            .sum();
+        let window_weight = lexical_best_window_score(&content, &needles);
+        let matched_weight = source_weight + window_weight;
+        let coverage = matched_weight / total_weight;
+        if matched_weight >= 3.0 && coverage >= 0.10 {
+            out.push((
+                item.id,
+                0.25 + coverage.min(1.5) + (matched_weight * 0.01).min(0.35),
+            ));
+        }
+    }
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(limit);
+    out
+}
+
+fn lexical_needles(query: &str) -> Vec<String> {
+    let mut needles = Vec::new();
+    let mut current = String::new();
+    let mut current_is_cjk = false;
+
+    let flush = |buf: &mut String, is_cjk: bool, out: &mut Vec<String>| {
+        let s = buf.trim();
+        if is_cjk {
+            let chars = s.chars().collect::<Vec<_>>();
+            if chars.len() >= 2 {
+                for n in 2..=3.min(chars.len()) {
+                    for gram in chars.windows(n) {
+                        out.push(gram.iter().collect::<String>());
+                    }
+                }
+                if chars.len() <= 6 {
+                    out.push(s.to_string());
+                }
+            }
+        } else if s.len() >= 2 {
+            out.push(s.to_ascii_lowercase());
+        }
+        buf.clear();
+    };
+
+    for ch in query.chars() {
+        let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&ch);
+        let is_ascii_ident =
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | '+' | '#' | ':');
+        if is_cjk || is_ascii_ident {
+            if !current.is_empty() && current_is_cjk != is_cjk {
+                flush(&mut current, current_is_cjk, &mut needles);
+            }
+            current_is_cjk = is_cjk;
+            current.push(ch);
+        } else if !current.is_empty() {
+            flush(&mut current, current_is_cjk, &mut needles);
+        }
+    }
+    if !current.is_empty() {
+        flush(&mut current, current_is_cjk, &mut needles);
+    }
+
+    needles.sort();
+    needles.dedup();
+    needles
+}
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+fn lexical_window_score(window: &str, needles: &[String]) -> f32 {
+    needles
+        .iter()
+        .map(|needle| {
+            let count = window.matches(needle).count().min(3) as f32;
+            count * lexical_needle_weight(needle)
+        })
+        .sum()
+}
+
+fn lexical_best_window_score(content: &str, needles: &[String]) -> f32 {
+    let mut best = 0.0f32;
+    for needle in needles {
+        let mut search_from = 0usize;
+        while let Some(rel) = content.get(search_from..).and_then(|s| s.find(needle)) {
+            let pos = search_from + rel;
+            let desired_start = pos.saturating_sub(LEXICAL_EXCERPT_MAX_BYTES / 3);
+            let start = floor_char_boundary(content, desired_start);
+            let end = ceil_char_boundary(
+                content,
+                (start + LEXICAL_EXCERPT_MAX_BYTES).min(content.len()),
+            );
+            if let Some(window) = content.get(start..end) {
+                best = best.max(lexical_window_score(window, needles));
+            }
+            search_from = pos.saturating_add(needle.len()).min(content.len());
+            if search_from >= content.len() {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn lexical_excerpt_for_item(
+    query: &str,
+    content: &str,
+) -> Option<(String, Option<usize>, Option<usize>)> {
+    if content.len() <= LEXICAL_EXCERPT_MAX_BYTES {
+        return None;
+    }
+
+    let needles = lexical_needles(query);
+    if needles.is_empty() {
+        return None;
+    }
+
+    let haystack = content.to_ascii_lowercase();
+    let mut best: Option<(usize, f32, usize)> = None;
+    for needle in &needles {
+        let mut search_from = 0usize;
+        while let Some(rel) = haystack.get(search_from..).and_then(|s| s.find(needle)) {
+            let pos = search_from + rel;
+            let desired_start = pos.saturating_sub(LEXICAL_EXCERPT_MAX_BYTES / 3);
+            let start = floor_char_boundary(content, desired_start);
+            let end = ceil_char_boundary(
+                content,
+                (start + LEXICAL_EXCERPT_MAX_BYTES).min(content.len()),
+            );
+            let Some(window) = haystack.get(start..end) else {
+                search_from = pos.saturating_add(needle.len()).min(haystack.len());
+                continue;
+            };
+            let score = lexical_window_score(window, &needles);
+            let replace = best
+                .map(|(_, best_score, best_start)| {
+                    score > best_score || score == best_score && start < best_start
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((start, score, start));
+            }
+            search_from = pos.saturating_add(needle.len()).min(haystack.len());
+        }
+    }
+
+    let (start, score, _) = best?;
+    if score <= 0.0 {
+        return None;
+    }
+    let end = ceil_char_boundary(
+        content,
+        (start + LEXICAL_EXCERPT_MAX_BYTES).min(content.len()),
+    );
+    content
+        .get(start..end)
+        .map(|excerpt| (excerpt.to_string(), Some(start), Some(end)))
+}
+
 /// Collapse repeated chunk hits to the first/best item hit before RRF.
 ///
 /// Vector search returns chunk-level hits. Without this normalization, a long
@@ -736,7 +1110,7 @@ pub fn dedup_ranked_results(results: Vec<(String, f32)>) -> Vec<(String, f32)> {
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(results.len());
     for (id, score) in results {
-        if seen.insert(id.clone()) {
+        if seen.insert(hit_key_item_id(&id).to_string()) {
             out.push((id, score));
         }
     }
@@ -863,6 +1237,17 @@ pub fn search_with_context(
         ft_results
     };
 
+    let lexical_results = lexical_content_candidates(ctx, query, params.initial_k.min(64));
+    let ft_results = if lexical_results.is_empty() {
+        ft_results
+    } else {
+        log::info!(
+            "search stages: lexical_content_candidates={}",
+            lexical_results.len()
+        );
+        merge_ranked_results(lexical_results, ft_results, params.initial_k)
+    };
+
     let ft_results = if ft_results.is_empty() {
         let exact_results = exact_substring_candidates(ctx, query, params.initial_k);
         if !exact_results.is_empty() {
@@ -902,7 +1287,7 @@ pub fn search_with_context(
                         .search(&qv, params.initial_k)
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|(meta, score)| (meta.item_id, score))
+                        .map(|(meta, score)| (chunk_hit_key(&meta.item_id, meta.chunk_idx), score))
                         .collect();
                     let filtered: Vec<(String, f32)> = match params.min_score {
                         Some(threshold) => {
@@ -944,14 +1329,37 @@ pub fn search_with_context(
 
     // 4. 获取并解密 items + F2 (W3 batch A) 拉 breadcrumb sidecar
     let mut results: Vec<SearchResult> = Vec::new();
-    for (item_id, score) in &fused {
+    for (hit_key, score) in &fused {
+        let (item_id, chunk_idx) = parse_hit_key(hit_key);
         if let Ok(Some(item)) = ctx.store.get_item(ctx.dek, item_id) {
             // breadcrumb 现已加密落盘，需传 dek 解密
-            let (breadcrumb, off_start, off_end) = ctx
-                .store
-                .get_first_chunk_breadcrumb(ctx.dek, &item.id)
-                .ok()
-                .flatten()
+            let chunk_span =
+                chunk_idx.and_then(|idx| ctx.store.get_chunk_span(&item.id, idx).ok().flatten());
+            let chunk_content = chunk_span.and_then(|(start, end, _level, _section_idx)| {
+                item.content
+                    .get(start..end)
+                    .map(|s| (s.to_string(), Some(start), Some(end)))
+            });
+            let (content, span_start, span_end) = chunk_content
+                .or_else(|| lexical_excerpt_for_item(query, &item.content))
+                .unwrap_or_else(|| {
+                    let start = None;
+                    let end = None;
+                    (item.content.clone(), start, end)
+                });
+            let (breadcrumb, off_start, off_end) = chunk_idx
+                .and_then(|idx| {
+                    ctx.store
+                        .get_chunk_breadcrumb(ctx.dek, &item.id, idx)
+                        .ok()
+                        .flatten()
+                })
+                .or_else(|| {
+                    ctx.store
+                        .get_first_chunk_breadcrumb(ctx.dek, &item.id)
+                        .ok()
+                        .flatten()
+                })
                 .map(|(p, s, e)| (p, Some(s), Some(e)))
                 .unwrap_or_default();
             // v0.6 Phase B F-Pro：拉 corpus_domain；item 不存在 / 列缺时回退 'general'
@@ -961,15 +1369,16 @@ pub fn search_with_context(
                 .unwrap_or_else(|_| "general".to_string());
             results.push(SearchResult {
                 item_id: item.id,
+                chunk_idx,
                 score: *score,
                 title: item.title,
-                content: item.content,
+                content,
                 source_type: item.source_type,
                 source_path: item.url,
                 inject_content: None,
                 breadcrumb,
-                chunk_offset_start: off_start,
-                chunk_offset_end: off_end,
+                chunk_offset_start: span_start.or(off_start),
+                chunk_offset_end: span_end.or(off_end),
                 corpus_domain,
             });
         }
@@ -1031,6 +1440,8 @@ pub fn search_with_context(
     // semantic similarity, especially with 512-dim local embeddings and long
     // scanned manuals where large PDFs otherwise dominate by chunk count.
     apply_source_hint_boost(query, &mut results);
+    apply_platform_hint_adjustment(query, &mut results);
+    apply_query_coverage_boost(query, &mut results);
 
     // 最终排序
     results.sort_by(|a, b| {
@@ -1890,6 +2301,287 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item_id, item_id);
         assert!(results[0].content.contains("BOUNDARY_MULTI_MARK"));
+    }
+
+    #[test]
+    fn search_with_context_lexical_hit_injects_matched_excerpt_not_cover() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let cover = "cover page and table of contents\n".repeat(120);
+        let evidence = "The RTOS DMA flow calls hal_dma_chan_request before hal_dma_start and releases resources afterwards.";
+        let content = format!("{cover}\n## DMA API\n\n{evidence}\n");
+        let item_id = store
+            .insert_item(&dek, "rtos dmac manual", &content, None, "file", None, None)
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(&ctx, "hal_dma_chan_request", &params).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+        assert!(results[0].content.contains("hal_dma_chan_request"));
+        assert!(results[0].content.contains("hal_dma_start"));
+        assert!(
+            !results[0].content.starts_with("cover page"),
+            "lexical fallback should not inject the beginning of a long document"
+        );
+        assert!(results[0].chunk_offset_start.unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn query_coverage_boost_prefers_specific_identifier_over_chip_only_hit() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "chip-faq".to_string(),
+                score: 0.30,
+                title: "V821 FAQ".to_string(),
+                content: "V821 RTOS console and board configuration notes".to_string(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "api-manual".to_string(),
+                score: 0.10,
+                title: "RTOS DMAC developer guide".to_string(),
+                content: "DMA flow uses hal_dma_chan_request and then hal_dma_start.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_query_coverage_boost("V821 RTOS hal_dma_chan_request hal_dma_start", &mut results);
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        assert_eq!(results[0].item_id, "api-manual");
+    }
+
+    #[test]
+    fn query_coverage_boost_handles_natural_chinese_action_words() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "platform-memory".to_string(),
+                score: 0.40,
+                title: "V821 RTOS memory guide".to_string(),
+                content: "V821 RTOS reserved memory and kernel boot configuration.".to_string(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "dma-flow".to_string(),
+                score: 0.20,
+                title: "RTOS DMAC developer guide".to_string(),
+                content:
+                    "API 说明：hal_dma_chan_request 申请 DMA 通道。hal_dma_start 启动 DMA 传输。"
+                        .to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_query_coverage_boost(
+            "V821 RTOS 里申请 DMA 通道并启动一次传输，大概按什么流程做？",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        assert_eq!(results[0].item_id, "dma-flow");
+    }
+
+    #[test]
+    fn search_with_context_natural_chinese_query_adds_lexical_content_candidate() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "V821 RTOS memory guide",
+                "V821 RTOS reserved memory and kernel boot configuration. DMA is mentioned in a boot optimization note.",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let dma_id = store
+            .insert_item(
+                &dek,
+                "RTOS DMAC developer guide",
+                "模块接口说明：hal_dma_chan_request 用于申请 DMA 通道；配置描述符后，调用 hal_dma_start 启动 DMA 传输。",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(
+            &ctx,
+            "V821 RTOS 里申请 DMA 通道并启动一次传输，大概按什么流程做？",
+            &params,
+        )
+        .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].item_id, dma_id);
+        assert!(results[0].content.contains("hal_dma_chan_request"));
+    }
+
+    #[test]
+    fn lexical_content_candidates_prefer_local_procedure_evidence_over_scattered_terms() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "Long mixed platform manual",
+                &[
+                    "V821 应用手册提到 RTOS 与 Linux 协同启动。",
+                    &"无关内容。".repeat(300),
+                    "某章节说 DMA 可用于视频缓存。",
+                    &"背景介绍。".repeat(300),
+                    "另一个章节讨论通道资源和一次传输统计，但没有给出接口。",
+                ]
+                .join("\n"),
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let dma_id = store
+            .insert_item(
+                &dek,
+                "RTOS DMAC developer guide",
+                "模块接口说明：hal_dma_chan_request 用于申请 DMA 通道；配置描述符后，调用 hal_dma_start 启动 DMA 传输。",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(
+            &ctx,
+            "V821 RTOS 申请 DMA 通道然后启动一次传输，流程怎么走？",
+            &params,
+        )
+        .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].item_id, dma_id);
+    }
+
+    #[test]
+    fn platform_hint_adjustment_prefers_explicit_rtos_source_over_linux_source() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "linux-dmac".to_string(),
+                score: 0.50,
+                title: "Linux_DMAC_开发指南 - Linux DMAC".to_string(),
+                content: "dma_request_channel 申请 DMA 通道".to_string(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "rtos-dmac".to_string(),
+                score: 0.40,
+                title: "RTOS_DMAC_开发指南 - RTOS DMAC".to_string(),
+                content: "hal_dma_chan_request 申请 DMA 通道".to_string(),
+                ..Default::default()
+            },
+        ];
+        apply_source_hint_boost("RTOS 申请 DMA 通道", &mut results);
+        apply_platform_hint_adjustment("RTOS 申请 DMA 通道", &mut results);
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        assert_eq!(results[0].item_id, "rtos-dmac");
+    }
+
+    #[test]
+    fn search_with_context_returns_matched_vector_chunk_content() {
+        use crate::store::Store;
+        use crate::vectors::{VectorIndex, VectorMeta};
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let content =
+            "front matter and table of contents\n\nactual API evidence TARGET_CHUNK_FUNC call flow\n";
+        let item_id = store
+            .insert_item(&dek, "manual", content, None, "file", None, None)
+            .unwrap();
+        let target_start = content.find("actual API evidence").unwrap();
+        let target_end = content.len();
+        store
+            .upsert_chunk_span(&item_id, 1, target_start, target_end, 2, 1)
+            .unwrap();
+
+        let mut vectors = VectorIndex::new(2).unwrap();
+        vectors
+            .add(
+                &[0.0, 1.0],
+                VectorMeta {
+                    item_id: item_id.clone(),
+                    chunk_idx: 0,
+                    level: 2,
+                    section_idx: 0,
+                },
+            )
+            .unwrap();
+        vectors
+            .add(
+                &[1.0, 0.0],
+                VectorMeta {
+                    item_id: item_id.clone(),
+                    chunk_idx: 1,
+                    level: 2,
+                    section_idx: 1,
+                },
+            )
+            .unwrap();
+        let embedding = Arc::new(CountingEmbeddingProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: Some(&vectors),
+            embedding: Some(embedding),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let results =
+            search_with_context(&ctx, "where is target api", &SearchParams::with_defaults(5))
+                .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+        assert_eq!(results[0].chunk_idx, Some(1));
+        assert!(results[0].content.contains("TARGET_CHUNK_FUNC"));
+        assert!(!results[0].content.contains("table of contents"));
     }
 
     struct CountingEmbeddingProvider {

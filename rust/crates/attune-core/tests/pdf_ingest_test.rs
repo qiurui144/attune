@@ -121,3 +121,15 @@ fn parse_bytes_path_matches_parse_file_for_text_pdf() {
         "parse_bytes lost text: {content:?}"
     );
 }
+
+#[test]
+fn split_extracted_pages_preserves_form_feed_boundaries() {
+    let pages = parser::split_extracted_pages("Page 1 text\n\u{000c}Page 2 text");
+
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].page_number, 1);
+    assert_eq!(pages[0].text.trim(), "Page 1 text");
+    assert_eq!(pages[1].page_number, 2);
+    assert_eq!(pages[1].text.trim(), "Page 2 text");
+    assert!(pages[0].char_end <= pages[1].char_start);
+}

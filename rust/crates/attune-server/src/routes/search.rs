@@ -97,6 +97,15 @@ fn hash_query(query: &str) -> u64 {
     hash
 }
 
+fn hash_search_cache_key(
+    original_query: &str,
+    effective_query: &str,
+    search_params: &SearchParams,
+) -> (u64, String) {
+    let material = format!("v2\0{original_query}\0{effective_query}\0{search_params:?}");
+    (hash_query(&material), material)
+}
+
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn err_500(msg: &str) -> ApiError {
@@ -178,30 +187,6 @@ pub async fn search(
         ));
     }
 
-    let cache_key = hash_query(&params.q);
-    {
-        let mut cache = state
-            .search_cache
-            .lock()
-            .map_err(|_| err_500("cache lock poisoned"))?;
-        if let Some(entry) = cache.get(&cache_key) {
-            // 验证原始 query 字符串防止哈希碰撞返回错误结果
-            if entry.query == params.q && !entry.is_expired() {
-                let cached_latency_ms = t_search_start.elapsed().as_millis() as u64;
-                let eval_block = eval_surface::build_eval_block(&parsed_eval, cached_latency_ms);
-                return Ok(Json(serde_json::json!({
-                    "query": params.q,
-                    "results": entry.results,
-                    "total": entry.results.len(),
-                    "cached": true,
-                    // T2: eval block; null unless X-Attune-Eval-Mode set
-                    "eval": eval_block,
-                    "latency_ms": cached_latency_ms,
-                })));
-            }
-        }
-    }
-
     // query_rewrite：将口语化 query 改写为检索关键词（开关在 settings.search.query_rewrite.enabled）
     //
     // T1 (v1.0.6 KB-bench, plan Step 11): bench harness can pin
@@ -234,6 +219,31 @@ pub async fn search(
         params.intermediate_k,
         Some(&parsed_eval),
     );
+
+    let (cache_key, cache_material) =
+        hash_search_cache_key(&params.q, &effective_query, &search_params);
+    {
+        let mut cache = state
+            .search_cache
+            .lock()
+            .map_err(|_| err_500("cache lock poisoned"))?;
+        if let Some(entry) = cache.get(&cache_key) {
+            // 验证完整 cache material，防止哈希碰撞或不同召回参数复用旧结果。
+            if entry.query == cache_material && !entry.is_expired() {
+                let cached_latency_ms = t_search_start.elapsed().as_millis() as u64;
+                let eval_block = eval_surface::build_eval_block(&parsed_eval, cached_latency_ms);
+                return Ok(Json(serde_json::json!({
+                    "query": params.q,
+                    "results": entry.results,
+                    "total": entry.results.len(),
+                    "cached": true,
+                    // T2: eval block; null unless X-Attune-Eval-Mode set
+                    "eval": eval_block,
+                    "latency_ms": cached_latency_ms,
+                })));
+            }
+        }
+    }
 
     let dek = {
         let vault = state
@@ -285,7 +295,7 @@ pub async fn search(
         cache.put(
             cache_key,
             crate::state::CachedSearch {
-                query: params.q.clone(),
+                query: cache_material,
                 results: results.clone(),
                 created_at: std::time::Instant::now(),
             },
@@ -394,6 +404,26 @@ mod tests {
     #[test]
     fn hash_query_empty() {
         let _ = hash_query("");
+    }
+
+    #[test]
+    fn hash_search_cache_key_includes_effective_query_and_params() {
+        let mut default_params = SearchParams::with_defaults(10);
+        let (base, base_material) =
+            hash_search_cache_key("dma 怎么申请", "dma 怎么申请", &default_params);
+
+        default_params.top_k = 20;
+        let (different_top_k, _) =
+            hash_search_cache_key("dma 怎么申请", "dma 怎么申请", &default_params);
+        assert_ne!(base, different_top_k);
+
+        let (different_effective, different_material) = hash_search_cache_key(
+            "dma 怎么申请",
+            "hal_dma_chan_request",
+            &SearchParams::with_defaults(10),
+        );
+        assert_ne!(base, different_effective);
+        assert_ne!(base_material, different_material);
     }
 
     /// OSS-S14 regression: top_k 必须有上限，否则 top_k=10000 触发 search 卡死

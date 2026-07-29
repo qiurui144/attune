@@ -480,6 +480,19 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 
 ### Rust 实现约定 (v0.7 sprint 增量：记忆护城河)
 
+### RAG / 知识库实现禁止硬编码领域答案（强制）
+
+Codex/agent 修改 RAG、chat、web-demo、scheduler/attune 集成时必须遵守：
+
+1. **生产代码禁止写入具体客户语料、文档名、平台案例、答案符号或路径作为业务逻辑**。例如 `RTOS_DMAC_开发指南`、`Linux_DMAC_开发指南`、`hal_dma_chan_request`、`dma_request_chan`、本机 `/mnt/hdd/allwinner/...` 这类内容只能出现在 tests/e2e fixture、测试报告或用户明确要求的临时验证命令里，不能进入生产判断、prompt、fallback answer、排序规则或 web-demo 默认逻辑。
+2. **允许通用、领域无关的工程规则**，例如“当多个来源平台同时命中时追问澄清”“从证据中抽取 C 风格函数原型”“证据不足时拒答”。这些规则必须从用户问题和检索证据动态推导，不能绑定某个行业、平台、供应商、文档标题或具体接口名。
+3. **需要垂直案例时只写测试**。真实 RTOS/Linux/Allwinner/V821 等案例可作为 regression tests 或 e2e fixtures，测试必须证明通用逻辑能处理该案例；生产实现不能靠该案例关键词通过。
+4. **提交前必须跑硬编码审计**：
+   ```bash
+   bash scripts/no-hardcoded-rag-domain-audit.sh
+   ```
+   有输出即说明生产路径引入了领域/答案级硬编码，必须改为配置、插件、检索证据驱动或测试 fixture。
+
 **文档生命周期协调（v0.7 新规）**:
 - 任何写 items.content 的 path（upload / update / scanner / webdav / ingest）**必须**通过 `attune-core::reindex` 模块走完整 pipeline，禁止直接调 `store.update_item` 后不 reindex
 - 新加 update path 前先看 `routes/items.rs::update_item` 和 `routes/upload.rs::upload_file` 现有 5 步：（1）算 content_hash（2）短路判断（3）DB update（4）若 content_changed → reindex_item 或 enqueue_reindex（5）写 doc_* 信号到 skill_signals

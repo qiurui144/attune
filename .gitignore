@@ -53,6 +53,9 @@ ai-models/**/*.xml
 node_modules/
 extension/dist/
 
+# Rust build output/link targets
+/rust/target
+
 # Packaging
 *.AppImage
 *.exe

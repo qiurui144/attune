@@ -229,6 +229,7 @@ where
     default
 }
 
+#[allow(dead_code)] // Unit-tested metadata helper; integration-test builds compile without cfg(test).
 pub fn rag_metadata(
     coverage: &EvidenceCoverage,
     answer_mode: &'static str,
@@ -245,6 +246,7 @@ pub fn rag_metadata(
     )
 }
 
+#[allow(dead_code)] // Unit-tested metadata helper; integration-test builds compile without cfg(test).
 pub fn rag_metadata_with_retrieval(
     coverage: &EvidenceCoverage,
     answer_mode: &'static str,

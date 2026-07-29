@@ -360,8 +360,7 @@ where
     // Cold-start retry: scheduler may return "async/pending" without a job_id
     // when the target model worker is not yet loaded. Wait up to poll_timeout
     // for the cold-start to complete, then retry the task submission.
-    if response.status.as_deref() == Some("async/pending")
-        && response.effective_job_id().is_none()
+    if response.status.as_deref() == Some("async/pending") && response.effective_job_id().is_none()
     {
         let retry_deadline = std::time::Instant::now() + poll_timeout;
         let retry_request_timeout = Duration::from_secs(30);
@@ -426,12 +425,12 @@ where
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining <= JOB_CANCEL_RESERVE {
-                return timeout_after_best_effort_cancel(client, &job_id, remaining);
+                return timeout_after_best_effort_cancel(client, job_id, remaining);
             }
             if should_cancel() {
                 let cancel_client =
                     client.with_timeout(remaining.min(crate::local_scheduler::SUBMIT_TIMEOUT));
-                let _ = cancel_client.cancel_job(&job_id);
+                let _ = cancel_client.cancel_job(job_id);
                 return Err(VaultError::LlmUnavailable(
                     "local scheduler job cancelled".to_string(),
                 ));
@@ -440,12 +439,12 @@ where
                 .saturating_sub(JOB_CANCEL_RESERVE)
                 .min(crate::local_scheduler::SUBMIT_TIMEOUT);
             let poll_client = client.with_timeout(request_timeout);
-            let job = match poll_client.job(&job_id) {
+            let job = match poll_client.job(job_id) {
                 Ok(job) => job,
                 Err(error) => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining <= JOB_CANCEL_RESERVE {
-                        return timeout_after_best_effort_cancel(client, &job_id, remaining);
+                        return timeout_after_best_effort_cancel(client, job_id, remaining);
                     }
                     return Err(error);
                 }
@@ -463,7 +462,7 @@ where
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining <= JOB_CANCEL_RESERVE {
-                return timeout_after_best_effort_cancel(client, &job_id, remaining);
+                return timeout_after_best_effort_cancel(client, job_id, remaining);
             }
             std::thread::sleep(JOB_POLL_INTERVAL.min(remaining.saturating_sub(JOB_CANCEL_RESERVE)));
         }

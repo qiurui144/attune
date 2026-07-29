@@ -76,6 +76,14 @@ pub struct ParsedDocument {
     pub quality: ParseQuality,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedPage {
+    pub page_number: u32,
+    pub text: String,
+    pub char_start: usize,
+    pub char_end: usize,
+}
+
 impl ParsedDocument {
     fn complete(title: String, content: String) -> Self {
         Self {
@@ -104,6 +112,106 @@ impl ParsedDocument {
             },
         }
     }
+}
+
+pub fn split_extracted_pages(content: &str) -> Vec<ParsedPage> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    let mut pages = Vec::new();
+    let mut page_start = 0usize;
+    let mut page_number = 1u32;
+
+    for (idx, ch) in content.char_indices() {
+        if ch == '\u{000c}' {
+            pages.push(ParsedPage {
+                page_number,
+                text: content[page_start..idx].to_string(),
+                char_start: page_start,
+                char_end: idx,
+            });
+            page_number = page_number.saturating_add(1);
+            page_start = idx + ch.len_utf8();
+        }
+    }
+
+    if pages.is_empty() {
+        return split_scheduler_marked_pages(content);
+    }
+
+    pages.push(ParsedPage {
+        page_number,
+        text: content[page_start..].to_string(),
+        char_start: page_start,
+        char_end: content.len(),
+    });
+    pages
+}
+
+fn split_scheduler_marked_pages(content: &str) -> Vec<ParsedPage> {
+    let mut markers = Vec::new();
+    let mut cursor = 0usize;
+    for raw_line in content.split_inclusive('\n') {
+        let line_start = cursor;
+        cursor += raw_line.len();
+        if scheduler_page_marker_number(raw_line.trim()).is_some() {
+            markers.push((line_start, cursor, raw_line.trim().to_string()));
+        }
+    }
+
+    if markers.len() < 2 {
+        return vec![ParsedPage {
+            page_number: 1,
+            text: content.to_string(),
+            char_start: 0,
+            char_end: content.len(),
+        }];
+    }
+
+    let mut pages = Vec::new();
+    for (idx, (marker_start, marker_end, marker_text)) in markers.iter().enumerate() {
+        let next_marker_start = markers
+            .get(idx + 1)
+            .map(|(start, _, _)| *start)
+            .unwrap_or(content.len());
+        let page_number = scheduler_page_marker_number(marker_text)
+            .unwrap_or_else(|| u32::try_from(idx + 1).unwrap_or(u32::MAX));
+        pages.push(ParsedPage {
+            page_number,
+            text: content[*marker_end..next_marker_start].to_string(),
+            char_start: *marker_end,
+            char_end: next_marker_start,
+        });
+        if idx == 0 && *marker_start > 0 {
+            pages.insert(
+                0,
+                ParsedPage {
+                    page_number: 1,
+                    text: content[..*marker_start].to_string(),
+                    char_start: 0,
+                    char_end: *marker_start,
+                },
+            );
+        }
+    }
+    pages
+}
+
+fn scheduler_page_marker_number(line: &str) -> Option<u32> {
+    let trimmed = line
+        .trim_matches(|c: char| c == '-' || c == '=' || c == '[' || c == ']' || c.is_whitespace());
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("page ")
+        .or_else(|| lower.strip_prefix("page:"))
+        .or_else(|| lower.strip_prefix("p."));
+    rest.and_then(|value| {
+        value
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|part| !part.is_empty())
+            .and_then(|part| part.parse::<u32>().ok())
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -1153,9 +1261,15 @@ fn scheduler_ocr_error_should_retry_same_page(message: &str) -> bool {
         return true;
     }
 
-    if [" returned 408", " returned 429", " returned 502", " returned 503", " returned 504"]
-        .iter()
-        .any(|needle| normalized.contains(needle))
+    if [
+        " returned 408",
+        " returned 429",
+        " returned 502",
+        " returned 503",
+        " returned 504",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
     {
         return true;
     }
@@ -1798,10 +1912,7 @@ fn scheduler_pdf_ocr_max_failed_pages(options: &ParseOptions, page_limit: usize)
     .max(1)
 }
 
-fn scheduler_pdf_ocr_max_consecutive_failures(
-    options: &ParseOptions,
-    page_limit: usize,
-) -> usize {
+fn scheduler_pdf_ocr_max_consecutive_failures(options: &ParseOptions, page_limit: usize) -> usize {
     let page_limit = page_limit.max(1);
     if options.background_ingest_ocr() {
         let configured = env_usize_any_allow_zero_opt(&[
@@ -1894,10 +2005,7 @@ fn scheduler_pdf_ocr_page_timeout(options: &ParseOptions) -> Duration {
         .min(options.scheduler_timeout())
 }
 
-fn scheduler_pdf_ocr_render_timeout(
-    options: &ParseOptions,
-    page_timeout: Duration,
-) -> Duration {
+fn scheduler_pdf_ocr_render_timeout(options: &ParseOptions, page_timeout: Duration) -> Duration {
     if options.background_ingest_ocr() {
         let ms = env_usize_any_clamped(
             &[
@@ -2401,7 +2509,9 @@ fn rendered_ocr_page_strips(data: &[u8], strip_count: usize) -> Result<Vec<Rende
     use image_wire::ImageEncoder;
 
     let image = image_wire::load_from_memory(data)
-        .map_err(|error| VaultError::InvalidInput(format!("OCR page strip decode failed: {error}")))?
+        .map_err(|error| {
+            VaultError::InvalidInput(format!("OCR page strip decode failed: {error}"))
+        })?
         .to_rgba8();
     let width = image.width();
     let height = image.height();
@@ -2450,8 +2560,10 @@ fn rendered_ocr_page_strips(data: &[u8], strip_count: usize) -> Result<Vec<Rende
             .map_err(|error| {
                 VaultError::InvalidInput(format!("OCR page strip PNG encode failed: {error}"))
             })?;
-        let canonical =
-            crate::ocr_image_codec::canonicalize_for_scheduler_with_analysis(&encoded, max_png_bytes)?;
+        let canonical = crate::ocr_image_codec::canonicalize_for_scheduler_with_analysis(
+            &encoded,
+            max_png_bytes,
+        )?;
         strips.push(RenderedOcrStrip {
             png: canonical.png,
             visually_blank: canonical.visually_blank,
@@ -6138,14 +6250,13 @@ mod tests {
             .with_scheduler_timeout_ms(5_000)
             .with_background_ingest_ocr();
 
-        let result =
-            try_scheduler_pdf_page_ocr_from_path_with_budget(
-                &pdf,
-                300,
-                &options,
-                SchedulerPdfOcrBudget::new(&options),
-            )
-            .expect("transient scheduler submit error should retry the same page");
+        let result = try_scheduler_pdf_page_ocr_from_path_with_budget(
+            &pdf,
+            300,
+            &options,
+            SchedulerPdfOcrBudget::new(&options),
+        )
+        .expect("transient scheduler submit error should retry the same page");
         assert!(result.complete, "result={result:?}");
         assert!(
             result.text.contains("same page recovered after restart"),
@@ -6253,14 +6364,13 @@ mod tests {
             .with_scheduler_timeout_ms(5_000)
             .with_background_ingest_ocr();
 
-        let result =
-            try_scheduler_pdf_page_ocr_from_path_with_budget(
-                &pdf,
-                300,
-                &options,
-                SchedulerPdfOcrBudget::new(&options),
-            )
-            .expect("layout-limit OCR error should retry lower DPI and recover text");
+        let result = try_scheduler_pdf_page_ocr_from_path_with_budget(
+            &pdf,
+            300,
+            &options,
+            SchedulerPdfOcrBudget::new(&options),
+        )
+        .expect("layout-limit OCR error should retry lower DPI and recover text");
         assert!(result.complete, "result={result:?}");
         assert!(
             result.text.contains("low DPI recovered text"),
@@ -6371,14 +6481,13 @@ mod tests {
             .with_scheduler_timeout_ms(5_000)
             .with_background_ingest_ocr();
 
-        let result =
-            try_scheduler_pdf_page_ocr_from_path_with_budget(
-                &pdf,
-                300,
-                &options,
-                SchedulerPdfOcrBudget::new(&options),
-            )
-            .expect("layout-limit OCR error should split the page and recover text");
+        let result = try_scheduler_pdf_page_ocr_from_path_with_budget(
+            &pdf,
+            300,
+            &options,
+            SchedulerPdfOcrBudget::new(&options),
+        )
+        .expect("layout-limit OCR error should split the page and recover text");
         assert!(result.complete, "result={result:?}");
         assert!(
             result.text.contains("upper strip recovered text"),

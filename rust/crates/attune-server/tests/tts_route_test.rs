@@ -361,6 +361,7 @@ async fn spawn_attune_with_config(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // The test intentionally holds the vault lock to prove TTS fails fast.
 async fn tts_fails_fast_when_vault_is_busy_without_contacting_scheduler() {
     let (scheduler_base, submitted, scheduler_handle) = spawn_scheduler(valid_speech_audio()).await;
     let (attune_base, attune_handle, _tmp, state) = spawn_attune_with_state(&scheduler_base).await;
@@ -420,6 +421,7 @@ async fn tts_fails_fast_when_vault_is_busy_without_contacting_scheduler() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // The test intentionally holds the vault lock to prove auth checks do not wait.
 async fn tts_fails_fast_when_vault_is_busy_with_auth_enabled() {
     let (scheduler_base, submitted, scheduler_handle) = spawn_scheduler(valid_speech_audio()).await;
     let (attune_base, attune_handle, _tmp, state, token) =
@@ -454,6 +456,7 @@ async fn tts_fails_fast_when_vault_is_busy_with_auth_enabled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // The test intentionally holds the vault lock to cover member reconciliation order.
 async fn tts_fails_fast_before_logged_in_member_reconciliation_can_wait_on_vault() {
     let (scheduler_base, submitted, scheduler_handle) = spawn_scheduler(valid_speech_audio()).await;
     let (attune_base, attune_handle, _tmp, state) = spawn_attune_with_state(&scheduler_base).await;
@@ -703,6 +706,215 @@ async fn ai_stack_and_capability_registry_report_scheduler_tts_ready() {
 }
 
 #[tokio::test]
+async fn voice_status_reports_scheduler_asr_audio_input_routes() {
+    let mut config = MockSchedulerConfig::new(serde_json::json!({}));
+    config.models = serde_json::json!([{
+            "name": "tts-default",
+            "state": "READY_FAST",
+            "lifecycle": "READY",
+            "dispatchable": "FREE"
+        },
+        {
+            "name": "asr-default",
+            "state": "READY_FAST",
+            "lifecycle": "READY",
+            "dispatchable": "FREE"
+    }]);
+    config.runtime_tasks = serde_json::json!([
+        {
+            "name": "kb.speech.synthesize",
+            "stage": "tts",
+            "model": "tts-default",
+            "async_only": true
+        },
+        {
+            "name": "kb.meeting.asr_frontend",
+            "stage": "asr",
+            "model": "asr-default",
+            "async_only": true
+        }
+    ]);
+    let (scheduler_base, _submitted, _cancel_seen, scheduler_handle) =
+        spawn_scheduler_custom(config).await;
+    let (attune_base, attune_handle, _tmp) = spawn_attune(&scheduler_base).await;
+    let client = reqwest::Client::new();
+
+    let status: serde_json::Value = client
+        .get(format!("{attune_base}/api/v1/voice/status"))
+        .send()
+        .await
+        .expect("GET voice status")
+        .error_for_status()
+        .expect("voice status success")
+        .json()
+        .await
+        .expect("voice status JSON");
+    assert_eq!(status["schema_version"], "attune.voice.v1");
+    assert_eq!(status["routes"]["transcribe"], "/api/v1/voice/transcribe");
+    assert_eq!(
+        status["routes"]["transcribe_file"],
+        "/api/v1/voice/transcribe-file"
+    );
+    assert_eq!(
+        status["routes"]["legacy_transcribe"],
+        "/api/v1/office/transcribe"
+    );
+    assert_eq!(status["asr"]["available"], true);
+    assert_eq!(status["asr"]["registered"], true);
+    assert_eq!(status["asr"]["task"], "kb.meeting.asr_frontend");
+    assert_eq!(status["asr"]["model"], "asr-default");
+
+    attune_handle.abort();
+    scheduler_handle.abort();
+}
+
+#[tokio::test]
+async fn voice_status_reports_asr_unavailable_when_task_model_is_not_ready() {
+    let mut config = MockSchedulerConfig::new(serde_json::json!({}));
+    config.models = serde_json::json!([{
+        "name": "tts-default",
+        "state": "READY_FAST",
+        "lifecycle": "READY",
+        "dispatchable": "FREE"
+    }]);
+    config.runtime_tasks = serde_json::json!([
+        {
+            "name": "kb.speech.synthesize",
+            "stage": "tts",
+            "model": "tts-default",
+            "async_only": true
+        },
+        {
+            "name": "kb.meeting.asr_frontend",
+            "stage": "asr",
+            "model": "asr-default",
+            "async_only": true
+        }
+    ]);
+    let (scheduler_base, _submitted, _cancel_seen, scheduler_handle) =
+        spawn_scheduler_custom(config).await;
+    let (attune_base, attune_handle, _tmp) = spawn_attune(&scheduler_base).await;
+
+    let status: serde_json::Value = reqwest::Client::new()
+        .get(format!("{attune_base}/api/v1/voice/status"))
+        .send()
+        .await
+        .expect("GET voice status")
+        .error_for_status()
+        .expect("voice status success")
+        .json()
+        .await
+        .expect("voice status JSON");
+    assert_eq!(status["asr"]["registered"], true);
+    assert_eq!(status["asr"]["model"], "asr-default");
+    assert_eq!(status["asr"]["available"], false);
+    assert_eq!(
+        status["asr"]["note"],
+        "local scheduler 已注册 ASR task，但 asr-default 模型尚未配置或不可调度"
+    );
+
+    attune_handle.abort();
+    scheduler_handle.abort();
+}
+
+#[tokio::test]
+async fn voice_transcribe_blocks_when_asr_model_is_not_ready_before_file_validation() {
+    let mut config = MockSchedulerConfig::new(serde_json::json!({}));
+    config.models = serde_json::json!([{
+        "name": "tts-default",
+        "state": "READY_FAST",
+        "lifecycle": "READY",
+        "dispatchable": "FREE"
+    }]);
+    config.runtime_tasks = serde_json::json!([
+        {
+            "name": "kb.speech.synthesize",
+            "stage": "tts",
+            "model": "tts-default",
+            "async_only": true
+        },
+        {
+            "name": "kb.meeting.asr_frontend",
+            "stage": "asr",
+            "model": "asr-default",
+            "async_only": true
+        }
+    ]);
+    let (scheduler_base, _submitted, _cancel_seen, scheduler_handle) =
+        spawn_scheduler_custom(config).await;
+    let (attune_base, attune_handle, _tmp) = spawn_attune(&scheduler_base).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{attune_base}/api/v1/voice/transcribe"))
+        .json(&serde_json::json!({
+            "file_path": "/tmp/attune-voice-missing-file.wav"
+        }))
+        .send()
+        .await
+        .expect("POST voice transcribe");
+
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = response.json().await.expect("voice transcribe JSON");
+    assert_eq!(body["code"], "voice-asr-not-ready");
+    assert_eq!(body["task"], "kb.meeting.asr_frontend");
+    assert_eq!(body["model"], "asr-default");
+
+    attune_handle.abort();
+    scheduler_handle.abort();
+}
+
+#[tokio::test]
+async fn voice_transcribe_file_accepts_frontend_uploaded_complete_audio_when_asr_ready() {
+    let mut config = MockSchedulerConfig::new(serde_json::json!({}));
+    config.models = serde_json::json!([{
+        "name": "asr-default",
+        "state": "READY_FAST",
+        "lifecycle": "READY",
+        "dispatchable": "FREE"
+    }]);
+    config.runtime_tasks = serde_json::json!([{
+        "name": "kb.meeting.asr_frontend",
+        "stage": "asr",
+        "model": "asr-default",
+        "async_only": true
+    }]);
+    let (scheduler_base, _submitted, _cancel_seen, scheduler_handle) =
+        spawn_scheduler_custom(config).await;
+    let (attune_base, attune_handle, _tmp, state) = spawn_attune_with_state(&scheduler_base).await;
+    state.install_job_store();
+
+    let file_part = reqwest::multipart::Part::bytes(b"RIFF....WAVEfmt ".to_vec())
+        .file_name("sample.wav")
+        .mime_str("audio/wav")
+        .expect("audio mime");
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("language", "auto");
+    let response = reqwest::Client::new()
+        .post(format!("{attune_base}/api/v1/voice/transcribe-file"))
+        .multipart(form)
+        .send()
+        .await
+        .expect("POST voice transcribe file");
+
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.expect("voice file JSON");
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{body}");
+    assert!(body["job_id"]
+        .as_str()
+        .is_some_and(|job_id| !job_id.is_empty()));
+    assert_eq!(
+        body["ws_url"],
+        format!(
+            "/api/v1/office/jobs/ws?job_id={}",
+            body["job_id"].as_str().unwrap()
+        )
+    );
+    attune_handle.abort();
+    scheduler_handle.abort();
+}
+
+#[tokio::test]
 async fn ai_stack_reports_tts_registered_but_unavailable_without_model() {
     let (scheduler_base, _submitted, scheduler_handle) =
         spawn_scheduler(serde_json::json!({})).await;
@@ -739,6 +951,55 @@ async fn ai_stack_reports_tts_registered_but_unavailable_without_model() {
         .expect("TTS capability");
     assert_eq!(tts["health"], "unavailable");
     assert_eq!(tts["enabled"], false);
+
+    attune_handle.abort();
+    scheduler_handle.abort();
+}
+
+#[tokio::test]
+async fn ai_stack_reports_asr_registered_but_unavailable_without_model() {
+    let mut config = MockSchedulerConfig::new(serde_json::json!({}));
+    config.models = serde_json::json!([{
+        "name": "tts-default",
+        "state": "READY_FAST",
+        "lifecycle": "READY",
+        "dispatchable": "FREE"
+    }]);
+    config.runtime_tasks = serde_json::json!([
+        {
+            "name": "kb.speech.synthesize",
+            "stage": "tts",
+            "model": "tts-default",
+            "async_only": true
+        },
+        {
+            "name": "kb.meeting.asr_frontend",
+            "stage": "asr",
+            "model": "asr-default",
+            "async_only": true
+        }
+    ]);
+    let (scheduler_base, _submitted, _cancel_seen, scheduler_handle) =
+        spawn_scheduler_custom(config).await;
+    let (attune_base, attune_handle, _tmp) = spawn_attune(&scheduler_base).await;
+
+    let stack: serde_json::Value = reqwest::Client::new()
+        .get(format!("{attune_base}/api/v1/ai_stack"))
+        .send()
+        .await
+        .expect("GET ai_stack")
+        .error_for_status()
+        .expect("ai_stack success")
+        .json()
+        .await
+        .expect("ai_stack JSON");
+    assert_eq!(stack["asr"]["registered"], true);
+    assert_eq!(stack["asr"]["model"], "asr-default");
+    assert_eq!(stack["asr"]["available"], false);
+    assert_eq!(
+        stack["asr"]["note"],
+        "local scheduler 已注册 ASR task，但 asr-default 模型尚未配置或不可调度"
+    );
 
     attune_handle.abort();
     scheduler_handle.abort();

@@ -103,12 +103,9 @@ pub fn sync_email_account(
                             }
                         }
                     }
-                    if existing
-                        .as_ref()
-                        .is_some_and(|row| {
-                            row.file_hash == marker && !marker.is_empty() && existing_item_active
-                        })
-                    {
+                    if existing.as_ref().is_some_and(|row| {
+                        row.file_hash == marker && !marker.is_empty() && existing_item_active
+                    }) {
                         skipped_items += 1;
                         handled = true;
                     } else {
@@ -151,9 +148,8 @@ pub fn sync_email_account(
                                     old_item_id = Some(old.clone());
                                 }
                                 Err(e) => {
-                                    errors.push(format!(
-                                        "{source_ref}: check shared item refs {e}"
-                                    ));
+                                    errors
+                                        .push(format!("{source_ref}: check shared item refs {e}"));
                                     continue;
                                 }
                             }
@@ -186,8 +182,9 @@ pub fn sync_email_account(
                                         }
                                         handled = true;
                                     }
-                                    Err(e) => errors
-                                        .push(format!("{source_ref}: persist tracking {e}")),
+                                    Err(e) => {
+                                        errors.push(format!("{source_ref}: persist tracking {e}"))
+                                    }
                                 }
                             }
                             Ok(IngestOutcome::Updated { item_id, .. }) => {
@@ -201,8 +198,9 @@ pub fn sync_email_account(
                                         updated_items += 1;
                                         handled = true;
                                     }
-                                    Err(e) => errors
-                                        .push(format!("{source_ref}: persist tracking {e}")),
+                                    Err(e) => {
+                                        errors.push(format!("{source_ref}: persist tracking {e}"))
+                                    }
                                 }
                             }
                             Ok(IngestOutcome::Duplicate { item_id }) => {
@@ -232,9 +230,7 @@ pub fn sync_email_account(
                                     &retry_marker,
                                     &item_id,
                                 ) {
-                                    errors.push(format!(
-                                        "{source_ref}: persist retry marker {e}"
-                                    ));
+                                    errors.push(format!("{source_ref}: persist retry marker {e}"));
                                 } else {
                                     errors.push(format!(
                                         "{source_ref}: retryable degraded extraction: {reason}"

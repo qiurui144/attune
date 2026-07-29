@@ -5,6 +5,7 @@ use attune_core::store::audit::PrivacyTier;
 
 use crate::eval::ParsedEvalHeaders;
 
+#[allow(clippy::too_many_arguments)] // Public route glue passes the existing retrieval knobs explicitly.
 pub(crate) fn build_search_params(
     form_factor: FormFactor,
     use_local_scheduler_profile: bool,

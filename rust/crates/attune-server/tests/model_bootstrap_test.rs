@@ -90,9 +90,16 @@ async fn spawn_model_bootstrap_is_non_blocking_and_marks_scheduler_managed_ready
 
     for class in MODEL_CLASSES {
         let phase = state.model_bootstrap.phase(class).expect("phase present");
-        assert_eq!(phase, ModelPhase::Ready, "{class} should be scheduler-managed Ready");
+        assert_eq!(
+            phase,
+            ModelPhase::Ready,
+            "{class} should be scheduler-managed Ready"
+        );
     }
-    assert!(state.embedding().is_some(), "embedding provider handle must be installed");
+    assert!(
+        state.embedding().is_some(),
+        "embedding provider handle must be installed"
+    );
     assert!(
         state
             .reranker

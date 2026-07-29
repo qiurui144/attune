@@ -16,6 +16,8 @@
 //! `ingest_document` 本身只负责"这份文档怎么入库"，不做源特定的增量判断。
 
 use crate::crypto::Key32;
+use crate::document_model::{DocumentNode, NodeKind};
+use crate::document_transform::{transform_document, TransformInput};
 use crate::error::Result;
 use crate::ingest::connector::RawDocument;
 use crate::store::items::compute_content_hash;
@@ -113,6 +115,18 @@ pub fn enqueue_content_embeddings(
             None => s.to_string(),
         }
     };
+    let mut span_cursor = 0usize;
+    if let Some(count) = enqueue_structured_content_embeddings(
+        store,
+        item_id,
+        content,
+        chunking,
+        &tag_chunk,
+        &mut span_cursor,
+    )? {
+        return Ok(count);
+    }
+
     let mut chunk_counter: usize = 0;
     let sections = chunker::extract_sections(content);
 
@@ -121,8 +135,19 @@ pub fn enqueue_content_embeddings(
             if section_text.trim().is_empty() {
                 continue;
             }
+            let span = locate_chunk_span(content, section_text, &mut span_cursor);
             let tagged = tag_chunk(section_text);
             store.enqueue_embedding(item_id, chunk_counter, &tagged, 1, 1, *section_idx)?;
+            if let Some((span_start, span_end)) = span {
+                store.upsert_chunk_span(
+                    item_id,
+                    chunk_counter,
+                    span_start,
+                    span_end,
+                    1,
+                    *section_idx,
+                )?;
+            }
             chunk_counter += 1;
         }
     }
@@ -136,14 +161,288 @@ pub fn enqueue_content_embeddings(
                 if chunk_text.trim().is_empty() {
                     continue;
                 }
+                let span = locate_chunk_span(content, &chunk_text, &mut span_cursor);
                 let tagged = tag_chunk(&chunk_text);
                 store.enqueue_embedding(item_id, chunk_counter, &tagged, 2, 2, *section_idx)?;
+                if let Some((span_start, span_end)) = span {
+                    store.upsert_chunk_span(
+                        item_id,
+                        chunk_counter,
+                        span_start,
+                        span_end,
+                        2,
+                        *section_idx,
+                    )?;
+                }
                 chunk_counter += 1;
             }
         }
     }
 
     Ok(chunk_counter)
+}
+
+fn enqueue_structured_content_embeddings(
+    store: &Store,
+    item_id: &str,
+    content: &str,
+    chunking: chunker::ChunkingOptions,
+    tag_chunk: &dyn Fn(&str) -> String,
+    span_cursor: &mut usize,
+) -> Result<Option<usize>> {
+    let outline = transform_document(TransformInput {
+        document_id: item_id.to_string(),
+        title: item_id.to_string(),
+        source_path: None,
+        text: content.to_string(),
+    });
+    let indexable_nodes = outline
+        .nodes
+        .iter()
+        .filter(|node| structured_node_is_indexable(node))
+        .collect::<Vec<_>>();
+    if indexable_nodes.len() < 3 {
+        return Ok(None);
+    }
+
+    let structured_chunks = structured_outline_embedding_chunks(&indexable_nodes, chunking);
+    if structured_chunks_exceed_legacy_budget(content, chunking, structured_chunks.len()) {
+        return Ok(None);
+    }
+
+    let mut chunk_counter = 0usize;
+    for (section_idx, chunk) in structured_chunks.into_iter().enumerate() {
+        if chunk.level == 1 && !chunking.include_level1
+            || chunk.level == 2 && !chunking.include_level2
+        {
+            continue;
+        }
+        for chunk_text in chunker::chunk(&chunk.text, chunking.chunk_size, chunking.overlap) {
+            if chunk_text.trim().is_empty() {
+                continue;
+            }
+            let span = locate_chunk_span(content, &chunk_text, span_cursor);
+            let tagged = tag_chunk(&chunk_text);
+            store.enqueue_embedding(
+                item_id,
+                chunk_counter,
+                &tagged,
+                chunk.level,
+                chunk.level,
+                section_idx,
+            )?;
+            if let Some((span_start, span_end)) = span {
+                store.upsert_chunk_span(
+                    item_id,
+                    chunk_counter,
+                    span_start,
+                    span_end,
+                    chunk.level,
+                    section_idx,
+                )?;
+            }
+            chunk_counter += 1;
+        }
+    }
+
+    if chunk_counter == 0 {
+        return Ok(None);
+    }
+    Ok(Some(chunk_counter))
+}
+
+fn locate_chunk_span(
+    content: &str,
+    chunk_text: &str,
+    cursor: &mut usize,
+) -> Option<(usize, usize)> {
+    let needle = chunk_text.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    let start_at = next_char_boundary(content, (*cursor).min(content.len()));
+    if let Some(rel) = content.get(start_at..).and_then(|s| s.find(needle)) {
+        let start = start_at + rel;
+        let end = start + needle.len();
+        *cursor = next_char_boundary(content, start.saturating_add(1));
+        return Some((start, end));
+    }
+    if let Some(start) = content.find(needle) {
+        let end = start + needle.len();
+        *cursor = next_char_boundary(content, start.saturating_add(1));
+        return Some((start, end));
+    }
+    None
+}
+
+fn next_char_boundary(content: &str, idx: usize) -> usize {
+    if idx >= content.len() {
+        return content.len();
+    }
+    let mut cursor = idx;
+    while cursor < content.len() && !content.is_char_boundary(cursor) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn structured_chunks_exceed_legacy_budget(
+    content: &str,
+    chunking: chunker::ChunkingOptions,
+    structured_count: usize,
+) -> bool {
+    let legacy_count = legacy_embedding_chunk_estimate(content, chunking);
+    let allowed = legacy_count.saturating_mul(2).max(512);
+    structured_count > allowed
+}
+
+fn legacy_embedding_chunk_estimate(content: &str, chunking: chunker::ChunkingOptions) -> usize {
+    let sections = chunker::extract_sections(content);
+    let mut count = 0usize;
+    if chunking.include_level1 {
+        count += sections
+            .iter()
+            .filter(|(_, section_text)| !section_text.trim().is_empty())
+            .count();
+    }
+    if chunking.include_level2 {
+        count += sections
+            .iter()
+            .filter(|(_, section_text)| !section_text.trim().is_empty())
+            .map(|(_, section_text)| {
+                chunker::chunk(section_text, chunking.chunk_size, chunking.overlap).len()
+            })
+            .sum::<usize>();
+    }
+    count.max(1)
+}
+
+#[derive(Debug)]
+struct StructuredEmbeddingChunk {
+    level: i32,
+    text: String,
+}
+
+fn structured_node_is_indexable(node: &DocumentNode) -> bool {
+    if node.text.trim().is_empty() {
+        return false;
+    }
+    !matches!(
+        node.kind,
+        NodeKind::Title
+            | NodeKind::Section
+            | NodeKind::Toc
+            | NodeKind::HeaderFooter
+            | NodeKind::FigureCaption
+    )
+}
+
+fn structured_node_level(kind: NodeKind) -> i32 {
+    match kind {
+        NodeKind::Section | NodeKind::Procedure => 1,
+        _ => 2,
+    }
+}
+
+fn structured_outline_embedding_chunks(
+    nodes: &[&DocumentNode],
+    chunking: chunker::ChunkingOptions,
+) -> Vec<StructuredEmbeddingChunk> {
+    let mut chunks = Vec::new();
+    let mut current: Option<StructuredChunkBuilder> = None;
+    let target_size = chunking
+        .chunk_size
+        .max(crate::chunker::MIN_CONFIGURED_CHUNK_SIZE);
+
+    for node in nodes {
+        let key = StructuredChunkKey::from_node(node);
+        if current.as_ref().is_some_and(|builder| {
+            builder.key != key || builder.would_exceed(&node.text, target_size)
+        }) {
+            if let Some(done) = current.take().and_then(StructuredChunkBuilder::finish) {
+                chunks.push(done);
+            }
+        }
+        let builder = current.get_or_insert_with(|| StructuredChunkBuilder::new(key));
+        builder.push(node);
+    }
+
+    if let Some(done) = current.and_then(StructuredChunkBuilder::finish) {
+        chunks.push(done);
+    }
+
+    chunks
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuredChunkKey {
+    kind: NodeKind,
+    section_path: Vec<String>,
+}
+
+impl StructuredChunkKey {
+    fn from_node(node: &DocumentNode) -> Self {
+        Self {
+            kind: structured_embedding_kind(node.kind),
+            section_path: node.section_path.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StructuredChunkBuilder {
+    key: StructuredChunkKey,
+    body: String,
+}
+
+impl StructuredChunkBuilder {
+    fn new(key: StructuredChunkKey) -> Self {
+        Self {
+            key,
+            body: String::new(),
+        }
+    }
+
+    fn would_exceed(&self, next_line: &str, target_size: usize) -> bool {
+        !self.body.is_empty() && self.body.len() + next_line.len() + 1 > target_size
+    }
+
+    fn push(&mut self, node: &DocumentNode) {
+        if !self.body.is_empty() {
+            self.body.push('\n');
+        }
+        self.body.push_str(node.text.trim());
+    }
+
+    fn finish(self) -> Option<StructuredEmbeddingChunk> {
+        if self.body.trim().is_empty() {
+            return None;
+        }
+        let section = if self.key.section_path.is_empty() {
+            String::new()
+        } else {
+            format!("[section: {}]\n", self.key.section_path.join(" > "))
+        };
+        Some(StructuredEmbeddingChunk {
+            level: structured_node_level(self.key.kind),
+            text: format!("[kind: {:?}]\n{section}{}", self.key.kind, self.body),
+        })
+    }
+}
+
+fn structured_embedding_kind(kind: NodeKind) -> NodeKind {
+    match kind {
+        NodeKind::Title | NodeKind::Toc | NodeKind::HeaderFooter | NodeKind::FigureCaption => {
+            NodeKind::Paragraph
+        }
+        NodeKind::Section => NodeKind::Section,
+        NodeKind::ApiReference => NodeKind::ApiReference,
+        NodeKind::Procedure | NodeKind::ProcedureStep => NodeKind::ProcedureStep,
+        NodeKind::CodeBlock | NodeKind::CommandBlock => NodeKind::CommandBlock,
+        NodeKind::ConfigBlock => NodeKind::ConfigBlock,
+        NodeKind::Troubleshooting => NodeKind::Troubleshooting,
+        NodeKind::Table | NodeKind::TableRow | NodeKind::Paragraph => NodeKind::Paragraph,
+    }
 }
 
 /// 把一份 `RawDocument` 走完统一五步（Inserted / Duplicate / Skipped 三态）。
@@ -525,7 +824,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        empty_parse_fallback_quality, metadata_only_content, title_with_source_ref, IngestOutcome,
+        empty_parse_fallback_quality, locate_chunk_span, metadata_only_content,
+        title_with_source_ref, IngestOutcome,
     };
     use crate::ingest::{RawDocument, SourceKind};
     use crate::parser::ParseQuality;
@@ -713,5 +1013,14 @@ mod tests {
             reason: "empty content after parse".into(),
         };
         assert!(format!("{skip:?}").contains("Skipped"));
+    }
+
+    #[test]
+    fn locate_chunk_span_cursor_stays_on_char_boundary() {
+        let content = "前缀 • 项目\n第二段 • TARGET\n第三段";
+        let mut cursor = content.find('•').unwrap() + 1;
+        let span = locate_chunk_span(content, "第二段 • TARGET", &mut cursor).unwrap();
+        assert_eq!(&content[span.0..span.1], "第二段 • TARGET");
+        assert!(content.is_char_boundary(cursor));
     }
 }

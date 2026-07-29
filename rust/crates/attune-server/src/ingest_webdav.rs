@@ -148,7 +148,9 @@ pub fn sync_webdav_dir(
                         );
                     }
                     if let Err(e) = store.record_signal_event("doc_update", id, None) {
-                        tracing::debug!("sync_webdav_dir: record_signal_event failed for {id}: {e}");
+                        tracing::debug!(
+                            "sync_webdav_dir: record_signal_event failed for {id}: {e}"
+                        );
                     }
                     old_item_id = Some(id.clone());
                 }

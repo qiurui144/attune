@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 DEB="${ATTUNE_K3_DEB:-}"
+WEB_DEMO_DEB="${ATTUNE_K3_WEB_DEMO_DEB:-}"
 HOST="${ATTUNE_K3_HOST:-}"
 SSH_USER="${ATTUNE_K3_SSH_USER:-root}"
 SSH_OPTS_RAW="${ATTUNE_K3_SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
@@ -12,7 +13,7 @@ BASE_URL="${ATTUNE_K3_BASE_URL:-}"
 SCHEDULER_URL="${ATTUNE_K3_SCHEDULER_URL:-}"
 REPORTS_DIR="$ROOT/reports/release"
 REMOTE_TMP="${ATTUNE_K3_REMOTE_TMP:-}"
-PASSWORD="${ATTUNE_K3_E2E_PASSWORD:-e2e-pass-2026}"
+PASSWORD="${ATTUNE_K3_E2E_PASSWORD:-}"
 BIND_DIR="${ATTUNE_K3_BACKGROUND_BIND_DIR:-}"
 LONGTEXT_MANIFEST="${ATTUNE_K3_LONGTEXT_MANIFEST:-}"
 LONGTEXT_E2E="${ATTUNE_K3_LONGTEXT_E2E:-0}"
@@ -54,6 +55,10 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --deb)
       DEB="${2:-}"
+      shift 2
+      ;;
+    --web-demo-deb)
+      WEB_DEMO_DEB="${2:-}"
       shift 2
       ;;
     --host)
@@ -108,6 +113,7 @@ Usage:
 
 Options:
   --deb <path>           Debian package to install/validate.
+  --web-demo-deb <path>  Optional attune-web-demo companion Debian package.
   --host <ssh-host>      SSH host for install and server-side fixture setup.
   --ssh-user <user>      SSH user. Defaults to root.
   --base-url <url>       Attune Web/API base URL. Defaults to http://<host>:18900.
@@ -154,6 +160,7 @@ Environment:
                                 k3_rag_release_smoke.
   ATTUNE_K3_EVAL_OUT            Optional JSON output path for the RAG eval suite.
   ATTUNE_K3_WEB_DEMO_BASE_URL   Optional kb-web-demo frontend URL for Playwright simulation.
+                                Defaults to http://<host>:8968 when --web-demo-deb is installed.
   ATTUNE_K3_WEB_DEMO_API_URL    Optional kb-web-demo API proxy URL. Defaults to ATTUNE_K3_BASE_URL.
   ATTUNE_K3_WEB_DEMO_OUT        Optional JSON output path for kb-web-demo frontend metrics.
   ATTUNE_K3_WEB_DEMO_PROFILE    kb-web-demo Playwright profile: smoke or deep. Defaults to smoke.
@@ -262,6 +269,12 @@ fi
 if [ -n "$WEB_DEMO_BASE_URL" ] && [ -z "$WEB_DEMO_API_URL" ]; then
   WEB_DEMO_API_URL="$BASE_URL"
 fi
+if [ -z "$WEB_DEMO_BASE_URL" ] && [ -n "$WEB_DEMO_DEB" ] && [ -n "$HOST" ]; then
+  WEB_DEMO_BASE_URL="http://$HOST:8968"
+fi
+if [ -z "$WEB_DEMO_API_URL" ] && [ -n "$WEB_DEMO_DEB" ] && [ -n "$HOST" ]; then
+  WEB_DEMO_API_URL="http://$HOST:8969"
+fi
 if [ -n "$WEB_DEMO_BASE_URL" ] && [ -z "$WEB_DEMO_OUT" ]; then
   WEB_DEMO_OUT="$REPORTS_DIR/kb-web-demo-frontend-$TS.json"
 fi
@@ -276,6 +289,10 @@ if [ -n "$SSH_PASSWORD" ] && [ "$DRY_RUN" != "1" ] && ! command -v sshpass >/dev
   echo "ATTUNE_K3_SSH_PASSWORD requires sshpass on the CI runner" >&2
   exit 2
 fi
+if [ -z "$PASSWORD" ] && [ "$DRY_RUN" != "1" ]; then
+  echo "ATTUNE_K3_E2E_PASSWORD is required for live K3 validation" >&2
+  exit 2
+fi
 
 log() {
   printf '[k3-demo] %s\n' "$*"
@@ -288,6 +305,7 @@ report_header() {
     echo "- Timestamp: $(date -Iseconds)"
     echo "- Commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- Deb: ${DEB:-<none>}"
+    echo "- Web demo deb: ${WEB_DEMO_DEB:-<none>}"
     echo "- Host: ${HOST:-<none>}"
     echo "- SSH user: $SSH_USER"
     echo "- SSH opts: ${SSH_OPTS_RAW:-<none>}"
@@ -461,6 +479,7 @@ run_kb_web_demo_frontend_gate() {
     --base-url "$WEB_DEMO_BASE_URL" \
     --api-url "$WEB_DEMO_API_URL" \
     --out "$WEB_DEMO_OUT" \
+    --token "$TOKEN" \
     --profile "$WEB_DEMO_PROFILE" \
     --headless "${ATTUNE_HEADLESS:-1}"
   append_report "- Result: pass"
@@ -471,12 +490,14 @@ report_header
 if [ "$DRY_RUN" = "1" ]; then
   append_report "## Planned Gates"
   append_report "- Check .deb architecture is riscv64 unless --skip-deb-check is set."
+  append_report "- Check attune-web-demo .deb architecture is all or riscv64 when --web-demo-deb is provided."
   append_report "- Install package on K3/NAS over SSH unless --skip-install is set."
+  append_report "- Install attune-web-demo companion package and restart attune-web-demo services when --web-demo-deb is provided."
   append_report "- Restart attune-server.service and check Web health."
   append_report "- Probe scheduler contract when scheduler URL is provided."
   append_report "- K3 RVV Runtime Performance Gate: run worker_benchmark_gate.py and require scheduler RVV/IME metadata when scheduler URL is provided; live scheduler latency thresholds block only when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
-  append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, and chat scheduler metadata."
+  append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, dynamic model capability, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, Summary Workflow Gate, and chat scheduler metadata."
   append_report "- RAG Eval Suite Gate: when ATTUNE_K3_EVAL_SUITE is set, validate manifests with scripts/eval/validate-manifests.py and run scripts/eval/run-suite.py against the Attune Web/API base URL, writing ATTUNE_K3_EVAL_OUT or an auto reports/release JSON path."
   append_report "- KB Web Demo Frontend Gate: when ATTUNE_K3_WEB_DEMO_BASE_URL is set, run tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py against kb-web-demo to validate upload, vector chunk display, Chat RAG, Summary RAG, citations, and timing display; set ATTUNE_K3_WEB_DEMO_PROFILE=deep for complex chat/summary coverage; output goes to ATTUNE_K3_WEB_DEMO_OUT."
   append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=1 clears any OCR-disabling systemd drop-in before corpus bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=0 only to isolate retrieval/vector behavior."
@@ -504,6 +525,19 @@ if [ "$SKIP_DEB_CHECK" != "1" ]; then
     exit 1
   fi
   sha256sum "$DEB" | tee -a "$REPORT"
+  if [ -n "$WEB_DEMO_DEB" ]; then
+    if [ ! -f "$WEB_DEMO_DEB" ]; then
+      echo "web demo deb not found: $WEB_DEMO_DEB" >&2
+      exit 2
+    fi
+    WEB_DEMO_ARCH="$(dpkg-deb -f "$WEB_DEMO_DEB" Architecture)"
+    echo "Web demo Architecture: $WEB_DEMO_ARCH" >> "$REPORT"
+    if [ "$WEB_DEMO_ARCH" != "all" ] && [ "$WEB_DEMO_ARCH" != "riscv64" ]; then
+      echo "expected web demo package architecture all or riscv64, got $WEB_DEMO_ARCH" >&2
+      exit 1
+    fi
+    sha256sum "$WEB_DEMO_DEB" | tee -a "$REPORT"
+  fi
 else
   append_report "Skipped by --skip-deb-check."
 fi
@@ -517,7 +551,12 @@ if [ "$SKIP_INSTALL" != "1" ]; then
   remote "mkdir -p '$REMOTE_TMP'"
   run_ssh "uname -m && sed -n '1,8p' /etc/os-release"
   run_scp "$DEB" "$SSH_TARGET:$REMOTE_TMP/"
-  remote "dpkg -i '$REMOTE_TMP/$(basename "$DEB")' || apt-get -f install -y"
+  remote "DEBIAN_FRONTEND=noninteractive dpkg --force-confnew -i '$REMOTE_TMP/$(basename "$DEB")' || DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confnew -f install -y"
+  if [ -n "$WEB_DEMO_DEB" ]; then
+    run_scp "$WEB_DEMO_DEB" "$SSH_TARGET:$REMOTE_TMP/"
+    remote "DEBIAN_FRONTEND=noninteractive dpkg --force-confnew -i '$REMOTE_TMP/$(basename "$WEB_DEMO_DEB")' || DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confnew -f install -y"
+    remote "systemctl restart attune-web-demo-proxy.service attune-web-demo.service && systemctl is-active attune-web-demo-proxy.service && systemctl is-active attune-web-demo.service"
+  fi
   remote "systemctl restart attune-server.service && systemctl is-active attune-server.service"
   remote "systemctl status attune-server.service --no-pager | sed -n '1,20p'"
 else
@@ -702,6 +741,8 @@ if [ "$API_CONTRACT" = "1" ]; then
   fi
   run python3 "${API_CONTRACT_ARGS[@]}"
   append_report "- API contract JSON: $API_CONTRACT_JSON"
+  append_report "- dynamic model capability: covered by NAS Web API contract gate."
+  append_report "- Summary Workflow Gate: covered by NAS Web API contract gate."
 else
   append_report "Skipped because ATTUNE_K3_API_CONTRACT=0."
 fi
@@ -812,7 +853,12 @@ def poll_scheduler_job(job_id: str):
     raise SystemExit(f"local scheduler chat job did not finish within {job_timeout}s: {last}")
 
 
-body = {"message": "用一句话说明 attune-k3-nas-web-bind-token 这个测试文档是否在知识库里。"}
+body = {
+    "message": (
+        "请只使用《k3-nas-web-gate - Attune K3 NAS Web gate》这个来源，"
+        "用一句话说明 attune-k3-nas-web-bind-token 是否在知识库里。"
+    )
+}
 _, data = request_json(base + "/api/v1/chat", method="POST", body=body, timeout=180)
 print(f"chat status=200 keys={sorted(data.keys())}")
 text = json.dumps(data, ensure_ascii=False)
@@ -823,6 +869,8 @@ if not isinstance(answer, str) or not answer.strip():
     raise SystemExit(f"chat returned empty answer/content: {data}")
 local_scheduler = data.get("local_scheduler")
 if require_scheduler:
+    if data.get("clarification_required") is True:
+        raise SystemExit(f"chat gate prompt was still ambiguous: {data}")
     if not isinstance(local_scheduler, dict):
         raise SystemExit(f"chat did not return local_scheduler metadata: {data}")
     task = local_scheduler.get("task")

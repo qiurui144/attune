@@ -46,10 +46,41 @@ assert {
     "multi_intent_decision",
     "negative_evidence_boundary",
     "out_of_manual_industry_general",
-    "summary_citation_coverage",
 }.issubset(case_ids)
+summary_case_ids = {case["case_id"] for case in report["artifacts"]["summary_cases"]}
+assert {
+    "summary_recent_core",
+    "summary_folder_overview",
+    "summary_compare_sources",
+    "summary_risk_gap",
+}.issubset(summary_case_ids)
 assert "web_demo_complex_chat_pass_rate" in report["metrics"]["frontend"]
 assert report["metrics"]["frontend"]["web_demo_complex_chat_pass_rate"] == 1.0
+assert "web_demo_summary_workflow_pass_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_summary_workflow_pass_rate"] == 1.0
+assert "web_demo_model_switch_gate_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_model_switch_gate_rate"] == 1.0
+for case in report["artifacts"]["summary_cases"]:
+    assert {"select", "map", "synthesize", "audit"}.issubset(set(case["required_stages"]))
+PY
+
+python3 "$SCRIPT" --dry-run --profile rtos --out /tmp/attune-kb-web-demo-eval-frontend-rtos-dry-run.json >/tmp/attune-kb-web-demo-eval-frontend-rtos-dry-run.txt
+python3 - /tmp/attune-kb-web-demo-eval-frontend-rtos-dry-run.json <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report["profile"] == "rtos"
+assert report["artifacts"]["rtos_case"]["question"] == "rtos开发中如何在ccu开发中查询时钟的type和id"
+assert report["artifacts"]["rtos_case"]["source_file"] == "RTOS_CCU_开发指南.pdf"
+assert report["artifacts"]["rtos_dmac_case"]["question"] == "给我rtos中dmac申请dma通道的函数接口"
+assert report["artifacts"]["rtos_dmac_case"]["source_file"] == "RTOS_DMAC_开发指南.pdf"
+assert "/mnt/hdd/allwinner/v821/tina-v821-release-v1.1/tina-v821-release/docs/pdf/其他文档/RTOS" in report["artifacts"]["rtos_case"]["corpus_dir"]
+assert "web_demo_rtos_manual_howto_pass_rate" in report["metrics"]["frontend"]
+assert "web_demo_rtos_dmac_howto_pass_rate" in report["metrics"]["frontend"]
+required = report["artifacts"]["rtos_dmac_case"]["required_evidence_groups"]
+assert "hal_dma_chan_request" in required["interface"]
+assert "dma_request_chan" in required["forbidden_linux_interfaces"]
 PY
 
 echo "eval web-demo frontend contract PASS"

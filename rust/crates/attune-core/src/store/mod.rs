@@ -650,6 +650,23 @@ CREATE TABLE IF NOT EXISTS chunk_breadcrumbs (
 );
 -- 删除冗余 idx_chunk_breadcrumbs_item，PK 前缀已可用
 
+-- Chunk byte spans for retrieval evidence injection.
+--
+-- Vector metadata already stores (item_id, chunk_idx), but search must be able
+-- to recover the matched chunk text after completed embed_queue rows are
+-- cleaned. These offsets are byte ranges into encrypted items.content after it
+-- is decrypted at query time. They do not store plaintext content.
+CREATE TABLE IF NOT EXISTS chunk_spans (
+    item_id       TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    chunk_idx     INTEGER NOT NULL,
+    offset_start  INTEGER NOT NULL,
+    offset_end    INTEGER NOT NULL,
+    level         INTEGER NOT NULL,
+    section_idx   INTEGER NOT NULL,
+    PRIMARY KEY (item_id, chunk_idx)
+);
+-- 删除冗余 idx_chunk_spans_item，PK 前缀已可用
+
 -- G1 浏览状态信号 (W3 batch B, 2026-04-27)
 -- per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
 -- url + title 加密（用户浏览历史属隐私）；engagement 数值明文便于聚合查询。
@@ -1474,8 +1491,14 @@ impl Store {
     /// `(dir_id, path)`.
     fn migrate_indexed_files_source_scope(conn: &Connection) -> Result<()> {
         if !Self::indexed_files_needs_source_scope_rebuild(conn)? {
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id)", [])?;
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_if_path ON indexed_files(path)", [])?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_if_path ON indexed_files(path)",
+                [],
+            )?;
             return Ok(());
         }
 
@@ -1542,10 +1565,16 @@ impl Store {
         if Self::indexed_files_has_unique_index(conn, &["path"])? {
             return Ok(true);
         }
-        Ok(!Self::indexed_files_has_unique_index(conn, &["dir_id", "path"])?)
+        Ok(!Self::indexed_files_has_unique_index(
+            conn,
+            &["dir_id", "path"],
+        )?)
     }
 
-    fn indexed_files_has_unique_index(conn: &Connection, expected_columns: &[&str]) -> Result<bool> {
+    fn indexed_files_has_unique_index(
+        conn: &Connection,
+        expected_columns: &[&str],
+    ) -> Result<bool> {
         let mut stmt = conn.prepare("PRAGMA index_list('indexed_files')")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
@@ -2310,6 +2339,27 @@ mod tests {
     }
 
     #[test]
+    fn get_item_stats_counts_only_embedding_tasks() {
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = store
+            .insert_item(&dek, "Test", "content", None, "note", None, None)
+            .unwrap();
+
+        store
+            .enqueue_embedding(&id, 0, "chunk one", 1, 1, 0)
+            .unwrap();
+        let task = store.dequeue_embeddings(1).unwrap().remove(0);
+        store.mark_embedding_done(task.id).unwrap();
+        store.enqueue_classify(&id, 1).unwrap();
+
+        let stats = store.get_item_stats(&id).unwrap().unwrap();
+        assert_eq!(stats.chunk_count, 1);
+        assert_eq!(stats.embedding_done, 1);
+        assert_eq!(stats.embedding_pending, 0);
+    }
+
+    #[test]
     fn get_item_stats_missing() {
         let store = Store::open_memory().unwrap();
         let result = store.get_item_stats("nonexistent-id").unwrap();
@@ -2708,10 +2758,7 @@ mod tests_indexed_files {
             .unwrap();
 
         let row = store
-            .get_indexed_file_for_dir(
-                "rss-feed-1",
-                "rss-feed-1#tag:example.com,2026:entry.txt",
-            )
+            .get_indexed_file_for_dir("rss-feed-1", "rss-feed-1#tag:example.com,2026:entry.txt")
             .unwrap()
             .expect("RSS tracking row should be persisted");
         assert_eq!(row.dir_id, "rss-feed-1");
@@ -2721,8 +2768,12 @@ mod tests_indexed_files {
     #[test]
     fn test_indexed_file_source_scope_allows_same_ref_in_two_sources() {
         let store = open_store();
-        let dir_a = store.bind_directory("/tmp/source-a", false, &["md"]).unwrap();
-        let dir_b = store.bind_directory("/tmp/source-b", false, &["md"]).unwrap();
+        let dir_a = store
+            .bind_directory("/tmp/source-a", false, &["md"])
+            .unwrap();
+        let dir_b = store
+            .bind_directory("/tmp/source-b", false, &["md"])
+            .unwrap();
         let item_a = insert_test_item(&store);
         let item_b = insert_test_item(&store);
 
@@ -2789,7 +2840,10 @@ mod tests_indexed_files {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(bound_dir_fk_count, 0, "source tracking must not require bound_dirs parent rows");
+        assert_eq!(
+            bound_dir_fk_count, 0,
+            "source tracking must not require bound_dirs parent rows"
+        );
 
         conn.execute(
             "INSERT INTO indexed_files

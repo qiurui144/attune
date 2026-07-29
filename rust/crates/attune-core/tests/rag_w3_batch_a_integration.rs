@@ -124,6 +124,7 @@ fn f2_search_result_has_breadcrumb_field() {
     use attune_core::search::SearchResult;
     let sr = SearchResult {
         item_id: "x".into(),
+        chunk_idx: None,
         score: 0.5,
         title: "T".into(),
         content: "C".into(),

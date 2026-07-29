@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -23,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bind-dir", required=True)
     parser.add_argument("--scenario", default="tests/eval/scenarios/security/security_scale_coverage.json")
     parser.add_argument("--report-out", required=True)
-    parser.add_argument("--password", default="e2e-pass-2026")
+    parser.add_argument("--password", default=os.environ.get("ATTUNE_E2E_PASSWORD", os.environ.get("ATTUNE_VAULT_PW", "")))
     parser.add_argument("--wait-seconds", type=int, default=900)
     parser.add_argument("--chat-timeout", type=float, default=240.0)
     return parser.parse_args()
@@ -400,6 +401,8 @@ def validate_turn(
 
 def main() -> int:
     args = parse_args()
+    if not args.password:
+        raise SystemExit("--password, ATTUNE_E2E_PASSWORD, or ATTUNE_VAULT_PW is required")
     scenario = json.loads(Path(args.scenario).read_text(encoding="utf-8"))
     started = time.time()
     report: dict[str, Any] = {

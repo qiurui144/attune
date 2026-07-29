@@ -239,7 +239,11 @@ fn classify_riscv_npu(present: bool) -> Accelerator {
         vendor: "spacemit",
         present,
         driver_ready: present,
-        notes: if present { "Spacemit A100 (ime2): local-scheduler runtime".to_string() } else { String::new() },
+        notes: if present {
+            "Spacemit A100 (ime2): local-scheduler runtime".to_string()
+        } else {
+            String::new()
+        },
     }
 }
 

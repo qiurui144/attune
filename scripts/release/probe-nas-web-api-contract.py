@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -59,7 +60,7 @@ class ProbeError(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--password", default="e2e-pass-2026")
+    parser.add_argument("--password", default=os.environ.get("ATTUNE_E2E_PASSWORD", os.environ.get("ATTUNE_VAULT_PW", "")))
     parser.add_argument("--token", default="")
     parser.add_argument("--bind-dir", default="")
     parser.add_argument("--scheduler-url", default="")
@@ -190,6 +191,48 @@ def request_multipart_upload(
             return resp.status, parse_json(resp.read())
     except urllib.error.HTTPError as exc:
         raise ProbeError(f"POST /api/v1/upload failed HTTP {exc.code}: {parse_json(exc.read())}") from exc
+
+
+def request_multipart_voice_upload(
+    base_url: str,
+    token: str,
+    filename: str,
+    content: bytes,
+    timeout: float,
+    allow_statuses: set[int] | None = None,
+) -> tuple[int, Any]:
+    allow_statuses = allow_statuses or set()
+    boundary = f"attune-voice-contract-{int(time.time() * 1000)}"
+    payload = b"".join(
+        [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
+            b"Content-Type: audio/wav\r\n\r\n",
+            content,
+            b"\r\n",
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="language"\r\n\r\n',
+            b"auto\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    req = urllib.request.Request(
+        f"{base_url}/api/v1/voice/transcribe-file",
+        data=payload,
+        headers={
+            **auth_headers(token),
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, parse_json(resp.read())
+    except urllib.error.HTTPError as exc:
+        payload = parse_json(exc.read())
+        if exc.code in allow_statuses:
+            return exc.code, payload
+        raise ProbeError(f"POST /api/v1/voice/transcribe-file failed HTTP {exc.code}: {payload}") from exc
 
 
 def require(condition: bool, message: str) -> None:
@@ -445,6 +488,26 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
             require(probe.get("found") is True, f"probe-edge-scheduler did not find scheduler-native endpoint: {probe}")
         return probe
 
+    def model_capability_gate() -> dict[str, Any]:
+        _, data = request_json(base_url, "GET", "/api/v1/ai-stack", token=token(), timeout=args.timeout)
+        payload = require_json_object(data, "ai-stack model capability")
+        rows = payload.get("model_capabilities")
+        if rows is None and isinstance(payload.get("scheduler"), dict):
+            rows = payload["scheduler"].get("model_capabilities")
+        require(isinstance(rows, list), "ai-stack missing model_capabilities list")
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            require(isinstance(row, dict), f"model_capabilities rows must be objects: {row}")
+            name = row.get("name")
+            capabilities = row.get("capabilities")
+            require(isinstance(name, str) and name.strip(), f"model_capability row missing model name: {row}")
+            require(isinstance(capabilities, list), f"model_capability row missing capabilities: {row}")
+            normalized.append({"name": name, "capabilities": [str(item) for item in capabilities], "ready": row.get("ready")})
+        all_capabilities = {cap for row in normalized for cap in row["capabilities"]}
+        require("chat" in all_capabilities, f"model_capability did not expose chat capability: {normalized}")
+        require("summary" in all_capabilities, f"model_capability did not expose summary capability: {normalized}")
+        return {"models": normalized, "capabilities": sorted(all_capabilities)}
+
     def core_reads_gate() -> dict[str, Any]:
         ok: list[str] = []
         for label, path, keys in CORE_READ_ENDPOINTS:
@@ -627,6 +690,109 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
             return {"task": task, "job": job_summary}
         return {"scheduler_metadata": isinstance(meta, dict)}
 
+    def summary_workflow_gate() -> dict[str, Any]:
+        _, data = request_json(
+            base_url,
+            "POST",
+            "/api/v1/summary/workflow",
+            body={
+                "scenario": "risk",
+                "detail": "attune-nas-web-api-bind-token",
+                "model": args.scheduler_chat_model,
+                "top_k": 6,
+            },
+            token=token(),
+            timeout=args.timeout,
+        )
+        payload = require_json_object(data, "summary workflow")
+        content = payload.get("content") or payload.get("summary") or ""
+        require(isinstance(content, str) and content.strip(), "summary workflow returned empty content")
+        sections = payload.get("summary_sections")
+        require(isinstance(sections, dict), "summary workflow missing summary_sections object")
+        require("core_conclusions" in sections, "summary_sections missing core_conclusions")
+        require("risks_or_gaps" in sections, "summary_sections missing risks_or_gaps")
+        citations = payload.get("citations")
+        require(isinstance(citations, list), "summary workflow missing citations list")
+        workflow = payload.get("summary_workflow")
+        require(isinstance(workflow, dict), "summary workflow missing summary_workflow metadata")
+        stages = workflow.get("stages") or payload.get("workflow_stages")
+        require(isinstance(stages, list), "summary workflow missing multi-stage stages list")
+        stage_names = [stage.get("name") for stage in stages if isinstance(stage, dict)]
+        for required_stage in ("select", "map", "synthesize", "audit"):
+            require(required_stage in stage_names, f"summary workflow missing stage {required_stage}: {stage_names}")
+        return {
+            "scenario": payload.get("scenario"),
+            "model": payload.get("model"),
+            "knowledge_count": payload.get("knowledge_count"),
+            "citations": len(citations),
+            "stages": stage_names,
+        }
+
+    def voice_scheduler_gate() -> dict[str, Any]:
+        _, status_payload = request_json(
+            base_url,
+            "GET",
+            "/api/v1/voice/status",
+            token=token(),
+            timeout=args.timeout,
+        )
+        status = require_json_object(status_payload, "voice status")
+        require(status.get("schema_version") == "attune.voice.v1", "voice status schema mismatch")
+        routes = require_json_object(status.get("routes", {}), "voice routes")
+        require("synthesize" not in routes, "voice routes must not expose server-side synthesize packaging")
+        require(routes.get("transcribe") == "/api/v1/voice/transcribe", "voice transcribe route missing")
+        require(routes.get("transcribe_file") == "/api/v1/voice/transcribe-file", "voice transcribe-file route missing")
+        require("tts" not in status, "voice status must stay scoped to ASR/audio input")
+        asr = require_json_object(status.get("asr", {}), "voice asr")
+        require(asr.get("task") == "kb.meeting.asr_frontend", "voice asr task mismatch")
+        transcribe_status, transcribe_error = request_json(
+            base_url,
+            "POST",
+            "/api/v1/voice/transcribe",
+            body={"file_path": "/tmp/attune-nas-web-api-contract-missing.wav"},
+            token=token(),
+            timeout=args.timeout,
+            allow_statuses={400, 503},
+        )
+        transcribe_error = require_json_object(transcribe_error, "voice transcribe validation")
+        transcribe_code = transcribe_error.get("code")
+        require(
+            (transcribe_status == 400 and transcribe_code == "invalid-input")
+            or (transcribe_status == 503 and transcribe_code == "voice-asr-not-ready"),
+            f"voice transcribe did not expose Attune ASR validation/gate: HTTP {transcribe_status} {transcribe_error}",
+        )
+        upload_status, upload_payload = request_multipart_voice_upload(
+            base_url,
+            token(),
+            "attune-voice-contract.wav",
+            b"RIFF....WAVEfmt ",
+            args.timeout,
+            allow_statuses={503},
+        )
+        upload_payload = require_json_object(upload_payload, "voice transcribe-file")
+        require(
+            (upload_status == 202 and isinstance(upload_payload.get("job_id"), str) and upload_payload.get("job_id"))
+            or (upload_status == 503 and upload_payload.get("code") == "voice-asr-not-ready"),
+            f"voice transcribe-file did not expose Attune audio upload gate: HTTP {upload_status} {upload_payload}",
+        )
+        job_id = upload_payload.get("job_id") if upload_status == 202 else None
+        if isinstance(job_id, str) and job_id:
+            request_json(
+                base_url,
+                "DELETE",
+                f"/api/v1/office/jobs/{urllib.parse.quote(job_id, safe='')}",
+                token=token(),
+                timeout=args.timeout,
+                allow_statuses={404},
+            )
+        return {
+            "status_route": "/api/v1/voice/status",
+            "transcribe_route": routes.get("transcribe"),
+            "transcribe_file_route": routes.get("transcribe_file"),
+            "transcribe_file_status": upload_status,
+            "asr_available": asr.get("available"),
+        }
+
     def cleanup_gate() -> dict[str, Any]:
         deleted_items = 0
         deleted_dirs = 0
@@ -646,12 +812,15 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         ("vault", vault_gate),
         ("settings_scheduler", settings_scheduler_gate),
         ("scheduler_probe", scheduler_probe_gate),
+        ("model_capability", model_capability_gate),
         ("core_reads", core_reads_gate),
         ("upload", upload_gate),
         ("index_bind", index_bind_gate),
         ("index_rescan", index_rescan_gate),
         ("vector_indexing", vector_indexing_gate),
         ("export", export_gate),
+        ("summary_workflow", summary_workflow_gate),
+        ("voice_scheduler", voice_scheduler_gate),
         ("chat_scheduler", chat_scheduler_gate),
     ]
     results = [gate_result(name, fn) for name, fn in gates]
@@ -687,11 +856,14 @@ def dry_run(args: argparse.Namespace) -> dict[str, Any]:
             "vault",
             "settings_scheduler",
             "scheduler_probe",
+            "model_capability",
             "core_reads",
             "upload",
             "index_bind",
             "vector_indexing",
             "export",
+            "summary_workflow",
+            "voice_scheduler",
             "chat_scheduler",
             "cleanup",
         ],
@@ -700,6 +872,7 @@ def dry_run(args: argparse.Namespace) -> dict[str, Any]:
             "server_scheduler_base is persisted into Attune settings and is evaluated from the NAS host",
             "scheduler_url is used only by the CI runner for scheduler probes or job polling",
             "scheduler instability observations are emitted from scheduler_probe, chat_scheduler, and job telemetry",
+            "voice_scheduler validates Attune /api/v1/voice/status, /api/v1/voice/transcribe, and /api/v1/voice/transcribe-file; clients must not call scheduler audio endpoints directly",
         ],
         "scheduler_observations": [],
         "pass": True,
@@ -708,6 +881,8 @@ def dry_run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    if not args.dry_run and not args.password and not args.token:
+        raise ProbeError("--password, --token, ATTUNE_E2E_PASSWORD, or ATTUNE_VAULT_PW is required")
     result = dry_run(args) if args.dry_run else run_live(args)
     text = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
     if args.out:

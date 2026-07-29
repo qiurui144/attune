@@ -6,6 +6,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+#[allow(clippy::result_large_err)] // Middleware returns Axum Response directly as the existing error contract.
 fn lock_vault_for_request<'a>(
     state: &'a SharedState,
     path: &str,

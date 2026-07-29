@@ -110,7 +110,12 @@ fn delete_email_account_removes_row() {
         )
         .unwrap();
     store
-        .upsert_indexed_file(&dir_id, "email:imap.gmail.com/INBOX/999", "INBOX:999", &item_id)
+        .upsert_indexed_file(
+            &dir_id,
+            "email:imap.gmail.com/INBOX/999",
+            "INBOX:999",
+            &item_id,
+        )
         .unwrap();
     store.delete_email_account(&dir_id).unwrap();
     assert!(store.get_email_account(&dek, &dir_id).unwrap().is_none());
@@ -120,7 +125,10 @@ fn delete_email_account_removes_row() {
         "email_folder_uids 应随账户级联删除"
     );
     assert!(
-        store.list_indexed_files_for_dir(&dir_id).unwrap().is_empty(),
+        store
+            .list_indexed_files_for_dir(&dir_id)
+            .unwrap()
+            .is_empty(),
         "indexed_files 只是账号增量 tracking，删除账号时应清理"
     );
     assert!(

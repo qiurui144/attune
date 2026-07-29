@@ -9,8 +9,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
-use crate::ingest::IngestOptions;
 use crate::ingest::local::{LocalDocumentRead, LocalFileCandidate};
+use crate::ingest::IngestOptions;
 use crate::store::{IndexedFileRow, IndexedFileStatMarker, Store};
 
 /// 扫描结果
@@ -169,7 +169,10 @@ fn scan_one_document(
         ingest_document_replacing_with_options, ingest_document_with_options, IngestOutcome,
     };
 
-    let LocalDocumentRead { document: doc, stat } = read;
+    let LocalDocumentRead {
+        document: doc,
+        stat,
+    } = read;
     result.total_files += 1;
     let marker = doc.modified_marker.clone().unwrap_or_default();
 
@@ -193,15 +196,17 @@ fn scan_one_document(
     let had_prior = prior_active_item_id.is_some();
     let old_item_id: Option<String> = match &prior {
         Some(row)
-            if row.file_hash == marker
-                && !marker.is_empty()
-                && prior_active_item_id.is_some() =>
+            if row.file_hash == marker && !marker.is_empty() && prior_active_item_id.is_some() =>
         {
             if let Some(item_id) = row.item_id.as_deref() {
                 if row.stat != stat {
-                    if let Err(e) =
-                        store.upsert_indexed_file_with_stat(dir_id, &doc.source_ref, &marker, item_id, stat)
-                    {
+                    if let Err(e) = store.upsert_indexed_file_with_stat(
+                        dir_id,
+                        &doc.source_ref,
+                        &marker,
+                        item_id,
+                        stat,
+                    ) {
                         log::warn!(
                             "scanner: failed to refresh stat marker for {}: {e}",
                             doc.source_ref
@@ -319,8 +324,7 @@ fn scan_one_document(
                 &retry_marker,
                 &item_id,
                 stat,
-            )
-            {
+            ) {
                 log::warn!(
                     "scanner: failed to persist retryable marker for {}: {error}",
                     doc.source_ref
@@ -428,11 +432,13 @@ fn purge_removed_local_files(
                 log::warn!("scanner: delete removed local item {item_id} failed: {e}");
             } else {
                 if let Err(e) = store.enqueue_reindex(item_id, "purge") {
-                result.errors += 1;
-                log::warn!("scanner: enqueue purge for removed local item {item_id} failed: {e}");
-            }
+                    result.errors += 1;
+                    log::warn!(
+                        "scanner: enqueue purge for removed local item {item_id} failed: {e}"
+                    );
+                }
                 if let Err(e) = store.record_signal_event("doc_delete", item_id, None) {
-                log::debug!("scanner: record doc_delete failed for {item_id}: {e}");
+                    log::debug!("scanner: record doc_delete failed for {item_id}: {e}");
                 }
             }
         }
@@ -571,10 +577,9 @@ mod tests {
         file.set_len(101 * 1024 * 1024).unwrap();
         drop(file);
         let source_ref = path.to_string_lossy().to_string();
-        let stat = crate::ingest::local::stat_marker_from_metadata(
-            &std::fs::metadata(&path).unwrap(),
-        )
-        .unwrap();
+        let stat =
+            crate::ingest::local::stat_marker_from_metadata(&std::fs::metadata(&path).unwrap())
+                .unwrap();
 
         let dir_id = store
             .bind_directory(tmp.path().to_str().unwrap(), true, &["md"])
@@ -723,7 +728,11 @@ mod tests {
         let first =
             scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
         assert_eq!(first.total_files, 2);
-        assert_eq!(store.item_count().unwrap(), 1, "duplicate content shares one item");
+        assert_eq!(
+            store.item_count().unwrap(),
+            1,
+            "duplicate content shares one item"
+        );
         let shared_item = store
             .get_indexed_file_for_dir(&dir_id, &source_b)
             .unwrap()

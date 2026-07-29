@@ -582,7 +582,7 @@ pub async fn research(
             .filter(|result| {
                 scope
                     .as_ref()
-                    .is_none_or(|watch_scope| watch_scope.contains(&result.item_id))
+                    .map_or(true, |watch_scope| watch_scope.contains(&result.item_id))
             })
             .collect();
         contains_l0 = {

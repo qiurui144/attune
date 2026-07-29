@@ -180,7 +180,10 @@ impl Store {
             "DELETE FROM email_accounts WHERE dir_id = ?1",
             params![dir_id],
         )?;
-        tx.execute("DELETE FROM indexed_files WHERE dir_id = ?1", params![dir_id])?;
+        tx.execute(
+            "DELETE FROM indexed_files WHERE dir_id = ?1",
+            params![dir_id],
+        )?;
         tx.commit()?;
         Ok(())
     }

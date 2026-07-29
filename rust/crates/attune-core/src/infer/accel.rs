@@ -442,8 +442,8 @@ pub fn recommend_ep_chain_pure(
                 );
                 continue;
             }
-            AccelKind::RiscvNpu => continue,// RISC-V NPU 走 scheduler，不经过 ORT EP 链
-            AccelKind::Cpu => continue, // CPU 由末尾兜底统一加
+            AccelKind::RiscvNpu => continue, // RISC-V NPU 走 scheduler，不经过 ORT EP 链
+            AccelKind::Cpu => continue,      // CPU 由末尾兜底统一加
         };
         push_first_compiled(&mut chain, candidates, &is_compiled);
     }

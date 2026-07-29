@@ -22,6 +22,7 @@ pub async fn get_settings(State(state): State<SharedState>) -> AppResult<Json<se
     // Upgrade overlay: older persisted settings predate the TTS block. Fill
     // only missing TTS keys so an existing user choice is never overwritten.
     ensure_tts_defaults(&mut json);
+    ensure_rag_defaults(&mut json);
     // 电源策略持久化恢复(L_hw 0.4):启动时 UI 拉 settings → 把持久化的电池策略幂等
     // 应用到 resource_governor(默认 Throttle/20 已在引擎层兜底;此处恢复用户的非默认档)。
     apply_persisted_power_policy(&json);
@@ -69,6 +70,28 @@ fn validate_pluginhub_url(raw: &str) -> Result<(), String> {
             return Err("pluginhub.url 不能指向 loopback/private/link-local 地址".into());
         }
         return Err("pluginhub.url 不允许裸 IP host; 请使用公网域名".into());
+    }
+    Ok(())
+}
+
+fn validate_optional_u64_range(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    min: u64,
+    max: u64,
+    label: &str,
+) -> Result<(), String> {
+    let Some(value) = object.get(key) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(value) = value.as_u64() else {
+        return Err(format!("{label} 必须是正整数或 null"));
+    };
+    if !(min..=max).contains(&value) {
+        return Err(format!("{label} 须在 {min}-{max}(当前 {value})"));
     }
     Ok(())
 }
@@ -209,6 +232,67 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
                 .ok_or_else(|| "tts.format 必须是字符串".to_string())?;
             crate::routes::tts::validate_format(format)
                 .map_err(|error| format!("tts.format 无效: {error}"))?;
+        }
+    }
+    if let Some(rag) = obj.get("rag") {
+        let rag = rag
+            .as_object()
+            .ok_or_else(|| "rag 必须是对象".to_string())?;
+        if let Some(unknown) = rag.keys().find(|key| key.as_str() != "local_scheduler") {
+            return Err(format!("rag.{unknown} 不是支持的设置字段"));
+        }
+        if let Some(local) = rag.get("local_scheduler") {
+            let local = local
+                .as_object()
+                .ok_or_else(|| "rag.local_scheduler 必须是对象".to_string())?;
+            const RAG_LOCAL_KEYS: &[&str] = &[
+                "ask_max_output_tokens",
+                "context_top_k",
+                "context_chunk_max_chars",
+                "job_poll_timeout_ms",
+                "source_diverse_min_output_tokens",
+            ];
+            if let Some(unknown) = local
+                .keys()
+                .find(|key| !RAG_LOCAL_KEYS.contains(&key.as_str()))
+            {
+                return Err(format!("rag.local_scheduler.{unknown} 不是支持的设置字段"));
+            }
+            validate_optional_u64_range(
+                local,
+                "ask_max_output_tokens",
+                16,
+                512,
+                "rag.local_scheduler.ask_max_output_tokens",
+            )?;
+            validate_optional_u64_range(
+                local,
+                "context_top_k",
+                1,
+                8,
+                "rag.local_scheduler.context_top_k",
+            )?;
+            validate_optional_u64_range(
+                local,
+                "context_chunk_max_chars",
+                48,
+                16_384,
+                "rag.local_scheduler.context_chunk_max_chars",
+            )?;
+            validate_optional_u64_range(
+                local,
+                "job_poll_timeout_ms",
+                1_000,
+                180_000,
+                "rag.local_scheduler.job_poll_timeout_ms",
+            )?;
+            validate_optional_u64_range(
+                local,
+                "source_diverse_min_output_tokens",
+                16,
+                512,
+                "rag.local_scheduler.source_diverse_min_output_tokens",
+            )?;
         }
     }
 
@@ -561,6 +645,7 @@ pub async fn update_settings(
             None => default_settings(recommended_summary, form_factor),
         };
         ensure_tts_defaults(&mut current);
+        ensure_rag_defaults(&mut current);
 
         // 白名单校验：只允许写入已知配置键，防止任意键污染 vault_meta
         const ALLOWED_KEYS: &[&str] = &[
@@ -585,6 +670,7 @@ pub async fn update_settings(
             "plugin_trust_mode", // Trust-chain T11: "off" | "warn" | "strict" (default warn)
             "plugin_trusted_pubkeys", // Trust-chain T11: user-whitelisted third-party signer pubkeys (64-hex[])
             "background", // L_hw 0.4: 电源/后台策略 { mode: throttle|pause|off, low_battery_pct }
+            "rag",        // RAG local-scheduler runtime knobs for model-profile switching.
         ];
 
         // v1.0.6 Privacy Logic: telemetry 必须通过 isolation patch 切换,
@@ -694,6 +780,7 @@ pub async fn update_settings(
             "embedding",
             "ocr",
             "tts",
+            "rag",
             "privacy",
             "pluginhub",
             "cloud",
@@ -720,6 +807,8 @@ pub async fn update_settings(
             }
         }
         release_membership_provenance(&mut current, &previous, &body);
+        ensure_tts_defaults(&mut current);
+        ensure_rag_defaults(&mut current);
 
         // Cross-field constraints must be checked on the merged snapshot as well
         // as on the patch. Otherwise two individually valid partial PATCHes could
@@ -845,6 +934,7 @@ fn default_settings(
             "min_interval_ms": 2000
         },
         "llm": llm_default,
+        "rag": rag_default_settings(),
 
         // ── 本地 AI 底座 ──
         // Embedding / Rerank / OCR / ASR / TTS 生命周期由 local scheduler 管理。
@@ -940,6 +1030,18 @@ fn default_settings(
     })
 }
 
+fn rag_default_settings() -> serde_json::Value {
+    serde_json::json!({
+        "local_scheduler": {
+            "ask_max_output_tokens": null,
+            "context_top_k": null,
+            "context_chunk_max_chars": 512,
+            "job_poll_timeout_ms": 180000,
+            "source_diverse_min_output_tokens": null
+        }
+    })
+}
+
 fn tts_default_settings() -> serde_json::Value {
     serde_json::json!({
         "enabled": true,
@@ -950,6 +1052,45 @@ fn tts_default_settings() -> serde_json::Value {
         "speed": 1.0,
         "format": "wav"
     })
+}
+
+fn ensure_rag_defaults(settings: &mut serde_json::Value) {
+    let Some(settings) = settings.as_object_mut() else {
+        return;
+    };
+    let defaults = rag_default_settings();
+    let Some(defaults) = defaults.as_object() else {
+        return;
+    };
+    match settings.get_mut("rag") {
+        Some(serde_json::Value::Object(rag)) => {
+            for (key, value) in defaults {
+                match (rag.get_mut(key), value) {
+                    (
+                        Some(serde_json::Value::Object(existing)),
+                        serde_json::Value::Object(default),
+                    ) => {
+                        for (sub_key, sub_value) in default {
+                            existing
+                                .entry(sub_key.clone())
+                                .or_insert_with(|| sub_value.clone());
+                        }
+                    }
+                    (Some(_), _) => {}
+                    (None, _) => {
+                        rag.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        Some(_) => {}
+        None => {
+            settings.insert(
+                "rag".to_string(),
+                serde_json::Value::Object(defaults.clone()),
+            );
+        }
+    }
 }
 
 fn ensure_tts_defaults(settings: &mut serde_json::Value) {
@@ -1339,7 +1480,14 @@ mod tests {
             "pluginhub": {"url": "https://hub.example.com"},
             "llm": {"provider": "deepseek"},
             "web_search": {"engine": "duckduckgo", "min_interval_ms": 2000},
-            "search": {"default_top_k": 10, "vector_weight": 0.6, "fulltext_weight": 0.4}
+            "search": {"default_top_k": 10, "vector_weight": 0.6, "fulltext_weight": 0.4},
+            "rag": {"local_scheduler": {
+                "ask_max_output_tokens": 160,
+                "context_top_k": 3,
+                "context_chunk_max_chars": 512,
+            "job_poll_timeout_ms": 180000,
+                "source_diverse_min_output_tokens": null
+            }}
         })).is_ok());
 
         // 无效 URL(各 url 字段)
@@ -1375,6 +1523,11 @@ mod tests {
             serde_json::json!({"embedding": {"provider": "local_scheduler", "endpoint": "http://127.0.0.1:8090/admin?target=/models"}}),
             serde_json::json!({"llm": {"provider": "local_scheduler", "endpoint": "http://169.254.169.254/latest"}}),
             serde_json::json!({"embedding": {"provider": "local_scheduler", "endpoint": "http://0.0.0.0:8090"}}),
+            serde_json::json!({"rag": {"local_scheduler": {"ask_max_output_tokens": 1}}}),
+            serde_json::json!({"rag": {"local_scheduler": {"context_top_k": 99}}}),
+            serde_json::json!({"rag": {"local_scheduler": {"context_chunk_max_chars": 1}}}),
+            serde_json::json!({"rag": {"local_scheduler": {"job_poll_timeout_ms": 999999}}}),
+            serde_json::json!({"rag": {"local_scheduler": {"unknown": 1}}}),
         ] {
             assert!(
                 validate_settings_fields(&bad).is_err(),
@@ -1385,6 +1538,22 @@ mod tests {
         assert!(
             validate_settings_fields(&serde_json::json!({"cloud": {"accounts_url": ""}})).is_ok()
         );
+    }
+
+    #[test]
+    fn default_settings_include_local_scheduler_rag_runtime_config() {
+        let settings = default_settings("qwen2.5:3b", FormFactor::LocalSchedulerAppliance);
+        assert_eq!(
+            settings.pointer("/rag/local_scheduler/context_chunk_max_chars"),
+            Some(&serde_json::json!(512))
+        );
+        assert_eq!(
+            settings.pointer("/rag/local_scheduler/job_poll_timeout_ms"),
+            Some(&serde_json::json!(180000))
+        );
+        assert!(settings
+            .pointer("/rag/local_scheduler/ask_max_output_tokens")
+            .is_some_and(serde_json::Value::is_null));
     }
 
     #[test]

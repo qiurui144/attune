@@ -6,7 +6,9 @@
 <title>Attune KB Demo · K3</title>
 <style>
 :root{--bg:#f6f7f8;--surface:#fff;--surface2:#eef4f4;--text:#222831;--muted:#67707a;--accent:#4f7f7a;--accent2:#3d6763;--border:#d9dee2;--ok:#238636;--warn:#b7791f;--err:#c62828;--chip:#edf1f2;--radius:8px}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.app{max-width:1180px;margin:0 auto;padding:18px}.header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}.header h1{font-size:22px;margin:0;color:var(--accent)}.header p{margin:4px 0 0;color:var(--muted);font-size:12px}.statusbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{font-size:11px;padding:5px 8px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted)}.pill.ok{color:var(--ok);border-color:#bbdfc1}.pill.warn{color:var(--warn);border-color:#efd9a6}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0}.tab{min-height:42px;border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer}.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}.grid{display:grid;grid-template-columns:1fr 360px;gap:14px}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}.card h2{font-size:15px;margin:0 0 12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.grow{flex:1;min-width:180px}input,select,textarea{font:inherit;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--surface);padding:10px 12px;color:var(--text);outline:none}textarea{width:100%;resize:vertical;min-height:72px;line-height:1.55}input:focus,select:focus,textarea:focus{border-color:var(--accent)}button{border:0;border-radius:6px;background:var(--accent);color:#fff;padding:10px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}button:hover{background:var(--accent2)}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:var(--chip);color:var(--text);border:1px solid var(--border)}.secondary:hover{background:#e1e8e8}.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:34px 18px;text-align:center;background:#fbfcfc;cursor:pointer}.upload-zone.dragover,.upload-zone:hover{border-color:var(--accent);background:var(--surface2)}.upload-zone input{display:none}.upload-zone strong{display:block;font-size:15px;margin-bottom:5px}.muted{color:var(--muted);font-size:12px}.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}.step{border:1px solid var(--border);border-radius:6px;padding:10px;background:#fbfcfc;min-height:72px}.step .name{font-size:12px;font-weight:700}.step .time{font-size:18px;color:var(--accent);font-weight:800;margin-top:5px}.step .state{font-size:11px;color:var(--muted);margin-top:2px}.step.done{border-color:#b9dfc0;background:#f0fbf2}.step.active{border-color:var(--accent);background:var(--surface2)}.file-list,.chunk-list,.chat-msgs{display:flex;flex-direction:column;gap:8px}.file,.chunk,.msg{border:1px solid var(--border);border-radius:var(--radius);background:#fbfcfc;padding:11px 12px}.file{display:grid;grid-template-columns:1fr auto;gap:6px 10px}.file .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file .meta,.chunk .meta,.msg .meta{font-size:11px;color:var(--muted)}.file .right{text-align:right}.oktxt{color:var(--ok)}.warntxt{color:var(--warn)}.errtxt{color:var(--err)}.chunk{line-height:1.52}.chunk .title{font-weight:750;margin-bottom:4px}.chunk .body{font-size:12px;color:#343b43;max-height:130px;overflow:auto;white-space:pre-wrap}.chunk .score{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}.chat-msgs{max-height:520px;overflow:auto;margin-bottom:10px}.msg{max-width:88%;line-height:1.6;font-size:13px}.msg.user{align-self:flex-end;background:var(--accent);border-color:var(--accent);color:#fff}.msg.asst{align-self:flex-start}.msg.status{border-style:dashed;background:#fff8e8}.msg .role{font-weight:800;font-size:11px;margin-bottom:3px;opacity:.78}.cite{border-top:1px solid var(--border);margin-top:8px;padding-top:7px;display:grid;gap:5px}.cite span{font-size:10px;background:var(--chip);border-radius:6px;padding:5px 7px;color:var(--muted)}.cite small{display:block;margin-top:2px;color:#343b43;line-height:1.4}.side-stat{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{background:#fbfcfc;border:1px solid var(--border);border-radius:6px;padding:10px}.stat b{display:block;color:var(--accent);font-size:20px}.empty{padding:26px 10px;text-align:center;color:var(--muted);font-size:13px}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #c8d0d6;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:860px){.header{display:block}.statusbar{justify-content:flex-start;margin-top:10px}.tabs{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr}.msg{max-width:100%}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.app{max-width:1180px;margin:0 auto;padding:18px}.header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:14px}.header h1{font-size:22px;margin:0;color:var(--accent)}.header p{margin:4px 0 0;color:var(--muted);font-size:12px}.statusbar{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.pill{font-size:11px;padding:5px 8px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--muted)}.pill.ok{color:var(--ok);border-color:#bbdfc1}.pill.warn{color:var(--warn);border-color:#efd9a6}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:12px 0}.tab{min-height:42px;border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer}.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}.grid{display:grid;grid-template-columns:1fr 360px;gap:14px}.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}.card h2{font-size:15px;margin:0 0 12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.grow{flex:1;min-width:180px}input,select,textarea{font:inherit;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--surface);padding:10px 12px;color:var(--text);outline:none}textarea{width:100%;resize:vertical;min-height:72px;line-height:1.55}input:focus,select:focus,textarea:focus{border-color:var(--accent)}button{border:0;border-radius:6px;background:var(--accent);color:#fff;padding:10px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer}button:hover{background:var(--accent2)}button:disabled{opacity:.55;cursor:not-allowed}.secondary{background:var(--chip);color:var(--text);border:1px solid var(--border)}.secondary:hover{background:#e1e8e8}.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:30px 18px;text-align:center;background:#fbfcfc;cursor:pointer}.upload-zone.dragover,.upload-zone:hover{border-color:var(--accent);background:var(--surface2)}.upload-zone input{display:none}.upload-zone strong{display:block;font-size:15px;margin-bottom:5px}.upload-actions{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:12px}.muted{color:var(--muted);font-size:12px}.pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}.step{border:1px solid var(--border);border-radius:6px;padding:10px;background:#fbfcfc;min-height:72px}.step .name{font-size:12px;font-weight:700}.step .time{font-size:18px;color:var(--accent);font-weight:800;margin-top:5px}.step .state{font-size:11px;color:var(--muted);margin-top:2px}.step.done{border-color:#b9dfc0;background:#f0fbf2}.step.active{border-color:var(--accent);background:var(--surface2)}.file-list,.chunk-list,.chat-msgs{display:flex;flex-direction:column;gap:8px}.file,.chunk,.msg{border:1px solid var(--border);border-radius:var(--radius);background:#fbfcfc;padding:11px 12px}.file{display:grid;grid-template-columns:1fr auto;gap:6px 10px}.file .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file .meta,.chunk .meta,.msg .meta{font-size:11px;color:var(--muted)}.file .right{text-align:right}.oktxt{color:var(--ok)}.warntxt{color:var(--warn)}.errtxt{color:var(--err)}.chunk{line-height:1.52}.chunk .title{font-weight:750;margin-bottom:4px}.chunk .body{font-size:12px;color:#343b43;max-height:130px;overflow:auto;white-space:pre-wrap}.chunk .score{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}.chat-msgs{max-height:520px;overflow:auto;margin-bottom:10px}.msg{max-width:88%;line-height:1.6;font-size:13px}.msg.user{align-self:flex-end;background:var(--accent);border-color:var(--accent);color:#fff}.msg.asst{align-self:flex-start}.msg.status{border-style:dashed;background:#fff8e8}.msg .role{font-weight:800;font-size:11px;margin-bottom:3px;opacity:.78}.cite{border-top:1px solid var(--border);margin-top:8px;padding-top:7px;display:grid;gap:5px}.cite span{font-size:10px;background:var(--chip);border-radius:6px;padding:5px 7px;color:var(--muted)}.cite small{display:block;margin-top:2px;color:#343b43;line-height:1.4}.side-stat{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{background:#fbfcfc;border:1px solid var(--border);border-radius:6px;padding:10px}.stat b{display:block;color:var(--accent);font-size:20px}.empty{padding:26px 10px;text-align:center;color:var(--muted);font-size:13px}.spinner{display:inline-block;width:13px;height:13px;border:2px solid #c8d0d6;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:860px){.header{display:block}.statusbar{justify-content:flex-start;margin-top:10px}.tabs{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr}.msg{max-width:100%}}
+.authbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:12px}.authbar input{min-width:220px}
+.danger{color:var(--err);border-color:#f0b7b7}.danger:hover{background:#fff0f0}
 </style>
 </head>
 <body>
@@ -28,21 +30,41 @@
     <button class="tab" data-tab="summary">Summary RAG</button>
   </div>
 
+  <div class="authbar">
+    <input class="grow" id="vaultPassword" type="password" placeholder="Vault 密码" onkeydown="if(event.key==='Enter')unlockVault()">
+    <button id="unlockBtn" onclick="unlockVault()">解锁</button>
+    <button class="secondary" onclick="clearAuth()">清除会话</button>
+    <span class="muted" id="authState">未登录</span>
+  </div>
+
   <section id="tab-upload">
     <div class="grid">
       <div>
         <div class="card">
           <div class="upload-zone" id="dropZone" onclick="fileInput.click()">
-            <strong>拖拽文件到此处，或点击选择文件</strong>
+            <strong>拖拽文件或文件夹到此处</strong>
             <div class="muted">PDF / Markdown / TXT / HTML / DOCX / 图片 · 通过 Attune /api/v1/upload 入库</div>
+            <div class="upload-actions">
+              <button type="button" onclick="event.stopPropagation();fileInput.click()">选择文件</button>
+              <button type="button" class="secondary" onclick="event.stopPropagation();folderInput.click()">选择文件夹</button>
+            </div>
             <input type="file" id="fileInput" multiple accept=".pdf,.md,.markdown,.txt,.html,.docx,.png,.jpg,.jpeg,.webp,.bmp">
+            <input type="file" id="folderInput" multiple webkitdirectory directory>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <input class="grow" type="file" id="voiceInput" accept="audio/*">
+            <button id="voiceUploadBtn" type="button" class="secondary" onclick="uploadVoiceFile(voiceInput.files && voiceInput.files[0])">上传音频转写</button>
+            <span class="muted" id="voiceStatus">Attune /api/v1/voice/transcribe-file</span>
           </div>
           <div class="pipeline" id="pipeline"></div>
         </div>
         <div class="card">
           <div class="row" style="justify-content:space-between;margin-bottom:10px">
             <h2 style="margin:0">上传文件</h2>
-            <button class="secondary" onclick="refreshAll()">刷新状态</button>
+            <div class="row">
+              <button class="secondary" onclick="refreshAll()">刷新状态</button>
+              <button id="clearBtn" class="secondary danger" onclick="clearDemoEnvironment()">清零环境</button>
+            </div>
           </div>
           <div class="file-list" id="fileList"></div>
         </div>
@@ -83,14 +105,22 @@
   <section id="tab-chat" style="display:none">
     <div class="card">
       <div class="row" style="margin-bottom:10px">
-        <select id="chatModel"><option value="llm-chat" selected>llm-chat · Qwen3-30B-A3B</option><option value="llm-summary">llm-summary · Qwen3.5-2B</option></select>
-        <button class="secondary" onclick="prepareModel('chat')">切换模型</button>
-        <span class="muted" id="chatModelState">模型: llm-chat</span>
+        <select id="chatModel" data-capability="chat" onchange="updateModelActionGate('chat')"><option value="">加载模型...</option></select>
+        <button id="chatModelBtn" class="secondary" onclick="prepareModel('chat')">切换模型</button>
+        <span class="muted" id="chatModelState">模型: 加载中</span>
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <button id="voiceChatRecordBtn" class="secondary" onclick="startVoiceChatRecording()">开始录音</button>
+        <button id="voiceChatStopBtn" class="secondary" onclick="stopVoiceChatRecording()" disabled>停止并提问</button>
+        <button id="webrtcVoiceTestBtn" class="secondary" onclick="runVoiceChatWebRtcLoopbackTest()">WebRTC自测</button>
+        <button id="speakLastBtn" class="secondary" onclick="speakLastAnswer()" disabled>播放回答</button>
+        <label class="muted"><input type="checkbox" id="voiceAutoSpeak" checked> 自动播报</label>
+        <span class="muted" id="voiceChatStatus">语音就绪</span>
       </div>
       <div class="chat-msgs" id="chatMsgs"><div class="msg asst"><div class="role">Attune</div>上传文件后，基于知识库直接提问。回答、引用、耗时都来自 `/api/v1/chat`。</div></div>
       <div class="row">
         <input class="grow" id="chatInput" placeholder="输入知识库问题..." onkeydown="if(event.key==='Enter')sendRag('chat')">
-        <button id="chatBtn" onclick="sendRag('chat')">提问</button>
+        <button id="chatBtn" onclick="sendRag('chat')" disabled>提问</button>
       </div>
     </div>
   </section>
@@ -98,14 +128,22 @@
   <section id="tab-summary" style="display:none">
     <div class="card">
       <div class="row" style="margin-bottom:10px">
-        <select id="summaryModel"><option value="llm-chat" selected>llm-chat · 深度总结</option><option value="llm-summary">llm-summary · 快速总结</option></select>
-        <button class="secondary" onclick="prepareModel('summary')">切换模型</button>
-        <span class="muted" id="summaryModelState">模型: llm-chat</span>
+        <select id="summaryModel" data-capability="summary" onchange="updateModelActionGate('summary')"><option value="">加载模型...</option></select>
+        <button id="summaryModelBtn" class="secondary" onclick="prepareModel('summary')">切换模型</button>
+        <span class="muted" id="summaryModelState">模型: 加载中</span>
       </div>
-      <div class="chat-msgs" id="summaryMsgs"><div class="msg asst"><div class="role">Attune Summary</div>这里同样走 RAG，只是默认用 summary 模型和总结提示词。</div></div>
-      <textarea id="summaryInput" placeholder="输入总结目标，例如：总结刚上传文档的核心结论、风险点和待办。"></textarea>
+      <div class="row" style="margin-bottom:10px">
+        <select id="summaryScenario">
+          <option value="recent" selected>最近文档总结</option>
+          <option value="folder">文件夹综述</option>
+          <option value="compare">跨文档对比</option>
+          <option value="risk">风险与缺口</option>
+        </select>
+      </div>
+      <div class="chat-msgs" id="summaryMsgs"><div class="msg asst"><div class="role">Attune Summary</div>选择场景后，基于知识库证据运行 summary workflow。</div></div>
+      <textarea id="summaryDetail" placeholder="输入关注点，例如：核心结论、风险点、接口差异或待办。"></textarea>
       <div class="row" style="justify-content:flex-end;margin-top:8px">
-        <button id="summaryBtn" onclick="sendRag('summary')">生成总结</button>
+        <button id="summaryBtn" onclick="sendRag('summary')" disabled>生成总结</button>
       </div>
     </div>
   </section>
@@ -113,21 +151,89 @@
 
 <script>
 const params = new URLSearchParams(location.search);
-const API_BASE = (params.get('api') || localStorage.getItem('attune_api_base') || (location.hostname ? `${location.protocol}//${location.hostname}:8889` : 'http://192.168.100.233:8889')).replace(/\/$/,'');
+function defaultApiBase(){
+  if(!location.hostname)return 'http://127.0.0.1:8969';
+  const port = Number(location.port || 0);
+  const apiPort = port > 0 ? port + 1 : 8969;
+  return `${location.protocol}//${location.hostname}:${apiPort}`;
+}
+const API_BASE = (params.get('api') || defaultApiBase()).replace(/\/$/,'');
 const files = new Map(JSON.parse(sessionStorage.getItem('attune_demo_files') || '[]'));
 const timings = {upload:0,index:0,total:0,chunks:0};
 let activeTab = 'upload';
 let latestStatus = {items:0,pending_embeddings:0};
+let latestModelCapabilities = [];
+const modelSwitchState = {chat:false, summary:false};
+const defaultChatHtml = '<div class="msg asst"><div class="role">Attune</div>上传文件后，基于知识库直接提问。回答、引用、耗时都来自 `/api/v1/chat`。</div>';
+const defaultSummaryHtml = '<div class="msg asst"><div class="role">Attune Summary</div>选择场景后，基于知识库证据运行 summary workflow。</div>';
+let voiceRecorder = null;
+let voiceStream = null;
+let voiceChunks = [];
+let voiceRecordingStarted = 0;
+let currentVoiceAudio = null;
+let lastAssistantAnswer = '';
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
 function fmtMs(ms){if(!ms)return'-';if(ms<1000)return `${Math.round(ms)}ms`;if(ms<60000)return `${(ms/1000).toFixed(1)}s`;return `${(ms/60000).toFixed(1)}m`}
 function fmtSize(b){if(!b)return'-';if(b<1024*1024)return `${(b/1024).toFixed(1)} KB`;return `${(b/1024/1024).toFixed(1)} MB`}
 function saveFiles(){sessionStorage.setItem('attune_demo_files', JSON.stringify([...files.entries()]))}
 function setText(id, text){document.getElementById(id).textContent=text}
+function tokenExpiry(token){
+  const payload = String(token || '').split('.').slice(0,-1).join('.');
+  const parts = payload.split(':');
+  const expires = Number(parts[1] || 0);
+  return Number.isFinite(expires) ? expires : 0;
+}
+function authToken(){
+  const token = sessionStorage.getItem('attune_auth_token') || localStorage.getItem('attune_auth_token') || '';
+  const expires = tokenExpiry(token);
+  if(expires && Date.now()/1000 > expires){
+    sessionStorage.removeItem('attune_auth_token');
+    localStorage.removeItem('attune_auth_token');
+    return '';
+  }
+  return token;
+}
+function authLabel(){
+  const token = authToken();
+  const expires = tokenExpiry(token);
+  if(!token)return '未登录';
+  if(!expires)return '已解锁';
+  const mins = Math.max(0, Math.floor((expires - Date.now()/1000) / 60));
+  return mins >= 60 ? `已解锁 · ${Math.floor(mins/60)}h${mins%60}m` : `已解锁 · ${mins}m`;
+}
+function saveAuthToken(token){
+  sessionStorage.setItem('attune_auth_token', token);
+  localStorage.setItem('attune_auth_token', token);
+  authState.textContent=authLabel();
+}
+function clearAuth(){sessionStorage.removeItem('attune_auth_token');localStorage.removeItem('attune_auth_token');authState.textContent='未登录';refreshAll()}
+
+async function unlockVault(){
+  const password = vaultPassword.value;
+  if(!password){vaultPassword.focus();return}
+  unlockBtn.disabled = true;
+  unlockBtn.innerHTML = '<span class="spinner"></span>';
+  try{
+    const out = await api('POST','/api/v1/vault/unlock',{password});
+    const token = out.token || out.access_token;
+    if(!token) throw new Error('unlock response missing token');
+    saveAuthToken(token);
+    vaultPassword.value = '';
+    await refreshAll();
+  }catch(err){
+    authState.textContent = `解锁失败: ${err.message}`;
+  }finally{
+    unlockBtn.disabled = false;
+    unlockBtn.textContent = '解锁';
+  }
+}
 
 async function api(method, path, body, options={}){
   if(!path.startsWith('/api/v1/')) throw new Error(`non-attune api path blocked: ${path}`);
   const init = {method, headers:{...(options.headers||{})}};
+  const token = authToken();
+  if(token) init.headers.Authorization = `Bearer ${token}`;
   if(body instanceof FormData){init.body=body}
   else if(body !== undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
   const res = await fetch(API_BASE + path, init);
@@ -138,12 +244,69 @@ async function api(method, path, body, options={}){
   return data;
 }
 
+async function apiBlob(method, path, body, options={}){
+  if(!path.startsWith('/api/v1/')) throw new Error(`non-attune api path blocked: ${path}`);
+  const init = {method, headers:{...(options.headers||{})}};
+  const token = authToken();
+  if(token) init.headers.Authorization = `Bearer ${token}`;
+  if(body instanceof FormData){init.body=body}
+  else if(body !== undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
+  const res = await fetch(API_BASE + path, init);
+  if(!res.ok){
+    const text = await res.text();
+    let data = {};
+    try{data = text ? JSON.parse(text) : {}}catch(_){data = {raw:text}}
+    throw new Error(data.error || data.message || `${method} ${path} HTTP ${res.status}`);
+  }
+  return res.blob();
+}
+
+async function clearDemoEnvironment(){
+  if(!confirm('清零会删除当前 Attune demo 知识库中的文档、向量和页面历史。确认继续？')) return;
+  const btn = document.getElementById('clearBtn');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>清零中';
+  try{
+    await api('POST','/api/v1/demo/reset',{confirm:'CLEAR_DEMO'});
+    files.clear();
+    sessionStorage.removeItem('attune_demo_files');
+    timings.upload = 0; timings.index = 0; timings.total = 0; timings.chunks = 0;
+    fileList.innerHTML = '<div class="empty">暂无已上传文件</div>';
+    chunkList.innerHTML = '<div class="empty">暂无向量块</div>';
+    vectorMeta.textContent = '-';
+    chatMsgs.innerHTML = defaultChatHtml;
+    summaryMsgs.innerHTML = defaultSummaryHtml;
+    renderPipeline('idle');
+    renderFiles();
+    await refreshAll();
+  }catch(err){
+    files.set(`reset-${Date.now()}`,{name:'清零环境',size:0,status:'失败',error:err.message,created:Date.now(),elapsed:0});
+    saveFiles(); renderFiles();
+  }finally{
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>switchTab(btn.dataset.tab)));
 fileInput.addEventListener('change', e=>handleFiles(e.target.files));
+folderInput.addEventListener('change', e=>handleFiles(e.target.files));
+voiceInput.addEventListener('change', e=>uploadVoiceFile(e.target.files && e.target.files[0]));
 const dz = document.getElementById('dropZone');
 dz.addEventListener('dragover', e=>{e.preventDefault();dz.classList.add('dragover')});
 dz.addEventListener('dragleave', ()=>dz.classList.remove('dragover'));
-dz.addEventListener('drop', e=>{e.preventDefault();dz.classList.remove('dragover');handleFiles(e.dataTransfer.files)});
+dz.addEventListener('drop', async e=>{
+  e.preventDefault();
+  dz.classList.remove('dragover');
+  try{
+    const entries = await collectDroppedFiles(e.dataTransfer);
+    await handleFiles(entries);
+  }catch(err){
+    files.set(`drop-${Date.now()}`,{name:'拖拽上传',size:0,status:'失败',error:err.message,created:Date.now(),elapsed:0});
+    saveFiles(); renderFiles(); renderPipeline('idle');
+  }
+});
 
 function switchTab(tab){
   activeTab = tab;
@@ -174,29 +337,453 @@ function renderPipeline(stage='idle'){
   setText('statTotal', fmtMs(timings.total));
 }
 
+async function readDirectoryEntries(reader){
+  const entries = [];
+  for(;;){
+    const batch = await new Promise((resolve, reject)=>reader.readEntries(resolve, reject));
+    if(!batch.length) break;
+    entries.push(...batch);
+  }
+  return entries;
+}
+
+async function entryFile(entry){
+  return new Promise((resolve, reject)=>entry.file(resolve, reject));
+}
+
+async function collectEntryFiles(entry, prefix=''){
+  if(entry.isFile){
+    const file = await entryFile(entry);
+    return [{file, relativePath: `${prefix}${file.name}`}];
+  }
+  if(entry.isDirectory){
+    const reader = entry.createReader();
+    const children = await readDirectoryEntries(reader);
+    const nested = await Promise.all(children.map(child=>collectEntryFiles(child, `${prefix}${entry.name}/`)));
+    return nested.flat();
+  }
+  return [];
+}
+
+async function collectDroppedFiles(dataTransfer){
+  const items = [...(dataTransfer?.items || [])];
+  const entries = items.map(item=>item.webkitGetAsEntry?.()).filter(Boolean);
+  if(entries.length){
+    const collected = await Promise.all(entries.map(entry=>collectEntryFiles(entry)));
+    return collected.flat();
+  }
+  return [...(dataTransfer?.files || [])].map(file=>({file, relativePath:file.webkitRelativePath || file.name}));
+}
+
+function uploadEntries(list){
+  return [...(list || [])].map(entry=>{
+    if(entry && entry.file) return entry;
+    const file = entry;
+    return {file, relativePath:file.webkitRelativePath || file.name};
+  }).filter(entry=>entry.file && entry.file.size > 0);
+}
+
 async function handleFiles(list){
-  for(const file of list){
+  for(const entry of uploadEntries(list)){
+    const {file} = entry;
+    const relativePath = (entry.relativePath || file.webkitRelativePath || file.name).replace(/\\/g,'/');
+    await uploadOneFile(file, relativePath);
+  }
+}
+
+async function uploadOneFile(file, relativePath){
     const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-    files.set(localId,{name:file.name,size:file.size,status:'上传中',chunks:0,created:Date.now(),elapsed:0});
+    const displayName = relativePath || file.name;
+    files.set(localId,{name:displayName,size:file.size,status:'上传中',chunks:0,created:Date.now(),elapsed:0});
     saveFiles(); renderFiles(); renderPipeline('upload');
     const t0 = performance.now();
     try{
       const form = new FormData();
+      form.append('relative_path', displayName);
       form.append('file', file, file.name);
       const up0 = performance.now();
       const out = await api('POST','/api/v1/upload',form);
       timings.upload = performance.now() - up0;
       const itemId = out.id || localId;
       files.delete(localId);
-      files.set(itemId,{name:out.title||file.name,size:file.size,status:out.status||'processing',chunks:out.chunks_queued||0,created:Date.now(),elapsed:performance.now()-t0,item_id:itemId});
+      files.set(itemId,{name:out.source_ref?.replace(/^upload:\/\//,'')||out.title||displayName,size:file.size,status:out.status||'processing',chunks:out.chunks_queued||0,created:Date.now(),elapsed:performance.now()-t0,item_id:itemId});
       timings.chunks = out.chunks_queued || 0;
       saveFiles(); renderFiles(); renderPipeline('embed');
-      await waitUntilSearchable(itemId, out.title || file.name, t0);
+      await waitUntilSearchable(itemId, out.title || displayName, t0);
     }catch(err){
       const info = files.get(localId);
       if(info){info.status='失败';info.error=err.message;info.elapsed=performance.now()-t0}
       saveFiles(); renderFiles(); renderPipeline('idle');
     }
+}
+
+async function uploadVoiceFile(file){
+  if(!file) return;
+  const btn = document.getElementById('voiceUploadBtn');
+  const status = document.getElementById('voiceStatus');
+  const original = btn.textContent;
+  const localId = `voice-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>提交中';
+  status.textContent = '音频上传中';
+  files.set(localId,{name:`音频转写: ${file.name}`,size:file.size,status:'提交中',chunks:0,created:Date.now(),elapsed:0});
+  saveFiles(); renderFiles();
+  const t0 = performance.now();
+  try{
+    const form = new FormData();
+    form.append('file', file, file.name);
+    form.append('language', 'auto');
+    const out = await api('POST','/api/v1/voice/transcribe-file',form);
+    const jobId = out.job_id || localId;
+    files.delete(localId);
+    files.set(jobId,{name:`音频转写: ${file.name}`,size:file.size,status:'ASR任务已提交',chunks:0,created:Date.now(),elapsed:performance.now()-t0,item_id:jobId});
+    status.textContent = `转写任务 ${jobId} 已提交`;
+    saveFiles(); renderFiles();
+    await pollVoiceJob(jobId, file.name, t0);
+  }catch(err){
+    const info = files.get(localId);
+    if(info){info.status='失败';info.error=err.message;info.elapsed=performance.now()-t0}
+    status.textContent = `音频转写失败: ${err.message}`;
+    saveFiles(); renderFiles();
+  }finally{
+    btn.disabled = false;
+    btn.textContent = original;
+    voiceInput.value = '';
+  }
+}
+
+async function pollVoiceJob(jobId, fileName, t0){
+  const statusEl = document.getElementById('voiceStatus');
+  for(let i=0;i<120;i++){
+    await new Promise(r=>setTimeout(r,1000));
+    const info = files.get(jobId);
+    try{
+      const payload = await api('GET', `/api/v1/office/jobs/${encodeURIComponent(jobId)}`);
+      const job = payload.job || payload;
+      const state = String(job.state || job.status || '').toLowerCase();
+      const progress = Number(job.progress);
+      const progressText = Number.isFinite(progress) ? ` ${Math.round(progress * 100)}%` : '';
+      if(info){info.status = `${state || 'running'}${progressText}`;info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+      statusEl.textContent = `${fileName}: ${state || 'running'}${progressText}`;
+      if(['done','completed','complete','success','succeeded'].includes(state)){
+        if(info){info.status='ready';info.ready=true;info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+        statusEl.textContent = `${fileName}: 转写完成`;
+        return;
+      }
+      if(['failed','error','cancelled','canceled','expired'].includes(state)){
+        throw new Error(job.error || job.reason || `${fileName} 转写失败`);
+      }
+    }catch(err){
+      if(i > 2) throw err;
+    }
+  }
+  const info = files.get(jobId);
+  if(info){info.status='等待ASR完成';info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+  statusEl.textContent = `${fileName}: 等待ASR完成`;
+}
+
+function setVoiceChatStatus(text, busy=false){
+  const status = document.getElementById('voiceChatStatus');
+  if(status) status.textContent = text;
+  const recordBtn = document.getElementById('voiceChatRecordBtn');
+  const stopBtn = document.getElementById('voiceChatStopBtn');
+  if(recordBtn) recordBtn.disabled = busy || !!voiceRecorder || !modelActionAllowed('chat');
+  if(stopBtn) stopBtn.disabled = !voiceRecorder;
+}
+
+function preferredVoiceMimeType(){
+  const candidates = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+  return candidates.find(type=>window.MediaRecorder?.isTypeSupported?.(type)) || '';
+}
+
+function voiceFileExtension(type){
+  const value = String(type || '').toLowerCase();
+  if(value.includes('ogg')) return 'ogg';
+  if(value.includes('mp4')) return 'm4a';
+  if(value.includes('wav')) return 'wav';
+  return 'webm';
+}
+
+async function recordVoiceChatStream(stream, durationMs=0){
+  return new Promise((resolve, reject)=>{
+    if(!window.MediaRecorder) return reject(new Error('当前浏览器不支持 MediaRecorder'));
+    if(!stream?.getAudioTracks?.().length) return reject(new Error('WebRTC stream 没有音频轨道'));
+    const mimeType = preferredVoiceMimeType();
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, mimeType ? {mimeType} : undefined);
+    const started = performance.now();
+    let timer = null;
+    recorder.ondataavailable = event=>{
+      if(event.data && event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onerror = event=>{
+      if(timer) clearTimeout(timer);
+      reject(event.error || new Error('MediaRecorder failed'));
+    };
+    recorder.onstop = ()=>{
+      if(timer) clearTimeout(timer);
+      const recorderType = recorder.mimeType || mimeType || 'audio/webm';
+      resolve({
+        blob: new Blob(chunks, {type: recorderType}),
+        mimeType: recorderType,
+        elapsedMs: performance.now() - started,
+      });
+    };
+    recorder.start(1000);
+    if(durationMs > 0){
+      timer = setTimeout(()=>{
+        if(recorder.state === 'inactive') return;
+        try{recorder.requestData()}catch(_){}
+        setTimeout(()=>recorder.state !== 'inactive' && recorder.stop(), 120);
+      }, durationMs);
+    }
+  });
+}
+
+async function attachVoiceChatRemoteStream(stream, label='WebRTC远端语音', durationMs=4000){
+  setVoiceChatStatus(`${label}: 接收中`, true);
+  const {blob, mimeType} = await recordVoiceChatStream(stream, durationMs);
+  setVoiceChatStatus(`${label}: 调用 Attune ASR`);
+  return submitVoiceChatAudio(blob, mimeType);
+}
+
+async function createSyntheticVoiceStream(){
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if(!AudioCtx) throw new Error('当前浏览器不支持 Web Audio fallback');
+  const ctx = new AudioCtx();
+  const oscillator = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const destination = ctx.createMediaStreamDestination();
+  oscillator.type = 'sine';
+  oscillator.frequency.value = 440;
+  gain.gain.value = 0.08;
+  oscillator.connect(gain);
+  gain.connect(destination);
+  oscillator.start();
+  return {
+    stream: destination.stream,
+    close(){
+      oscillator.stop();
+      ctx.close();
+    },
+  };
+}
+
+function waitForWebRtcConnected(pc, timeoutMs=8000){
+  return new Promise((resolve, reject)=>{
+    if(['connected','completed'].includes(pc.iceConnectionState) || pc.connectionState === 'connected'){
+      resolve();
+      return;
+    }
+    const timeout = setTimeout(()=>{
+      cleanup();
+      reject(new Error('WebRTC connection timeout'));
+    }, timeoutMs);
+    const check = ()=>{
+      if(['connected','completed'].includes(pc.iceConnectionState) || pc.connectionState === 'connected'){
+        cleanup();
+        resolve();
+      }
+    };
+    const cleanup = ()=>{
+      clearTimeout(timeout);
+      pc.removeEventListener('iceconnectionstatechange', check);
+      pc.removeEventListener('connectionstatechange', check);
+    };
+    pc.addEventListener('iceconnectionstatechange', check);
+    pc.addEventListener('connectionstatechange', check);
+  });
+}
+
+async function startVoiceChatRecording(){
+  try{
+    if(!navigator.mediaDevices?.getUserMedia) throw new Error('当前浏览器不支持麦克风录音');
+    if(!window.MediaRecorder) throw new Error('当前浏览器不支持 MediaRecorder');
+    if(!modelActionAllowed('chat')) return;
+    voiceChunks = [];
+    voiceStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const mimeType = preferredVoiceMimeType();
+    voiceRecorder = new MediaRecorder(voiceStream, mimeType ? {mimeType} : undefined);
+    voiceRecordingStarted = performance.now();
+    voiceRecorder.ondataavailable = event=>{
+      if(event.data && event.data.size > 0) voiceChunks.push(event.data);
+    };
+    voiceRecorder.onstop = async ()=>{
+      const recorderType = voiceRecorder?.mimeType || mimeType || 'audio/webm';
+      const blob = new Blob(voiceChunks, {type: recorderType});
+      voiceRecorder = null;
+      voiceStream?.getTracks().forEach(track=>track.stop());
+      voiceStream = null;
+      setVoiceChatStatus('转写中', true);
+      try{
+        await submitVoiceChatAudio(blob, recorderType);
+      }catch(err){
+        setVoiceChatStatus(`语音失败: ${err.message}`);
+      }
+    };
+    voiceRecorder.start(1000);
+    setVoiceChatStatus('录音中');
+  }catch(err){
+    voiceRecorder = null;
+    voiceStream?.getTracks().forEach(track=>track.stop());
+    voiceStream = null;
+    setVoiceChatStatus(`录音失败: ${err.message}`);
+  }
+}
+
+function stopVoiceChatRecording(){
+  if(!voiceRecorder) return;
+  setVoiceChatStatus('停止录音中', true);
+  voiceRecorder.stop();
+}
+
+async function runVoiceChatWebRtcLoopbackTest(){
+  if(!window.RTCPeerConnection) {
+    setVoiceChatStatus('当前浏览器不支持 RTCPeerConnection');
+    return;
+  }
+  if(!modelActionAllowed('chat')) return;
+  const btn = document.getElementById('webrtcVoiceTestBtn');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>WebRTC';
+  let source = null;
+  let synthetic = null;
+  let pcSender = null;
+  let pcReceiver = null;
+  try{
+    synthetic = await createSyntheticVoiceStream();
+    source = synthetic.stream;
+    setVoiceChatStatus('WebRTC loopback: 使用合成音频测试接收链路', true);
+    pcSender = new RTCPeerConnection({iceServers:[]});
+    pcReceiver = new RTCPeerConnection({iceServers:[]});
+    pcSender.onicecandidate = event=>{
+      if(event.candidate) pcReceiver.addIceCandidate(event.candidate).catch(()=>{});
+    };
+    pcReceiver.onicecandidate = event=>{
+      if(event.candidate) pcSender.addIceCandidate(event.candidate).catch(()=>{});
+    };
+    const remoteStreamPromise = new Promise((resolve, reject)=>{
+      const timeout = setTimeout(()=>reject(new Error('WebRTC remote audio track timeout')), 8000);
+      pcReceiver.ontrack = event=>{
+        clearTimeout(timeout);
+        resolve(event.streams?.[0] || new MediaStream([event.track]));
+      };
+    });
+    source.getAudioTracks().forEach(track=>pcSender.addTrack(track, source));
+    const offer = await pcSender.createOffer();
+    await pcSender.setLocalDescription(offer);
+    await pcReceiver.setRemoteDescription(offer);
+    const answer = await pcReceiver.createAnswer();
+    await pcReceiver.setLocalDescription(answer);
+    await pcSender.setRemoteDescription(answer);
+    const remoteStream = await remoteStreamPromise;
+    await waitForWebRtcConnected(pcReceiver);
+    await new Promise(resolve=>setTimeout(resolve, 300));
+    try{
+      await attachVoiceChatRemoteStream(remoteStream, 'WebRTC loopback', 4000);
+    }catch(err){
+      if(!String(err.message || '').includes('录音为空')) throw err;
+      setVoiceChatStatus('WebRTC loopback: remote track 已接收，使用源流完成调用自测', true);
+      const {blob, mimeType} = await recordVoiceChatStream(source, 1500);
+      await submitVoiceChatAudio(blob, mimeType);
+    }
+  }catch(err){
+    setVoiceChatStatus(`WebRTC自测失败: ${err.message}`);
+  }finally{
+    source?.getTracks().forEach(track=>track.stop());
+    synthetic?.close?.();
+    pcSender?.close();
+    pcReceiver?.close();
+    btn.disabled = false;
+    btn.textContent = original;
+    updateModelActionGate('chat');
+  }
+}
+
+function transcriptFromVoiceJobPayload(payload){
+  const job = payload?.job || payload || {};
+  const result = job.result || payload?.result || {};
+  const candidates = [
+    result.full_text,
+    result.transcript,
+    result.text,
+    result.outputs?.full_text,
+    result.outputs?.transcript,
+    result.outputs?.text,
+    payload?.full_text,
+    payload?.transcript,
+    payload?.text,
+  ];
+  for(const value of candidates){
+    if(typeof value === 'string' && value.trim()) return value.trim();
+  }
+  const segments = Array.isArray(result.segments) ? result.segments : Array.isArray(payload?.segments) ? payload.segments : [];
+  const joined = segments.map(segment=>segment?.text || segment?.content || '').filter(Boolean).join(' ').trim();
+  return joined;
+}
+
+async function submitVoiceChatAudio(blob, mimeType){
+  if(!blob || blob.size <= 0) throw new Error('录音为空');
+  const ext = voiceFileExtension(mimeType || blob.type);
+  const form = new FormData();
+  form.append('file', blob, `attune-voice-chat-${Date.now()}.${ext}`);
+  form.append('language', 'auto');
+  const t0 = performance.now();
+  const out = await api('POST','/api/v1/voice/transcribe-file',form);
+  const jobId = out.job_id;
+  if(!jobId) throw new Error('ASR response missing job_id');
+  setVoiceChatStatus(`ASR任务 ${jobId}`);
+  let finalPayload = null;
+  for(let i=0;i<120;i++){
+    await new Promise(r=>setTimeout(r,1000));
+    const payload = await api('GET', `/api/v1/office/jobs/${encodeURIComponent(jobId)}`);
+    const job = payload.job || payload;
+    const state = String(job.state || job.status || '').toLowerCase();
+    const progress = Number(job.progress);
+    const progressText = Number.isFinite(progress) ? ` ${Math.round(progress * 100)}%` : '';
+    setVoiceChatStatus(`ASR ${state || 'running'}${progressText}`);
+    if(['done','completed','complete','success','succeeded'].includes(state)){
+      finalPayload = payload;
+      break;
+    }
+    if(['failed','error','cancelled','canceled','expired'].includes(state)){
+      throw new Error(job.error || job.reason || `ASR job ${jobId} failed`);
+    }
+  }
+  if(!finalPayload) throw new Error(`ASR job ${jobId} timed out`);
+  const transcript = transcriptFromVoiceJobPayload(finalPayload);
+  if(!transcript) throw new Error('ASR 完成但未返回可用转写文本');
+  chatInput.value = transcript;
+  setVoiceChatStatus(`已转写 ${fmtMs(performance.now()-t0)}`);
+  await sendRag('chat', {speak:true});
+}
+
+async function speakText(text){
+  const content = String(text || '').trim().slice(0, 128);
+  if(!content) return;
+  const blob = await apiBlob('POST','/api/v1/tts/synthesize',{text: content});
+  if(currentVoiceAudio){
+    currentVoiceAudio.pause();
+    URL.revokeObjectURL(currentVoiceAudio.src);
+  }
+  currentVoiceAudio = new Audio(URL.createObjectURL(blob));
+  await currentVoiceAudio.play();
+}
+
+async function speakLastAnswer(){
+  if(!lastAssistantAnswer.trim()) return;
+  const btn = document.getElementById('speakLastBtn');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  try{
+    await speakText(lastAssistantAnswer);
+  }catch(err){
+    setVoiceChatStatus(`播报失败: ${err.message}`);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -205,20 +792,48 @@ async function waitUntilSearchable(itemId, name, t0){
   const query = (name || itemId).replace(/\.[^.]+$/,'').slice(0,32) || itemId;
   for(let i=0;i<45;i++){
     await new Promise(r=>setTimeout(r,1800));
+    const info = files.get(itemId);
     try{
-      const result = await api('GET', `/api/v1/search?q=${encodeURIComponent(query)}&top_k=20`);
-      const chunks = (result.results||[]).filter(r=>r.item_id===itemId);
-      const info = files.get(itemId);
-      if(chunks.length){
-        timings.index = performance.now() - start;
-        timings.total = performance.now() - t0;
-        timings.chunks = chunks.length;
-        if(info){info.status='ready';info.ready=true;info.elapsed=timings.total;info.chunks=timings.chunks}
-        saveFiles(); renderFiles(); renderPipeline('ready'); renderChunks(chunks, result.latency_ms, query);
-        return;
+      const stats = await api('GET', `/api/v1/items/${encodeURIComponent(itemId)}/stats`);
+      const total = Number(stats.chunk_count || 0);
+      const done = Number(stats.embedding_done || 0);
+      const pending = Number(stats.embedding_pending || 0);
+      if(info){
+        info.chunks = total || info.chunks || 0;
+        info.embedding_done = done;
+        info.embedding_pending = pending;
       }
-      if(info){info.status=`索引中 ${Math.round((performance.now()-t0)/1000)}s`;info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
-    }catch(_){}
+      if(pending === 0){
+        let chunks = [];
+        let latency = 0;
+        try{
+          const result = await api('GET', `/api/v1/search?q=${encodeURIComponent(query)}&top_k=20`);
+          chunks = (result.results||[]).filter(r=>r.item_id===itemId);
+          latency = result.latency_ms || 0;
+        }catch(_){}
+        if(chunks.length || done > 0 || total > 0 || (info && info.chunks > 0)){
+          timings.index = performance.now() - start;
+          timings.total = performance.now() - t0;
+          if(info){info.status='ready';info.ready=true;info.elapsed=timings.total;info.search_hits=chunks.length}
+          saveFiles(); renderFiles(); renderPipeline('ready'); renderChunks(chunks, latency, query);
+          return;
+        }
+      }
+      if(info){info.status=`向量中 ${done}/${total || '?'} chunks`;info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+    }catch(_){
+      try{
+        const result = await api('GET', `/api/v1/search?q=${encodeURIComponent(query)}&top_k=20`);
+        const chunks = (result.results||[]).filter(r=>r.item_id===itemId);
+        if(chunks.length){
+          timings.index = performance.now() - start;
+          timings.total = performance.now() - t0;
+          if(info){info.status='ready';info.ready=true;info.elapsed=timings.total;info.search_hits=chunks.length}
+          saveFiles(); renderFiles(); renderPipeline('ready'); renderChunks(chunks, result.latency_ms, query);
+          return;
+        }
+        if(info){info.status=`索引中 ${Math.round((performance.now()-t0)/1000)}s`;info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
+      }catch(__){}
+    }
   }
   const info = files.get(itemId);
   if(info){info.status='等待向量完成';info.elapsed=performance.now()-t0;saveFiles();renderFiles()}
@@ -231,7 +846,8 @@ function renderFiles(){
   fileList.innerHTML = rows.map(([id,f])=>{
     const good = f.ready || f.status==='ready' || f.chunks>0;
     const cls = f.error ? 'errtxt' : good ? 'oktxt' : 'warntxt';
-    return `<div class="file"><div><div class="name">${esc(f.name)}</div><div class="meta">${esc(id)} · ${fmtSize(f.size)}</div></div><div class="right"><div class="${cls}">${esc(f.error || f.status || 'processing')}</div><div class="meta">${f.chunks||0} chunks · ${fmtMs(f.elapsed)}</div></div></div>`;
+    const hitMeta = f.search_hits != null ? ` · ${f.search_hits} hits` : '';
+    return `<div class="file"><div><div class="name">${esc(f.name)}</div><div class="meta">${esc(id)} · ${fmtSize(f.size)}</div></div><div class="right"><div class="${cls}">${esc(f.error || f.status || 'processing')}</div><div class="meta">${f.chunks||0} chunks${hitMeta} · ${fmtMs(f.elapsed)}</div></div></div>`;
   }).join('');
 }
 
@@ -239,16 +855,19 @@ async function refreshAll(){
   apiPill.textContent = `API: ${API_BASE}`;
   try{
     const status = await api('GET','/api/v1/status');
+    await refreshModelOptions();
     latestStatus = status;
     const state = status.state || status.vault_state || 'ok';
     vaultPill.textContent = `Vault: ${state}`;
     vaultPill.className = `pill ${String(state).toLowerCase().includes('unlock') || state==='ok' ? 'ok' : 'warn'}`;
+    authState.textContent = authLabel();
     itemsPill.textContent = `Docs: ${status.items ?? '-'}`;
     pendingPill.textContent = `Pending: ${status.pending_embeddings ?? 0}`;
     pendingPill.className = `pill ${(status.pending_embeddings||0)>0 ? 'warn' : 'ok'}`;
   }catch(err){
     vaultPill.textContent = `Vault: ${err.message}`;
     vaultPill.className = 'pill warn';
+    authState.textContent = authToken() ? `状态异常: ${err.message}` : '需要解锁';
   }
   renderFiles();
 }
@@ -297,13 +916,229 @@ function renderChunks(results, latency, query){
   }).join('');
 }
 
+function normalizeCapabilityRow(row){
+  if(typeof row === 'string'){
+    return {name: row, capabilities: ['chat','summary'], ready: true, source: 'scheduler'};
+  }
+  if(!row || typeof row !== 'object') return null;
+  const name = String(row.name || row.model || '').trim();
+  if(!name) return null;
+  const caps = Array.isArray(row.capabilities) ? row.capabilities.map(String) : [];
+  return {
+    name,
+    capabilities: caps.length ? caps : (row.source === 'attune-settings' ? ['chat','summary'] : []),
+    ready: row.ready !== false,
+    source: row.source || 'attune',
+    lifecycle: row.lifecycle || row.state || '',
+    dispatchable: row.dispatchable || '',
+    task_names: Array.isArray(row.task_names) ? row.task_names.map(String) : [],
+  };
+}
+
+function modelsFromAiStack(payload){
+  const rows = [];
+  const capabilityRows = Array.isArray(payload?.model_capabilities)
+    ? payload.model_capabilities
+    : Array.isArray(payload?.scheduler?.model_capabilities)
+      ? payload.scheduler.model_capabilities
+      : [];
+  for(const row of capabilityRows){
+    const normalized = normalizeCapabilityRow(row);
+    if(normalized) rows.push(normalized);
+  }
+  if(rows.length) return rows;
+  const schedulerModels = Array.isArray(payload?.scheduler?.models) ? payload.scheduler.models : [];
+  for(const row of schedulerModels){
+    const normalized = normalizeCapabilityRow(row);
+    if(normalized) rows.push(normalized);
+  }
+  const settingsModel = payload?.llm?.model || payload?.llm?.default_model;
+  if(!rows.length && settingsModel){
+    rows.push({name:String(settingsModel), capabilities:['chat','summary'], ready: payload?.llm?.configured !== false, source:'attune-settings'});
+  }
+  return rows;
+}
+
+function preferredModelForCapability(capability){
+  const candidates = latestModelCapabilities.filter(row=>row.capabilities.includes(capability));
+  return (candidates.find(row=>row.ready) || candidates[0] || null)?.name || '';
+}
+
+function controlIdsForKind(kind){
+  return kind === 'summary'
+    ? {select:'summaryModel', modelBtn:'summaryModelBtn', actionBtn:'summaryBtn', input:'summaryDetail', extra:'summaryScenario', state:'summaryModelState'}
+    : {select:'chatModel', modelBtn:'chatModelBtn', actionBtn:'chatBtn', input:'chatInput', extra:null, state:'chatModelState'};
+}
+
+function selectedCapability(kind){
+  return kind === 'summary' ? 'summary' : 'chat';
+}
+
+function selectedModelRow(kind){
+  const ids = controlIdsForKind(kind);
+  const model = document.getElementById(ids.select)?.value || '';
+  const capability = selectedCapability(kind);
+  return latestModelCapabilities.find(row=>row.name===model && row.capabilities.includes(capability)) || null;
+}
+
+function selectedModelGate(kind){
+  const ids = controlIdsForKind(kind);
+  const model = document.getElementById(ids.select)?.value || '';
+  if(!model) return {ready:false, reason:'没有选择模型'};
+  const row = selectedModelRow(kind);
+  if(row) return row.ready ? {ready:true, reason:''} : {ready:false, reason: row.lifecycle || row.dispatchable || 'not ready'};
+  if(latestModelCapabilities.length) return {ready:false, reason:'模型能力未匹配'};
+  return {ready:false, reason:'模型状态加载中'};
+}
+
+function setModelInteractionLocked(kind, locked){
+  modelSwitchState[kind] = locked;
+  const ids = controlIdsForKind(kind);
+  for(const id of [ids.select, ids.modelBtn, ids.actionBtn, ids.input, ids.extra].filter(Boolean)){
+    const el = document.getElementById(id);
+    if(el) el.disabled = locked;
+  }
+  const actionBtn = document.getElementById(ids.actionBtn);
+  if(actionBtn) actionBtn.dataset.lockReason = locked ? 'model-switching' : '';
+}
+
+function updateModelActionGate(kind){
+  const ids = controlIdsForKind(kind);
+  const actionBtn = document.getElementById(ids.actionBtn);
+  const input = document.getElementById(ids.input);
+  const extra = ids.extra ? document.getElementById(ids.extra) : null;
+  const stateEl = document.getElementById(ids.state);
+  const gate = selectedModelGate(kind);
+  const locked = modelSwitchState[kind];
+  if(actionBtn){
+    actionBtn.disabled = locked || !gate.ready;
+    actionBtn.dataset.lockReason = locked ? 'model-switching' : gate.ready ? '' : 'model-not-ready';
+  }
+  if(input) input.disabled = locked || !gate.ready;
+  if(extra) extra.disabled = locked || !gate.ready;
+  if(kind === 'chat'){
+    const voiceRecordBtn = document.getElementById('voiceChatRecordBtn');
+    const voiceStopBtn = document.getElementById('voiceChatStopBtn');
+    if(voiceRecordBtn) voiceRecordBtn.disabled = locked || !gate.ready || !!voiceRecorder;
+    if(voiceStopBtn) voiceStopBtn.disabled = !voiceRecorder;
+  }
+  if(stateEl && !locked){
+    const model = document.getElementById(ids.select)?.value || '-';
+    stateEl.className = gate.ready ? 'muted oktxt' : 'muted errtxt';
+    stateEl.textContent = gate.ready ? `模型: ${model} · ready` : `模型未就绪: ${model}`;
+  }
+}
+
+function modelActionAllowed(kind){
+  return !modelSwitchState[kind] && selectedModelGate(kind).ready;
+}
+
+function assertModelActionAllowed(kind){
+  if(modelSwitchState[kind]){
+    closeModelWait(kind, '模型切换中，请等待 ready 后再继续。');
+    return false;
+  }
+  const gate = selectedModelGate(kind);
+  if(!gate.ready){
+    closeModelWait(kind, `模型未就绪: ${gate.reason}`);
+    updateModelActionGate(kind);
+    return false;
+  }
+  return true;
+}
+
+async function refreshModelOptions(){
+  const stack = await api('GET','/api/v1/ai-stack');
+  latestModelCapabilities = modelsFromAiStack(stack);
+  for(const select of document.querySelectorAll('select[data-capability]')){
+    const capability = select.dataset.capability;
+    const previous = select.value;
+    const rows = latestModelCapabilities.filter(row=>row.capabilities.includes(capability));
+    if(!rows.length){
+      select.innerHTML = '<option value="">没有可用模型</option>';
+      continue;
+    }
+    select.innerHTML = rows.map(row=>{
+      const status = row.ready ? 'ready' : (row.lifecycle || row.dispatchable || 'not ready');
+      const tasks = row.task_names?.length ? ` · ${row.task_names.join(', ')}` : '';
+      return `<option value="${esc(row.name)}" data-ready="${row.ready ? '1' : '0'}">${esc(row.name)} · ${esc(status)}${esc(tasks)}</option>`;
+    }).join('');
+    const fallback = preferredModelForCapability(capability);
+    select.value = rows.some(row=>row.name===previous) ? previous : fallback;
+  }
+  updateModelActionGate('chat');
+  updateModelActionGate('summary');
+  return stack;
+}
+
+function modelReadinessFromAiStack(payload, model, capability='chat'){
+  latestModelCapabilities = modelsFromAiStack(payload);
+  const matched = latestModelCapabilities.find(row=>row.name===model && row.capabilities.includes(capability));
+  if(matched){
+    return matched.ready
+      ? {ready:true, reason:''}
+      : {ready:false, reason: matched.lifecycle || matched.dispatchable || 'not ready'};
+  }
+  const scheduler = payload?.scheduler || {};
+  const schedulerStatus = String(scheduler.status || '').toLowerCase();
+  const models = Array.isArray(scheduler.models) ? scheduler.models.map(String) : [];
+  if(schedulerStatus && schedulerStatus !== 'ready'){
+    return {ready:false, reason:scheduler.error || `scheduler ${schedulerStatus}`};
+  }
+  if(models.length && !models.includes(model)){
+    return {ready:false, reason:`scheduler models: ${models.join(', ')}`};
+  }
+  const llm = payload?.llm || {};
+  if(llm.configured === false && !models.length){
+    return {ready:false, reason:llm.note || 'LLM 未配置'};
+  }
+  return {ready:true, reason:''};
+}
+
+function closeModelWait(kind, message){
+  const stateEl = document.getElementById(kind==='chat'?'chatModelState':'summaryModelState');
+  stateEl.className = 'muted errtxt';
+  stateEl.textContent = message;
+}
+
+async function ensureSelectedModelReady(model, capability='chat'){
+  if(!model) throw new Error('没有选择模型');
+  if(arguments.length < 2){
+    const summarySelected = document.getElementById('summaryModel')?.value === model;
+    const chatSelected = document.getElementById('chatModel')?.value === model;
+    capability = summarySelected && !chatSelected ? 'summary' : 'chat';
+  }
+  const stack = await refreshModelOptions();
+  const readiness = modelReadinessFromAiStack(stack, model, capability);
+  if(!readiness.ready){
+    throw new Error(`模型 ${model} 未就绪: ${readiness.reason}`);
+  }
+}
+
 async function prepareModel(kind){
   const model = document.getElementById(kind==='chat'?'chatModel':'summaryModel').value;
+  const capability = kind === 'summary' ? 'summary' : 'chat';
   const stateEl = document.getElementById(kind==='chat'?'chatModelState':'summaryModelState');
+  const btn = document.getElementById(kind==='chat'?'chatModelBtn':'summaryModelBtn');
+  const previousText = btn ? btn.textContent : '';
+  setModelInteractionLocked(kind, true);
+  if(btn){btn.innerHTML = '<span class="spinner"></span>'}
+  stateEl.className = 'muted';
   stateEl.innerHTML = '<span class="spinner"></span>切换中...';
-  await api('PATCH','/api/v1/settings',{llm:{provider:'local_scheduler',endpoint:'http://127.0.0.1:8090',model,api_key:'local-scheduler'}});
-  stateEl.textContent = `模型: ${model}`;
-  return model;
+  try{
+    await ensureSelectedModelReady(model, capability);
+    await api('PATCH','/api/v1/settings',{llm:{model}});
+    stateEl.className = 'muted oktxt';
+    stateEl.textContent = `模型: ${model} · ready`;
+    return model;
+  }catch(err){
+    closeModelWait(kind, `模型未就绪: ${model}`);
+    throw err;
+  }finally{
+    setModelInteractionLocked(kind, false);
+    updateModelActionGate(kind);
+    if(btn){btn.disabled = false; btn.textContent = previousText || '切换模型'}
+  }
 }
 
 function appendMsg(kind, role, text, extra=''){
@@ -412,9 +1247,61 @@ async function pollChatJob(jobId, timeoutMs=45000){
   throw new Error(`scheduler job ${jobId} timed out`);
 }
 
-async function sendRag(kind){
+function summarySectionsMeta(sections){
+  if(!sections || typeof sections !== 'object') return '';
+  const blocks = [];
+  for(const [key, value] of Object.entries(sections)){
+    if(key === 'key_evidence') continue;
+    const rows = Array.isArray(value) ? value : [value];
+    const body = rows.map(row=>`<li>${esc(typeof row === 'string' ? row : JSON.stringify(row))}</li>`).join('');
+    if(body) blocks.push(`<div class="meta"><b>${esc(key)}</b><ul>${body}</ul></div>`);
+  }
+  return blocks.join('');
+}
+
+async function runSummaryWorkflow(){
+  if(!assertModelActionAllowed('summary')) return;
+  const input = document.getElementById('summaryDetail');
+  const btn = document.getElementById('summaryBtn');
+  const raw = input.value.trim();
+  if(!raw)return;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+  appendMsg('summary','你',raw);
+  const box = document.getElementById('summaryMsgs');
+  const waitId = `summary-workflow-${Date.now()}`;
+  box.insertAdjacentHTML('beforeend', `<div class="msg asst status" id="${waitId}"><div class="role">Attune Summary</div><span class="spinner"></span>Summary workflow 运行中...</div>`);
+  try{
+    await ensureKnowledgeReadyForRag();
+    const model = await prepareModel('summary');
+    const scenario = document.getElementById('summaryScenario').value || 'recent';
+    const t0 = performance.now();
+    const d = await api('POST','/api/v1/summary/workflow',{
+      scenario,
+      detail: raw,
+      model,
+      top_k: Number(document.getElementById('topK')?.value || 8),
+    });
+    const elapsed = performance.now() - t0;
+    document.getElementById(waitId)?.remove();
+    const answer = d.content || d.summary || JSON.stringify(d);
+    const cites = (d.citations||[]).slice(0,8).map(c=>`<span>${citationPreview(c)}</span>`).join('');
+    const sections = summarySectionsMeta(d.summary_sections);
+    const label = d.scenario_label || d.summary_workflow?.scenario || scenario;
+    const meta = `<div class="meta">耗时 ${fmtMs(latencyFromApiPayload(d, elapsed))} · ${esc(d.model || model)} · ${esc(label)} · knowledge ${d.knowledge_count ?? (d.citations||[]).length}</div>${sections}${cites?`<div class="cite">${cites}</div>`:''}`;
+    appendMsg('summary', 'Attune Summary Workflow', answer, meta);
+  }catch(err){
+    document.getElementById(waitId)?.remove();
+    appendMsg('summary','错误',err.message);
+  }finally{
+    btn.disabled = false; btn.textContent = '生成总结'; input.value = '';
+  }
+}
+
+async function sendRag(kind, options={}){
+  if(kind==='summary') return runSummaryWorkflow();
+  if(!assertModelActionAllowed('chat')) return;
   const isChat = kind==='chat';
-  const input = document.getElementById(isChat?'chatInput':'summaryInput');
+  const input = document.getElementById('chatInput');
   const btn = document.getElementById(isChat?'chatBtn':'summaryBtn');
   const raw = input.value.trim();
   if(!raw)return;
@@ -426,9 +1313,8 @@ async function sendRag(kind){
   try{
     await ensureKnowledgeReadyForRag();
     const model = await prepareModel(kind);
-    const message = isChat ? raw : `请只基于 Attune 知识库检索结果进行总结。输出：1. 核心结论；2. 关键证据；3. 风险或待办。\n\n总结目标：${raw}`;
     const t0 = performance.now();
-    const d = await api('POST','/api/v1/chat',{message});
+    const d = await api('POST','/api/v1/chat',{message: raw});
     const elapsed = performance.now() - t0;
     document.getElementById(waitId)?.remove();
     const jobId = chatJobIdFromResponse(d);
@@ -451,9 +1337,19 @@ async function sendRag(kind){
     const ragLabel = ragLabelFromApiPayload(d);
     const meta = `<div class="meta">耗时 ${fmtMs(displayedLatency)} · ${esc(modelLabel)}${ragLabel ? ` · ${esc(ragLabel)}` : ''}${jobId ? ` · ${jobId}` : ''} · knowledge ${d.knowledge_count ?? (d.citations||[]).length}</div>${cites?`<div class="cite">${cites}</div>`:''}`;
     appendMsg(kind, isChat ? 'Attune Chat RAG' : 'Attune Summary RAG', answer, meta);
+    if(isChat){
+      lastAssistantAnswer = answer;
+      const speakBtn = document.getElementById('speakLastBtn');
+      if(speakBtn) speakBtn.disabled = !lastAssistantAnswer.trim();
+      if(options.speak && document.getElementById('voiceAutoSpeak')?.checked){
+        await speakText(answer);
+      }
+    }
+    return answer;
   }catch(err){
     document.getElementById(waitId)?.remove();
     appendMsg(kind,'错误',err.message);
+    return '';
   }finally{
     btn.disabled = false; btn.textContent = isChat ? '提问' : '生成总结'; input.value = '';
   }

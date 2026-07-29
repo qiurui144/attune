@@ -134,6 +134,56 @@ impl Store {
         Ok(n as usize)
     }
 
+    /// Persist the exact byte span for an embedding chunk in `items.content`.
+    ///
+    /// This lets retrieval inject the matched chunk instead of the beginning of
+    /// a long manual. The table stores offsets only; plaintext stays in the
+    /// encrypted item row and is sliced after normal item decryption.
+    pub fn upsert_chunk_span(
+        &self,
+        item_id: &str,
+        chunk_idx: usize,
+        offset_start: usize,
+        offset_end: usize,
+        level: i32,
+        section_idx: usize,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chunk_spans \
+                (item_id, chunk_idx, offset_start, offset_end, level, section_idx) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                item_id,
+                chunk_idx as i64,
+                offset_start as i64,
+                offset_end as i64,
+                level as i64,
+                section_idx as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return the byte span for a matched embedding chunk.
+    pub fn get_chunk_span(
+        &self,
+        item_id: &str,
+        chunk_idx: usize,
+    ) -> Result<Option<(usize, usize, i32, usize)>> {
+        let row: Option<(i64, i64, i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT offset_start, offset_end, level, section_idx \
+                 FROM chunk_spans WHERE item_id = ?1 AND chunk_idx = ?2",
+                params![item_id, chunk_idx as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(s, e, level, section_idx)| {
+            (s as usize, e as usize, level as i32, section_idx as usize)
+        }))
+    }
+
     /// 测试辅助：统计某 item 的 chunk_breadcrumbs 行数。
     pub fn chunk_breadcrumb_count(&self, item_id: &str) -> Result<usize> {
         let n: i64 = self.conn.query_row(

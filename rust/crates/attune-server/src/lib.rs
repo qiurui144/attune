@@ -137,6 +137,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/chat", post(routes::chat::chat))
         .route("/api/v1/chat/stream", post(routes::chat::stream_chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
+        .route("/api/v1/summary/workflow", post(routes::summary::workflow))
         .route(
             "/api/v1/chat/local-scheduler/jobs/{job_id}",
             get(routes::chat::local_scheduler_job_status)
@@ -269,6 +270,17 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route(
             "/api/v1/office/transcribe",
             axum::routing::post(routes::office::post_transcribe),
+        )
+        .route("/api/v1/voice/status", get(routes::voice::status))
+        .route(
+            "/api/v1/voice/transcribe",
+            axum::routing::post(routes::voice::transcribe),
+        )
+        .route(
+            "/api/v1/voice/transcribe-file",
+            axum::routing::post(routes::voice::transcribe_file).layer(
+                axum::extract::DefaultBodyLimit::max(routes::voice::MAX_VOICE_AUDIO_BYTES),
+            ),
         )
         .route(
             "/api/v1/tts/synthesize",
@@ -582,6 +594,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/audit/log.csv", get(routes::audit::export_log_csv))
         // v0.7 F3: demo sample data 一键加载
         .route("/api/v1/demo/load", post(routes::demo::load_demo))
+        .route("/api/v1/demo/reset", post(routes::demo::reset_demo))
         // v0.6 Phase A.5.5 隐私 tier 检测（Settings UI Privacy 页用）
         .route("/api/v1/privacy/tier", get(routes::privacy::tier))
         // v1.0.6 Privacy Logic Strategy — 5 outbound points 总览 + 切换 + lock + wipe

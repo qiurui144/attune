@@ -191,6 +191,25 @@ Web UI 和 UI e2e 驱动对 scheduler answer job 使用 250ms 轮询，避免 1s
 轮询颗粒度吞掉 10s SLA 的尾部预算；需要压测较慢平台时可通过
 `ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS` 覆盖。
 
+Allwinner RTOS 手册 Web demo gate 用本机 Tina RTOS PDF 目录验证真实手册问答质量。
+默认上传 `RTOS_CCU_开发指南.pdf`，提问
+`rtos开发中如何在ccu开发中查询时钟的type和id`，并要求回答先给出可操作方法，再给出
+`RTOS_CCU_开发指南` / `4.2.1` 等原文位置证据，而不是只让用户自行查手册：
+
+```bash
+python3 tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py \
+  --profile rtos \
+  --base-url http://192.168.100.233:8968/ \
+  --api-url http://192.168.100.233:8969 \
+  --token "$ATTUNE_AUTH_TOKEN" \
+  --timeout-ms 240000 \
+  --out /tmp/attune-kb-web-demo-rtos.json
+```
+
+默认语料根为
+`/mnt/hdd/allwinner/v821/tina-v821-release-v1.1/tina-v821-release/docs/pdf/其他文档/RTOS`；
+其它机器可通过 `--rtos-corpus-dir` 和 `--rtos-source-file` 覆盖。
+
 ## 有头 Web UI 测试
 
 有头测试用于人工观察真实页面、焦点、后台任务条、scheduler 状态 chip、引用渲染和
