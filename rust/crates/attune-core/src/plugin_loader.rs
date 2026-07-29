@@ -169,17 +169,120 @@ pub struct PluginResources {
 }
 
 /// Declarative RAG profile contributed by an OSS or third-party plugin.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RagProfileSpec {
     pub id: String,
     #[serde(default)]
     pub intents: Vec<String>,
+    #[serde(default)]
+    pub workflow: RagWorkflowSpec,
     #[serde(default)]
     pub retrieval: RagRetrievalSpec,
     #[serde(default)]
     pub answer: RagAnswerSpec,
     #[serde(default)]
     pub grounding: RagGroundingSpec,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RagWorkflowSpec {
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub planner: RagWorkflowPlannerSpec,
+    #[serde(default)]
+    pub clarification: RagWorkflowClarificationSpec,
+    #[serde(default)]
+    pub evidence: RagWorkflowEvidenceSpec,
+    #[serde(default)]
+    pub verification: RagWorkflowVerificationSpec,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagWorkflowPlannerSpec {
+    #[serde(default)]
+    pub max_sub_queries: Option<usize>,
+    #[serde(default)]
+    pub preserve_user_terms: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagWorkflowClarificationSpec {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub scope_terms: Vec<String>,
+    #[serde(default)]
+    pub require_when_multiple_scopes: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagWorkflowEvidenceSpec {
+    #[serde(default)]
+    pub max_evidence_tokens: Option<usize>,
+    #[serde(default)]
+    pub include_breadcrumbs: Option<bool>,
+    #[serde(default)]
+    pub chunk_kind_priority: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RagWorkflowVerificationSpec {
+    #[serde(default)]
+    pub min_grounding_confidence: Option<f32>,
+    #[serde(default)]
+    pub max_repair_attempts: Option<usize>,
+}
+
+#[cfg(test)]
+mod rag_profile_tests {
+    use super::*;
+
+    #[test]
+    fn rag_profile_accepts_workflow_clarification_and_verification_config() {
+        let yaml = r#"
+id: configurable-small-model-rag
+intents: [chat.rag.question]
+workflow:
+  mode: reliable
+  planner:
+    max_sub_queries: 4
+    preserve_user_terms: true
+  clarification:
+    enabled: true
+    scope_terms: [rtos, linux]
+    require_when_multiple_scopes: true
+  evidence:
+    max_evidence_tokens: 1400
+    include_breadcrumbs: true
+    chunk_kind_priority: [ApiReference, Procedure]
+  verification:
+    min_grounding_confidence: 0.72
+    max_repair_attempts: 1
+retrieval:
+  strategy: source_diverse_cited_chunks
+answer:
+  task: kb.query.ask
+grounding:
+  min_citations: 1
+"#;
+
+        let profile: RagProfileSpec = serde_yaml::from_str(yaml).expect("profile yaml");
+
+        assert_eq!(profile.workflow.mode.as_deref(), Some("reliable"));
+        assert_eq!(profile.workflow.planner.max_sub_queries, Some(4));
+        assert_eq!(profile.workflow.clarification.scope_terms, vec!["rtos", "linux"]);
+        assert_eq!(profile.workflow.evidence.max_evidence_tokens, Some(1400));
+        assert_eq!(
+            profile.workflow.evidence.chunk_kind_priority,
+            vec!["ApiReference", "Procedure"]
+        );
+        assert_eq!(
+            profile.workflow.verification.min_grounding_confidence,
+            Some(0.72)
+        );
+        assert_eq!(profile.workflow.verification.max_repair_attempts, Some(1));
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -42,6 +42,49 @@ pub struct RagRetrievalTrace {
     pub citations_required: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagWorkflowStageTrace {
+    pub stage: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl RagWorkflowStageTrace {
+    pub fn completed(stage: impl Into<String>) -> Self {
+        Self {
+            stage: stage.into(),
+            status: "completed".to_string(),
+            reason: None,
+        }
+    }
+
+    pub fn blocked(stage: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            stage: stage.into(),
+            status: "blocked".to_string(),
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagWorkflowTrace {
+    pub mode: String,
+    pub stages: Vec<RagWorkflowStageTrace>,
+    pub clarification_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_layer: Option<String>,
+    pub repair_attempted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagClarification {
+    pub reason: &'static str,
+    pub scopes: Vec<String>,
+    pub message: String,
+}
+
 impl EvidenceCoverage {
     pub fn sufficient(&self) -> bool {
         self.status == "sufficient"
@@ -306,6 +349,67 @@ pub fn rag_metadata_with_trace(
     })
 }
 
+#[allow(dead_code)] // Unit-tested workflow metadata helper; route code may attach richer traces directly.
+pub fn rag_metadata_with_workflow(
+    coverage: &EvidenceCoverage,
+    answer_mode: &'static str,
+    degraded_reason: Option<&'static str>,
+    knowledge_count: usize,
+    workflow: &RagWorkflowTrace,
+) -> Value {
+    let mut meta = rag_metadata(coverage, answer_mode, degraded_reason, knowledge_count);
+    if let Some(obj) = meta.as_object_mut() {
+        obj.insert("rag_workflow".to_string(), serde_json::json!(workflow));
+    }
+    meta
+}
+
+pub fn workflow_clarification_for_query(
+    query: &str,
+    knowledge: &[Value],
+    profile: &attune_core::plugin_loader::RagProfileSpec,
+) -> Option<RagClarification> {
+    let clarification = &profile.workflow.clarification;
+    if clarification.enabled == Some(false) {
+        return None;
+    }
+    if clarification.require_when_multiple_scopes == Some(false) {
+        return None;
+    }
+    if clarification.scope_terms.is_empty() {
+        return None;
+    }
+
+    let query_l = query.to_ascii_lowercase();
+    let mut scopes = Vec::new();
+    for term in &clarification.scope_terms {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        let term_l = term.to_ascii_lowercase();
+        if query_l.contains(&term_l) {
+            return None;
+        }
+        if knowledge.iter().any(|item| knowledge_matches_scope(item, &term_l)) {
+            scopes.push(term_l);
+        }
+    }
+    scopes.dedup();
+    if scopes.len() < 2 {
+        return None;
+    }
+
+    Some(RagClarification {
+        reason: "multiple_source_scopes",
+        message: format!(
+            "当前知识库命中了多个来源范围：{}。请先说明你要问哪个平台或资料范围。",
+            scopes.join("、")
+        ),
+        scopes,
+    })
+}
+
 pub fn expanded_retrieval_queries(query: &str, intent: RagIntent) -> Vec<String> {
     let q = query.trim();
     if q.is_empty() {
@@ -431,6 +535,7 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 fn knowledge_text(k: &Value) -> String {
     [
         k.get("title").and_then(|v| v.as_str()),
+        k.get("source_scope").and_then(|v| v.as_str()),
         k.get("inject_content").and_then(|v| v.as_str()),
         k.get("content").and_then(|v| v.as_str()),
     ]
@@ -438,6 +543,14 @@ fn knowledge_text(k: &Value) -> String {
     .flatten()
     .collect::<Vec<_>>()
     .join("\n")
+}
+
+fn knowledge_matches_scope(k: &Value, scope: &str) -> bool {
+    let scope = scope.trim().to_ascii_lowercase();
+    if scope.is_empty() {
+        return false;
+    }
+    knowledge_text(k).to_ascii_lowercase().contains(&scope)
 }
 
 fn coverage_threshold(intent: RagIntent) -> f32 {
@@ -681,6 +794,7 @@ mod tests {
         let profile = attune_core::plugin_loader::RagProfileSpec {
             id: "default_kb_summary".to_string(),
             intents: vec!["chat.rag.summary".to_string()],
+            workflow: Default::default(),
             retrieval: attune_core::plugin_loader::RagRetrievalSpec {
                 strategy: "custom_summary".to_string(),
                 fallback_when_empty: Some("refuse".to_string()),
@@ -797,5 +911,102 @@ mod tests {
 
         assert_eq!(meta["retrieval"]["passes"][1], "expanded_retrieval");
         assert_eq!(meta["retrieval"]["queries"][0], "排查 TCP/IP troubleshoot");
+    }
+
+    #[test]
+    fn workflow_clarification_detects_multiple_configured_source_scopes() {
+        let profile = attune_core::plugin_loader::RagProfileSpec {
+            id: "default_kb_chat".to_string(),
+            intents: vec!["chat.rag.question".to_string()],
+            workflow: attune_core::plugin_loader::RagWorkflowSpec {
+                clarification: attune_core::plugin_loader::RagWorkflowClarificationSpec {
+                    enabled: Some(true),
+                    scope_terms: vec!["rtos".to_string(), "linux".to_string()],
+                    require_when_multiple_scopes: Some(true),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let knowledge = vec![
+            serde_json::json!({
+                "title": "RTOS DMAC guide",
+                "source_scope": "rtos",
+                "content": "hal_dma_chan_request requests an RTOS DMA channel."
+            }),
+            serde_json::json!({
+                "title": "Linux DMAC guide",
+                "source_scope": "linux",
+                "content": "dma_request_chan requests a Linux DMA channel."
+            }),
+        ];
+
+        let clarification =
+            workflow_clarification_for_query("dmac 申请 dma 通道的函数接口是什么", &knowledge, &profile)
+                .expect("multiple configured scopes should require clarification");
+
+        assert_eq!(clarification.reason, "multiple_source_scopes");
+        assert_eq!(clarification.scopes, vec!["rtos", "linux"]);
+        assert!(clarification.message.contains("rtos"));
+        assert!(clarification.message.contains("linux"));
+    }
+
+    #[test]
+    fn workflow_clarification_respects_user_named_scope() {
+        let profile = attune_core::plugin_loader::RagProfileSpec {
+            id: "default_kb_chat".to_string(),
+            workflow: attune_core::plugin_loader::RagWorkflowSpec {
+                clarification: attune_core::plugin_loader::RagWorkflowClarificationSpec {
+                    enabled: Some(true),
+                    scope_terms: vec!["rtos".to_string(), "linux".to_string()],
+                    require_when_multiple_scopes: Some(true),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let knowledge = vec![
+            serde_json::json!({"source_scope": "rtos", "content": "RTOS DMA interface"}),
+            serde_json::json!({"source_scope": "linux", "content": "Linux DMA interface"}),
+        ];
+
+        assert!(workflow_clarification_for_query(
+            "rtos 中 dmac 申请 dma 通道的函数接口是什么",
+            &knowledge,
+            &profile,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn metadata_can_report_rag_workflow_trace() {
+        let coverage = EvidenceCoverage {
+            intent: RagIntent::Lookup,
+            score: 0.8,
+            status: "sufficient",
+            found_evidence: true,
+            missing: vec![],
+        };
+        let workflow = RagWorkflowTrace {
+            mode: "reliable".to_string(),
+            stages: vec![
+                RagWorkflowStageTrace::completed("intent_analyze"),
+                RagWorkflowStageTrace::blocked("clarification", "multiple_source_scopes"),
+            ],
+            clarification_required: true,
+            failure_layer: Some("prompt_profile".to_string()),
+            repair_attempted: false,
+        };
+
+        let meta = rag_metadata_with_workflow(&coverage, "clarification", Some("ambiguous_source_scope"), 2, &workflow);
+
+        assert_eq!(meta["rag_workflow"]["mode"], "reliable");
+        assert_eq!(meta["rag_workflow"]["clarification_required"], true);
+        assert_eq!(meta["rag_workflow"]["stages"][1]["status"], "blocked");
+        assert_eq!(
+            meta["rag_workflow"]["stages"][1]["reason"],
+            "multiple_source_scopes"
+        );
+        assert_eq!(meta["rag_workflow"]["failure_layer"], "prompt_profile");
     }
 }

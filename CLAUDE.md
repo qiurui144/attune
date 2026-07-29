@@ -280,6 +280,7 @@ git push origin main
 
 - **cargo build/test 完成后,若未来 1 小时内无再 build 需求 → 立即 `cargo clean`**
 - Rust 编译缓存策略:全局 Cargo 使用 `/usr/bin/sccache`;`SCCACHE_DIR=/data/cache/sccache`;`SCCACHE_CACHE_SIZE=20G`;workspace target 分仓隔离到 `/data/cargo-target/attune` 与 `/data/cargo-target/attune-pro`
+- 仓库根目录 `.cargo/config.toml` 与 `rust/.cargo/config.toml` 必须同时固定 `target-dir = "/data/cargo-target/attune"`;从 repo root 执行 `cargo --manifest-path rust/Cargo.toml` 不能落回 `rust/target`
 - 每轮 cargo build/test 后必须执行一次 `scripts/rust-cache-status.sh`;若 `/data` 可用 < 200G 或任一 target > 30G,本轮结束前执行 `scripts/rust-cache-clean.sh`
 - 主 worktree target/ 可达 100+GB(184G attune / 93G attune-pro 实测);`/data/attune-pro-target` 是旧 attune-pro 外置 Cargo target,已废弃,如再次出现直接删除
 - 清理命令:常规用 `scripts/rust-cache-clean.sh`;需要全量回收时用 `scripts/rust-cache-clean.sh all`

@@ -25,7 +25,7 @@ du -sh \
 
 echo
 echo "== cargo config =="
-for cfg in "$HOME/.cargo/config.toml" "$ROOT/rust/.cargo/config.toml" /data/company/project/attune-pro/.cargo/config.toml; do
+for cfg in "$HOME/.cargo/config.toml" "$ROOT/.cargo/config.toml" "$ROOT/rust/.cargo/config.toml" /data/company/project/attune-pro/.cargo/config.toml; do
   if [[ -f "$cfg" ]]; then
     echo "-- $cfg"
     sed -n '1,120p' "$cfg"
@@ -34,5 +34,9 @@ done
 
 echo
 echo "== sccache =="
-command -v sccache
-sccache --show-stats || true
+if command -v sccache >/dev/null 2>&1; then
+  command -v sccache
+  sccache --show-stats || true
+else
+  echo "sccache: not installed; cargo target-dir policy still applies"
+fi

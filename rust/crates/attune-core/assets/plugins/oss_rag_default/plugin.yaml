@@ -11,6 +11,22 @@ prompt_file: prompt.md
 rag_profiles:
   - id: default_kb_chat
     intents: [chat.rag.lookup, chat.rag.question]
+    workflow:
+      mode: reliable
+      planner:
+        max_sub_queries: 4
+        preserve_user_terms: true
+      clarification:
+        enabled: true
+        require_when_multiple_scopes: true
+        scope_terms: [rtos, linux, android, baremetal, u-boot]
+      evidence:
+        max_evidence_tokens: 1600
+        include_breadcrumbs: true
+        chunk_kind_priority: [ApiReference, Procedure, CommandBlock, ConfigBlock]
+      verification:
+        min_grounding_confidence: 0.70
+        max_repair_attempts: 1
     retrieval:
       strategy: source_diverse_cited_chunks
       fallback_when_empty: refuse
@@ -28,6 +44,22 @@ rag_profiles:
       allow_extractive_repair: true
   - id: default_kb_diagnostic
     intents: [chat.rag.diagnostic, chat.rag.procedure, chat.rag.troubleshooting]
+    workflow:
+      mode: reliable
+      planner:
+        max_sub_queries: 5
+        preserve_user_terms: true
+      clarification:
+        enabled: true
+        require_when_multiple_scopes: true
+        scope_terms: [rtos, linux, android, baremetal, u-boot]
+      evidence:
+        max_evidence_tokens: 1800
+        include_breadcrumbs: true
+        chunk_kind_priority: [Troubleshooting, Procedure, CommandBlock, ConfigBlock]
+      verification:
+        min_grounding_confidence: 0.72
+        max_repair_attempts: 1
     retrieval:
       strategy: expanded_diagnostic_cited_chunks
       fallback_when_empty: refuse
@@ -45,6 +77,22 @@ rag_profiles:
       allow_extractive_repair: false
   - id: default_kb_summary
     intents: [chat.rag.summary, document.summary]
+    workflow:
+      mode: reliable
+      planner:
+        max_sub_queries: 5
+        preserve_user_terms: true
+      clarification:
+        enabled: true
+        require_when_multiple_scopes: true
+        scope_terms: [rtos, linux, android, baremetal, u-boot]
+      evidence:
+        max_evidence_tokens: 2200
+        include_breadcrumbs: true
+        chunk_kind_priority: [Section, Paragraph, ApiReference, Procedure]
+      verification:
+        min_grounding_confidence: 0.68
+        max_repair_attempts: 1
     retrieval:
       strategy: recent_or_source_diverse_cited_chunks
       fallback_when_empty: refuse

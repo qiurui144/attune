@@ -3066,6 +3066,28 @@ fn plugin_rag_prompt<'a>(
         .map(|plugin| plugin.prompt.trim())
 }
 
+fn plugin_rag_profile<'a>(
+    registry: &'a attune_core::plugin_registry::PluginRegistry,
+    intent: &str,
+) -> Option<&'a attune_core::plugin_loader::RagProfileSpec> {
+    registry.plugins().find_map(|plugin| {
+        plugin
+            .manifest
+            .rag_profiles
+            .iter()
+            .find(|profile| profile.intents.iter().any(|profile_intent| profile_intent == intent))
+    })
+}
+
+fn rag_guardrail_intent_key(intent: crate::rag_guardrails::RagIntent) -> &'static str {
+    match intent {
+        crate::rag_guardrails::RagIntent::Diagnostic => "chat.rag.diagnostic",
+        crate::rag_guardrails::RagIntent::Summary => "chat.rag.summary",
+        crate::rag_guardrails::RagIntent::Comparison => "chat.rag.comparison",
+        crate::rag_guardrails::RagIntent::Lookup => "chat.rag.question",
+    }
+}
+
 fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
     if let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) {
         for (key, value) in source {
@@ -4766,6 +4788,112 @@ pub async fn chat(
         citations_required: rag_policy.min_citations,
     };
     if !web_search_used {
+        let workflow_profile = plugin_rag_profile(
+            &plugin_registry,
+            rag_guardrail_intent_key(rag_coverage.intent),
+        );
+        if let Some(clarification) = workflow_profile.and_then(|profile| {
+            crate::rag_guardrails::workflow_clarification_for_query(
+                &body.message,
+                &knowledge,
+                profile,
+            )
+        }) {
+            let citations: Vec<serde_json::Value> =
+                knowledge.iter().map(eval_surface::build_citation).collect();
+            let tokens_in = knowledge
+                .iter()
+                .map(|k| {
+                    k.get("inject_content")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                        .map(|s| cost::estimate_tokens(s, LOCAL_EXTRACTIVE_MODEL_ID))
+                        .unwrap_or(0)
+                })
+                .sum::<usize>();
+            let tokens_out = cost::estimate_tokens(&clarification.message, LOCAL_EXTRACTIVE_MODEL_ID);
+            let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+            let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+            let cost_block = eval_surface::build_cost_block(
+                tokens_in,
+                tokens_out,
+                LOCAL_EXTRACTIVE_MODEL_ID,
+                true,
+            );
+            let workflow = crate::rag_guardrails::RagWorkflowTrace {
+                mode: workflow_profile
+                    .and_then(|profile| profile.workflow.mode.clone())
+                    .unwrap_or_else(|| "auto".to_string()),
+                stages: vec![
+                    crate::rag_guardrails::RagWorkflowStageTrace::completed("intent_analyze"),
+                    crate::rag_guardrails::RagWorkflowStageTrace::completed("retrieval"),
+                    crate::rag_guardrails::RagWorkflowStageTrace::blocked(
+                        "clarification",
+                        clarification.reason,
+                    ),
+                ],
+                clarification_required: true,
+                failure_layer: Some("prompt_profile".to_string()),
+                repair_attempted: false,
+            };
+            let mut response_json = serde_json::json!({
+                "content": clarification.message,
+                "citations": citations,
+                "knowledge_count": knowledge.len(),
+                "session_id": body.session_id,
+                "web_search_used": false,
+                "confidence": 2,
+                "context_tier": context_tier,
+                "cost_estimate": {
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "cost_usd": null,
+                    "is_local": true,
+                    "input_rate_per_k": null,
+                    "cache_hit": true,
+                    "cached_tokens": tokens_in,
+                    "vendor_tokens_in": 0,
+                    "vendor_tokens_out": 0,
+                },
+                "cost": cost_block,
+                "grounding": null,
+                "eval": eval_block,
+                "latency_ms": chat_latency_ms,
+                "weight_stats": {
+                    "items_total": weight_stats.items_total,
+                    "items_boosted": weight_stats.items_boosted,
+                    "items_dropped": weight_stats.items_dropped,
+                    "items_kept": weight_stats.items_kept,
+                },
+                "compression_stats": {
+                    "chunks": 0,
+                    "cache_hits": 0,
+                    "orig_chars": 0,
+                    "strategy": "skipped-clarification",
+                },
+                "local_scheduler": null,
+                "clarification_required": true,
+                "clarification": {
+                    "reason": clarification.reason,
+                    "scopes": clarification.scopes,
+                },
+            });
+            response_json["rag_intent_plan"] =
+                rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+            let mut metadata = crate::rag_guardrails::rag_metadata_with_trace(
+                &rag_coverage,
+                "clarification-required",
+                Some("ambiguous_source_scope"),
+                knowledge.len(),
+                &rag_trace,
+            );
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert("rag_workflow".to_string(), serde_json::json!(workflow));
+            }
+            merge_json_object(&mut response_json, metadata);
+            return Ok(Json(response_json));
+        }
+
         if let Some(content) = source_title_clarification_request(&body.message, &knowledge) {
             let citations: Vec<serde_json::Value> =
                 knowledge.iter().map(eval_surface::build_citation).collect();
