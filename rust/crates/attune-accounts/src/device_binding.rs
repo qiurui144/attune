@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub enum FormFactor {
     Laptop,
     Desktop,
-    K3Appliance,
+    LocalSchedulerAppliance,
     Other,
 }
 
@@ -19,7 +19,7 @@ impl FormFactor {
         match self {
             FormFactor::Laptop => "laptop",
             FormFactor::Desktop => "desktop",
-            FormFactor::K3Appliance => "k3_appliance",
+            FormFactor::LocalSchedulerAppliance => "local_scheduler_appliance",
             FormFactor::Other => "other",
         }
     }

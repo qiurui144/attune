@@ -67,13 +67,7 @@ pub trait CacheBackend: Send + Sync {
 
     /// Insert `value` at `key` in `scope`. `ttl_secs = None` means "use the
     /// backend default" (typically `settings.cache.retention_days * 86400`).
-    async fn put(
-        &self,
-        scope: CacheScope,
-        key: &str,
-        value: CachedValue,
-        ttl_secs: Option<u32>,
-    );
+    async fn put(&self, scope: CacheScope, key: &str, value: CachedValue, ttl_secs: Option<u32>);
 
     /// Remove all entries in `scope`. Returns the number of entries removed.
     /// `CacheScope::All` clears every scope.

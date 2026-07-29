@@ -1,0 +1,19 @@
+{
+  "schema_version": "attune.eval.suite.v1",
+  "suite_id": "pr_rag_smoke",
+  "purpose": "Hardware-free PR RAG smoke for manifest validation and deterministic networking fixtures.",
+  "corpora": ["networking_tcpip_smoke"],
+  "scenarios": ["networking_tcpip_troubleshooting", "networking_tcpip_summary"],
+  "gates": ["manifest", "fixture_materialization", "search_dry_run", "chat_dry_run", "summary_dry_run"],
+  "thresholds": {
+    "retrieval_hit_at_5_min": 0.85,
+    "citation_hit_rate_min": 0.9,
+    "answer_accuracy_min": 0.8,
+    "terminal_error_rate_max": 0.02,
+    "hot_chat_p95_ms_max": 30000
+  },
+  "ci": {
+    "hardware_required": false,
+    "default_runner": "hosted_pr"
+  }
+}

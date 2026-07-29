@@ -22,9 +22,26 @@ let stopped = false;
 let backoff = 500;
 const MAX_BACKOFF = 30_000;
 
+// B6 (2026-06-06): stop the reconnect-storm when the token is present but
+// REJECTED. A WebSocket handshake cannot read the HTTP 401 status (RFC 6455), but
+// an auth rejection closes the socket *before* it ever opens. We track that:
+// `opened` flips true on the first successful onopen; a close while still
+// unopened is a handshake failure. After AUTH_FAIL_LIMIT consecutive
+// handshake failures (with a token present — so it's almost certainly a 401 on a
+// stale/invalid token), we give up reconnecting instead of looping forever and
+// spamming the console. A fresh unlock/login calls startProgressWS(), which
+// resets this counter and resumes. A socket that DID open (transient network
+// blip) keeps the normal exponential-backoff reconnect.
+let opened = false;
+let handshakeFailures = 0;
+const AUTH_FAIL_LIMIT = 3;
+
 export function startProgressWS(): void {
   stopProgressWS();
   stopped = false;
+  // Fresh login/unlock — clear the auth-failure latch so a new (valid) token
+  // gets a clean reconnect budget.
+  handshakeFailures = 0;
   connect();
 }
 
@@ -44,16 +61,18 @@ export function stopProgressWS(): void {
 
 function connect(): void {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // WebSocket handshakes cannot carry an Authorization header (RFC 6455),
-  // so the token is passed as a query param when available. If no token exists
-  // yet (vault not unlocked / first load) we still attempt the connection so
-  // that no-auth dev mode works; a 401 close will simply trigger scheduleReconnect,
-  // and startProgressWS() is called again from handleUnlock() once the token
-  // is set in sessionStorage.
+  // WebSocket handshakes cannot carry an Authorization header (RFC 6455), so the
+  // token is passed as a query param. B2: callers (App mount / handleUnlock /
+  // handleWizardComplete) only start the WS once a token exists; if it is somehow
+  // gone (logout race) bail rather than open an auth-less socket that 401s and
+  // restarts the reconnect storm.
   const token = getToken();
-  const url = token
-    ? `${proto}://${location.host}/ws/scan-progress?token=${encodeURIComponent(token)}`
-    : `${proto}://${location.host}/ws/scan-progress`;
+  if (token == null) {
+    stopped = true;
+    return;
+  }
+  const url = `${proto}://${location.host}/ws/scan-progress?token=${encodeURIComponent(token)}`;
+  opened = false;
   try {
     ws = new WebSocket(url);
   } catch {
@@ -61,6 +80,10 @@ function connect(): void {
     return;
   }
   ws.onopen = () => {
+    // Handshake succeeded → the token was accepted. Reset both the backoff and
+    // the auth-failure latch: any future close is a genuine network blip, not 401.
+    opened = true;
+    handshakeFailures = 0;
     backoff = 500;
   };
   ws.onmessage = (ev) => {
@@ -79,6 +102,18 @@ function connect(): void {
 
 function scheduleReconnect(): void {
   if (stopped) return;
+  // B6: a close while the socket never opened is a handshake failure — with a
+  // token present, that is overwhelmingly an HTTP 401 on a stale/invalid token
+  // (the WS API can't surface the status code). After AUTH_FAIL_LIMIT consecutive
+  // such failures, latch off instead of reconnect-spamming. The latch clears on
+  // the next startProgressWS() (fresh unlock/login with a new token).
+  if (!opened) {
+    handshakeFailures += 1;
+    if (handshakeFailures >= AUTH_FAIL_LIMIT) {
+      stopped = true;
+      return;
+    }
+  }
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (!stopped) connect();

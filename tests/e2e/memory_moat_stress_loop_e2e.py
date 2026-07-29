@@ -15,20 +15,61 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from json import JSONDecodeError
 
 BASE = "http://localhost:18905"
 ROUNDS = 120
 PASS = 0
 FAIL = 0
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def read_json_response(resp):
+    length = resp.headers.get("Content-Length")
+    if length:
+        raw = resp.read(int(length))
+        return json.loads(raw.decode()) if raw else {}
+
+    # Some hyper/urllib keep-alive combinations can leave resp.read() waiting
+    # for EOF even after the server logged a 200. read1() returns buffered data
+    # without trying to fill MAX_RESPONSE_BYTES, so this loop exits as soon as a
+    # complete JSON value is available.
+    sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+    if sock is not None:
+        sock.settimeout(0.2)
+    reader = getattr(resp, "read1", None)
+    if reader is None and getattr(resp, "fp", None) is not None:
+        reader = getattr(resp.fp, "read1", None)
+    if reader is None:
+        reader = resp.read
+
+    raw = b""
+    while len(raw) < MAX_RESPONSE_BYTES:
+        try:
+            chunk = reader(min(65536, MAX_RESPONSE_BYTES - len(raw)))
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+        raw += chunk
+        try:
+            return json.loads(raw.decode())
+        except JSONDecodeError:
+            continue
+    if not raw:
+        return {}
+    return json.loads(raw.decode())
 
 
 def req(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
-    headers = {"Content-Type": "application/json"} if body is not None else {}
+    headers = {"Connection": "close"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
     r = urllib.request.Request(BASE + path, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(r, timeout=30) as resp:
-            return resp.status, json.loads(resp.read().decode())
+            return resp.status, read_json_response(resp)
     except urllib.error.HTTPError as e:
         return e.code, {}
     except Exception:
@@ -44,10 +85,13 @@ def upload(filename, content):
     ).encode()
     r = urllib.request.Request(
         BASE + "/api/v1/upload", data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Connection": "close",
+        }, method="POST")
     try:
         with urllib.request.urlopen(r, timeout=30) as resp:
-            return json.loads(resp.read().decode())
+            return read_json_response(resp)
     except Exception:
         return {}
 

@@ -51,16 +51,11 @@ per § 版本拆解能力 §4 强制切片表(每行 ≥ 主题 + 交付 + 时�
 - v1.0.4 / v1.0.5 / v1.0.6 三者依赖 v1.0.3 但相互独立 → 6/12-6/25 三 worktree 同跑
 - v1.0.7 / v1.0.8 / v1.0.9 / v1.0.10 / v1.0.11 仅 blockedBy v1.0.2 → 7 月起开 5 worktree 真并行
 
-## 双产品线架构
+## Rust-first 架构
 
-本仓库包含两条并行的产品线，共享 Chrome 扩展协议（`/api/v1/*`）：
+当前运行时代码集中在 Rust workspace，并由 Chrome 扩展与 Tauri 桌面壳对接 `/api/v1/*`。
 
-1. **Python 原型线** (`python/src/attune_python/`) — 实验/验证
-   - FastAPI + ChromaDB + SQLite FTS5
-   - 快速迭代新特性和算法
-   - 73 tests，持续增长
-
-2. **Rust 商用线** (`rust/`) — 生产/发布
+1. **Rust 生产线** (`rust/`) — 生产/发布
    - Axum + rusqlite + tantivy + usearch + hdbscan
    - 加密模型：Argon2id + AES-256-GCM + Device Secret
    - 定位：**私有 AI 知识伙伴**（主动进化 + 对话式 + 混合智能，详见 `docs/superpowers/specs/2026-04-17-product-positioning-design.md`）
@@ -69,14 +64,23 @@ per § 版本拆解能力 §4 强制切片表(每行 ≥ 主题 + 交付 + 时�
    - 浏览器自动化网络搜索（chromiumoxide 驱动系统 Chrome，零 API 费用）
    - SkillClaw 风格后台自动技能进化（失败信号 → LLM 扩展词 → 静默生效）
    - 行为画像 + 画像导出/导入 + WebDAV 远程目录
-   - 237+ tests（210 attune-core + 27 attune-server），独立 README/DEVELOP/RELEASE
-   - 最新里程碑：v0.5.x 改名为 Attune + 浏览器搜索重构完成
+   - 全量测试套件覆盖 5 crate（attune-core 占绝大多数），独立 README/DEVELOP/RELEASE；测试规模 / 版本以 `rust/RELEASE.md`（SSOT）+ `cargo test --workspace` 为准
+   - 当前版本以 `rust/RELEASE.md` 为 SSOT（截至本说明已发 v1.2.0：GitConnector + WASM 跨平台 agent + 一键依赖部署，建立在 v1.1.0 ACP 与 v1.0 GA 之上）
 
 **测试策略**：`docs/TESTING.md` 固化了产品级测试方案 — 六层测试金字塔、GitHub 真实知识仓库作为语料（rust-lang/book、CyC2018/CS-Notes 等版本固化）、golden set 质量回归、禁止随机测试数据。添加任何 feature 前先参考该文档的测试矩阵。
 
-Python 验证后，择优特性迁移到 Rust 商用线。对应开发时根据任务选择目录：
-- 涉及算法实验、ML 集成、快速原型 → 改 Python 端
-- 涉及加密、性能、打包分发、生产部署 → 改 Rust 端
+## 技术文档 / wiki / 工作流 SSOT（2026-06-16 确立）
+
+**内容边界**（用户拍板）：**wiki 承载全部技术内容**（架构 / 测试报告 / API / 原理）；**官网博文区 = 面向用户的科普 / 案例**（非技术细节）。技术内容先沉淀到 `docs/`，日后同步到 wiki。
+
+- **开发工作流 + 分工 SSOT**：`docs/agent-development-workflow.md` —— 插件/agent 端到端流水线（spec→G1→plan→G2→impl→**test-fix-verify**→双岗位 review→G3/G4→ship）+ 六类测试下限 + §4.5 LLM 兜底 + real-LLM N=3 F1≥0.85 ratchet + 角色矩阵 + 输出模式契约。
+- **wiki 技术内容**：`docs/wiki/`（`memory-token-economy.md` 省 token 架构 / `vision-understanding-pipeline.md` 视觉稳定输出流水线）。
+- **质量证据（先进性/稳定性/准确性）**：`docs/benchmarks/`（proof points，每条引 commit/runs，PENDING-EXPERT 项明示）。
+- **视觉增强 spec**：`docs/superpowers/specs/2026-06-16-vision-understanding-enhancement.md`（DRAFT，nontext+VLM 已 ship，增量=grounding+N=3 gate+矩阵 failover+共享 agent 暴露）。
+
+attune 当前实现主线在 `rust/`；算法、集成、UX 与生产能力变更都应落到 Rust 代码和可回归测试。
+- 涉及模型 / 检索 / 集成实验 → 在 Rust 模块或 `tests/e2e/` 中做可回归验证
+- 涉及加密、性能、打包分发、生产部署 → 改 Rust 实现
 
 ## 三产品矩阵 + 边界（与 attune-enterprise、attune-pro 的关系）
 
@@ -99,7 +103,7 @@ Python 验证后，择优特性迁移到 Rust 商用线。对应开发时根据�
 **技术上独立**（硬约束保持）：
 - **不调用 attune-enterprise 的任何 API / pluginhub / 服务**。attune 必须能在没有 attune-enterprise 部署的环境中完整工作
 - **不复用 attune-enterprise 代码**（不同技术栈：attune-enterprise = Python + Django；attune = Rust）
-- **数据完全隔离**：attune 的 vault / 批注 / chat / Project 永远在用户本地（或用户自己的 K3），不与任何外部产品同步
+- **数据完全隔离**：attune 的 vault / 批注 / chat / Project 永远在用户本地（或用户自己的 local scheduler），不与任何外部产品同步
 
 **战略上配套**（v2 新增）：
 - 同一团队两个产品分工 — B2C 桌面 vs B2B 律所，不是独立竞品
@@ -183,7 +187,7 @@ git log origin/main --first-parent --oneline | head -20
 
 - **正式版（`vX.Y.Z` 无后缀）**：**只在 `main`** 打。
 - **预发版（`-alpha.N` / `-beta.N` / `-rc.N`）**：在 `develop` 打。
-- 历史 tag 状态见 `git tag --sort=-creatordate`；最新 GA 是 `v0.6.0` + `desktop-v0.6.0`（2026-04-28）。
+- 历史 tag 状态见 `git tag --sort=-creatordate`；最新版本以 `rust/RELEASE.md`（SSOT）为准（已发 v1.0 GA → v1.1.0 ACP → v1.2.0，并配对 `desktop-vX.Y.Z`）。
 
 ### Merge commit 形态（develop → main 必须 `--no-ff`）
 
@@ -216,16 +220,7 @@ git push origin main
 7. **检测异常状态**：`git log origin/develop..origin/main --first-parent` 看到非 `merge:` commit 立刻报警（必须加 `--first-parent`，否则会误报 develop 的合并 commit）
 
 
-## 技术栈（Python 原型线）
-
-- 后端: FastAPI + Uvicorn, Python 3.11+
-- 向量库: ChromaDB (嵌入式, cosine 相似度)
-- 全文搜索: SQLite FTS5 + jieba 分词（LIKE 回退）
-- Embedding: Ollama bge-m3 (默认) / ONNX Runtime (CPU/DirectML/ROCm) / OpenVINO (Intel NPU/iGPU)
-- Chrome 扩展: Manifest V3 + Preact + Vite 多阶段构建
-- 打包: PyInstaller + AppImage (Linux) / NSIS (Windows)
-
-## 技术栈（Rust 商用线，rust/）
+## 技术栈（Rust 生产线，rust/）
 
 - 后端: Axum 0.8 + Tokio + rustls TLS
 - 数据库: rusqlite + 字段级 AES-256-GCM 加密
@@ -235,25 +230,15 @@ git push origin main
 - Web UI: 嵌入式单页 HTML + vanilla JS（`include_str!`）
 - CLI: clap + rpassword
 - AI 分类: Ollama chat (qwen2.5) + hdbscan 聚类 + 编程/法律插件
-- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）；Win MSI / Linux deb 安装包 ~150-200 MB（捆绑 Ollama runtime + whisper.cpp + PP-OCRv5 mobile (ONNX) + poppler-utils + 必要底座模型；**LLM 不本地预装** — 笔电统一 cloud API（Gemini Free / attune Pro 会员 token / 用户 BYOK），K3 一体机镜像例外）
+- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）。**desktop 安装包 = 瘦包**（2026-06-16 v1.4.0 实测 + 用户拍板）：Linux deb 38M（app binary + whisper-cli binary；系统库 poppler-utils/webkit/gtk/curl 走 apt Depends 自动解析）/ AppImage 110M / Win nsis 23M+msi 41M。**底座模型不捆绑** — embedding/rerank/ASR权重/PP-OCR ONNX/Ollama runtime 在**首次运行经 S8 ModelStack failover 从 company-mirror→hf-mirror→HF 拉取**（非完全离线自包含，装完一次联网初始化即用，失败有 failover+重试兜底）。**LLM 不本地预装** — cloud API（attune Pro 会员 token / 用户 BYOK），本地调度器设备镜像例外。（旧"150-200MB 捆绑底座"描述已过时，与实际 thin-deb + runtime-fetch 设计不符。）
 
-## 已实现模块（Phase 0-3）
+## 已实现模块
 
-### 后端
-- `main.py` — lifespan 全链路初始化、路由注册、认证中间件
-- `config.py` — YAML 配置 + Pydantic Settings，默认模型 bge-m3, device auto
-- `core/embedding.py` — OllamaEmbedding (HTTP API) / ONNXEmbedding / OpenVINO (Phase 4)
-- `core/search.py` — RRF 混合搜索引擎 + 两阶段层级检索 (search_relevant) + 动态注入预算
-- `core/chunker.py` — 滑动窗口分块 + extract_sections() 语义章节切割
-- `core/parser.py` — 文件解析 (MD/TXT/代码/PDF/DOCX) + parse_bytes() 内存解析
-- `db/sqlite_db.py` — SQLite (schema/CRUD/FTS5/embedding 队列，含 level/section_idx)
-- `db/chroma_db.py` — ChromaDB 封装
-- `scheduler/queue.py` — Embedding 队列 Worker (后台线程，metadata 含 level/section_idx)
-- `indexer/watcher.py` — watchdog 多目录监听
-- `indexer/pipeline.py` — 解析→两层入队（章节 Level1 + 段落块 Level2）→存储→embedding 管道
-- `platform/detector.py` — 芯片级硬件检测 + 驱动匹配 + 一键安装命令
-- `tray.py` — 系统托盘入口（pystray + uvicorn daemon 线程）
-- API: ingest / upload / search / items / index / status / settings / models / ws
+### Rust 后端
+- `rust/crates/attune-core/` — 加密、存储、搜索、ingest、agent、OCR、LLM、技能运行时
+- `rust/crates/attune-server/` — Axum HTTP API、WebSocket、embedded UI、后台任务
+- `rust/crates/attune-cli/` — 命令行入口与 smoke 路径
+- API: ingest / upload / search / items / index / status / settings / models / ws / agents / skills
 
 ### Chrome 扩展
 - `content/detector.js` — 平台适配器 (ChatGPT/Claude/Gemini, extractMessage/isComplete/setInputContent)
@@ -271,10 +256,10 @@ git push origin main
 
 - **Chat 流式输出**：attune Chat 不实现流式输出（SSE streaming）。等待 LLM 响应期间，Web UI 显示加载指示器（spinner）即可。原因：本地 0.6B-3B 模型响应快，云端 API 等待时有 loading 状态满足体验需求，实现复杂度不值得。
 - **三产品矩阵：attune × attune-pro × attune-enterprise**（2026-04-27 v2，从"独立应用"演进而来）：attune (OSS 通用) + attune-pro (个人行业增强) + attune-enterprise (B2B 小团队)。技术上独立运行；战略上配套分工。可参考 attune-enterprise plugin / RPA / Intent Router 设计模式，但实现完全独立。详见 `docs/oss-pro-strategy.md` v2 决策 2.5 + 上文「三产品矩阵 + 边界」。
-- **行业版第一刀切律师**（2026-04-25）：复用 attune-pro 已有 5 个 law-pro skill + 自研 RPA + Project/Case 卷宗。会员制 SaaS（个人版 / 专业版）+ 一体机（K3）双形态。
-- **本地 AI 底座边界**（2026-04-25）：attune 不是"全本地 AI"，是"**降低 token + 数据安全**"。本地仅捆绑必要底座（Embedding / Rerank / ASR / OCR + Ollama runtime），**LLM 模型不捆绑**，LLM 走远端 token 默认；K3 一体机形态可选装本地 LLM。
-- **平台优先级**（2026-04-25，2026-05-21 修正 K3 架构）：**Windows P0 → Linux x86_64 P1 → macOS 暂不做**。**K3 一体机 = riscv64 RVA23**（SpacemiT K3 X100 SoC，VLEN=256，**非 aarch64**），走 `/data/RV/rv-gcc/install-15.2/` 交叉编译 + 镜像化部署，不走 .deb workflow。Win MSI + Linux deb/AppImage 双轨，K3 单独镜像（per `/home/qiurui/.claude/CLAUDE.md` § RISC-V 验证与优化规范）。
-- **ASR 引擎**（2026-04-25）：whisper.cpp binary + Rust subprocess（与 K3 推理服务一致路径），中文 WER 必须 < 20%（whisper-small Q8 实测满足）才能选默认模型；whisper-tiny WER 35-40% 不可用。
+- **行业版第一刀切律师**（2026-04-25）：复用 attune-pro 已有 5 个 law-pro skill + 自研 RPA + Project/Case 卷宗。会员制 SaaS（个人版 / 专业版）+ 一体机（local scheduler）双形态。
+- **本地 AI 底座边界**（2026-04-25）：attune 不是"全本地 AI"，是"**降低 token + 数据安全**"。本地仅捆绑必要底座（Embedding / Rerank / ASR / OCR + Ollama runtime），**LLM 模型不捆绑**，LLM 走远端 token 默认；本地调度器设备形态可选装本地 LLM。
+- **平台优先级**（2026-04-25，2026-05-21 修正 local scheduler 架构）：**Windows P0 → Linux x86_64 P1 → macOS 暂不做**。**本地调度器设备 = riscv64 RVA23**（SpacemiT local scheduler X100 SoC，VLEN=256，**非 aarch64**），走 `/data/RV/rv-gcc/install-15.2/` 交叉编译 + 镜像化部署，不走 .deb workflow。Win MSI + Linux deb/AppImage 双轨，local scheduler 单独镜像（per `/home/qiurui/.claude/CLAUDE.md` § RISC-V 验证与优化规范）。
+- **ASR 引擎**（2026-04-25）：whisper.cpp binary + Rust subprocess（与 local scheduler 推理服务一致路径），中文 WER 必须 < 20%（whisper-small Q8 实测满足）才能选默认模型；whisper-tiny WER 35-40% 不可用。
 
 ## 磁盘资源管理铁律（强制 — 2026-05-21 用户重申，盘满过踩坑）
 
@@ -294,9 +279,13 @@ git push origin main
 ### target/ 清理
 
 - **cargo build/test 完成后,若未来 1 小时内无再 build 需求 → 立即 `cargo clean`**
-- 主 worktree target/ 可达 100+GB(184G attune / 93G attune-pro 实测)
+- Rust 编译缓存策略:全局 Cargo 使用 `/usr/bin/sccache`;`SCCACHE_DIR=/data/cache/sccache`;`SCCACHE_CACHE_SIZE=20G`;workspace target 分仓隔离到 `/data/cargo-target/attune` 与 `/data/cargo-target/attune-pro`
+- 每轮 cargo build/test 后必须执行一次 `scripts/rust-cache-status.sh`;若 `/data` 可用 < 200G 或任一 target > 30G,本轮结束前执行 `scripts/rust-cache-clean.sh`
+- 主 worktree target/ 可达 100+GB(184G attune / 93G attune-pro 实测);`/data/attune-pro-target` 是旧 attune-pro 外置 Cargo target,已废弃,如再次出现直接删除
+- 清理命令:常规用 `scripts/rust-cache-clean.sh`;需要全量回收时用 `scripts/rust-cache-clean.sh all`
+- 清理前只需确认没有当前 cargo/rustc/对应 agent 二进制进程在跑;不要因为"也许下次还会编译"保留 50G+ target
 - 各 isolated worktree 的 target/ 在 `git worktree remove` 时自动清
-- 不要"留着备用 cache" — cargo incremental 重 build 也快,主 target 200G 不值得占盘
+- 不要"留着备用 target cache" — 复用交给 sccache;target 是链接/增量产物,必须可删
 
 ### worktree 清理
 
@@ -423,8 +412,8 @@ Wizard 推荐顺序：
    - Claude Pro → Anthropic API key
    - Gemini Advanced → Gemini API key（Google AI Studio）
    - DeepSeek / Qwen / 其他 OpenAI 兼容
-3. **本地 Ollama**（K3 一体机镜像 + 笔电 advanced 用户）
-   - K3 form factor 镜像构建时预装 qwen2.5:1.5b/3b
+3. **本地 Ollama**（本地调度器设备镜像 + 笔电 advanced 用户）
+   - local scheduler form factor 镜像构建时预装 qwen2.5:1.5b/3b
    - 笔电用户 wizard 选择 Ollama 时手动 ollama pull
    - 当前**不主推** — 研发成本高（ROCm 配置 / 模型选型 / 推理优化）
 
@@ -435,22 +424,13 @@ Wizard 推荐顺序：
 
 "用户的免费 AI 会员"指 → 浏览器内 ChatGPT.com / Claude.ai / Gemini Advanced **web 会话**，但 attune 不直接对接（不走 MCP / 不注入浏览器）；用户如果有 web 会员，对应付费 plan 通常自带 API quota → 走 BYOK 路径。
 
-**K3 一体机形态**：底座由 K3 推理服务提供（参考 `docs/k3-ai-service/`）；LLM 可选装本地（qwen2.5:1.5b/3b 实测 K3 上可跑），但默认仍是远端 token。
+**本地调度器设备形态**：底座由 local scheduler 推理服务提供（参考 `docs/local-scheduler-ai-service/`）；LLM 可选装本地（qwen2.5:1.5b/3b 实测 local scheduler 上可跑），但默认仍是远端 token。
 
 ### 前端范式
 
 Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 tab 栏 + 右内容面板），每个 tab ≤4 项，toggle/radio 为主。模型选择不埋在 Settings 里，放在**对话框头部 chip**，点开下拉换模型。锁定 Vault 按钮在**全局顶栏常驻**。删除所有"搜索引擎下拉（只一个选项）、RRF 权重、注入预算"等技术字段 — 普通用户不该看到。
 
 ## 开发规范
-
-### Python 原型线
-- Python 代码使用 ruff 格式化和 lint（line-length=120）
-- 类型注解: 所有公开函数必须有类型注解
-- 测试放 `tests/` 目录, 使用 pytest
-- **扩展 E2E 测试使用 Playwright 真 Chrome (`channel="chrome"`), 禁止退化到 Chromium** (per CLAUDE.md MCP 限制, FIX-4 已落实)
-- 调试代码放 `tmp/`, 使用后删除
-- 使用 venv 管理 Python 依赖
-- pip 使用清华源
 
 ### 通用
 - API 路径前缀: `/api/v1/`
@@ -498,7 +478,20 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 残留**（守卫排除 JSDoc comment 行后，所有真 UI 字面量已迁完，zh/en key 集合 diff = 0）。
 **新代码严禁再增**；新增视图保持 grep 守卫 0 输出。
 
-### Rust 商用线约定 (v0.7 sprint 增量：记忆护城河)
+### Rust 实现约定 (v0.7 sprint 增量：记忆护城河)
+
+### RAG / 知识库实现禁止硬编码领域答案（强制）
+
+Codex/agent 修改 RAG、chat、web-demo、scheduler/attune 集成时必须遵守：
+
+1. **生产代码禁止写入具体客户语料、文档名、平台案例、答案符号或路径作为业务逻辑**。例如 `RTOS_DMAC_开发指南`、`Linux_DMAC_开发指南`、`hal_dma_chan_request`、`dma_request_chan`、本机 `/mnt/hdd/allwinner/...` 这类内容只能出现在 tests/e2e fixture、测试报告或用户明确要求的临时验证命令里，不能进入生产判断、prompt、fallback answer、排序规则或 web-demo 默认逻辑。
+2. **允许通用、领域无关的工程规则**，例如“当多个来源平台同时命中时追问澄清”“从证据中抽取 C 风格函数原型”“证据不足时拒答”。这些规则必须从用户问题和检索证据动态推导，不能绑定某个行业、平台、供应商、文档标题或具体接口名。
+3. **需要垂直案例时只写测试**。真实 RTOS/Linux/Allwinner/V821 等案例可作为 regression tests 或 e2e fixtures，测试必须证明通用逻辑能处理该案例；生产实现不能靠该案例关键词通过。
+4. **提交前必须跑硬编码审计**：
+   ```bash
+   bash scripts/no-hardcoded-rag-domain-audit.sh
+   ```
+   有输出即说明生产路径引入了领域/答案级硬编码，必须改为配置、插件、检索证据驱动或测试 fixture。
 
 **文档生命周期协调（v0.7 新规）**:
 - 任何写 items.content 的 path（upload / update / scanner / webdav / ingest）**必须**通过 `attune-core::reindex` 模块走完整 pipeline，禁止直接调 `store.update_item` 后不 reindex
@@ -522,7 +515,7 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 - upload.rs 入口做（hash 命中 → 返回 status=duplicate 跳过 insert）
 - 老 vault content_hash='' 视为"未 backfill"，update_item 时 lazy 填回；'' 不参与 `find_item_by_content_hash` 命中
 
-### Rust 商用线约定 (v0.6.3 sprint 确立)
+### Rust 实现约定 (v0.6.3 sprint 确立)
 
 **错误处理**:
 - 新 routes 用 `attune_server::error::{AppError, AppResult}` + `?` 链, 统一返回 `{"error": msg, "code": kebab}` JSON shape
@@ -552,9 +545,9 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 
 ## 项目结构
 
-- `python/src/attune_python/` — Python 后端
 - `extension/` — Chrome 扩展（Manifest V3 + Preact + Vite）
-- `packaging/` — 打包配置（PyInstaller/AppImage/NSIS）
+- `apps/attune-desktop/` — Tauri 桌面壳
+- `packaging/` — 包管理器与分发配置
 - `.github/workflows/` — CI/CD
 - `tests/` — 测试代码 + conftest.py
 - `docs/screenshots/<topic>/` — 文档/验证用截图（committed）
@@ -598,7 +591,7 @@ docs/screenshots/v063-ga-verification/
 
 `docs/wizard-flow.md` 可 `![](screenshots/v063-ga-verification/attune-v063-wizard-step1.png)` 引用.
 
-## Rust 商用线跨平台兼容规范
+## Rust 跨平台兼容规范
 
 ### 目标平台矩阵
 
@@ -610,9 +603,9 @@ attune 必须在以下平台 + 硬件组合上可编译、可运行、测试通�
 | **P0** | Windows x86_64 + NVIDIA GPU | + CUDA GPU | 同上，Ollama 用 GPU | 待验证 |
 | P1 | Linux x86_64 | Intel/AMD CPU | `x86_64-unknown-linux-gnu` | 主开发平台 ✅ |
 | P1 | Linux x86_64 + NVIDIA GPU | + CUDA GPU | 同上，Ollama 用 GPU | 验证 |
-| P2 | Linux **riscv64**（K3 一体机） | RISC-V RVA23（SpacemiT K3 X100，VLEN=256） | `riscv64gc-unknown-linux-gnu` | 走 `/data/RV/rv-gcc/install-15.2/` + rv-baseos sysroot 交叉编译，**镜像化部署**（非 .deb） |
+| P2 | Linux **riscv64**（本地调度器设备） | RISC-V RVA23（SpacemiT local scheduler X100，VLEN=256） | `riscv64gc-unknown-linux-gnu` | 走 `/data/RV/rv-gcc/install-15.2/` + rv-baseos sysroot 交叉编译，**镜像化部署**（非 .deb） |
 | **暂不做** | macOS | x86_64 + arm64 Universal | `*-apple-darwin` | 资源后置，不投入 v0.6/v0.7 |
-| **暂不做** | Linux aarch64 | ARM64（NAS / 通用 ARM） | `aarch64-unknown-linux-gnu` | 非 K3，无明确需求，v1.x 不投入 |
+| **暂不做** | Linux aarch64 | ARM64（NAS / 通用 ARM） | `aarch64-unknown-linux-gnu` | 非 local scheduler，无明确需求，v1.x 不投入 |
 
 ### 跨平台编译注意事项
 
@@ -633,7 +626,7 @@ attune 必须在以下平台 + 硬件组合上可编译、可运行、测试通�
 rustup target add x86_64-pc-windows-gnu
 # usearch 的 C++ 代码可能需要额外配置，建议在 Windows 原生编译
 
-# Linux → riscv64 (K3 一体机, RVA23) — 走 rv-gcc 15.2 + rv-baseos sysroot
+# Linux → riscv64 (本地调度器设备, RVA23) — 走 rv-gcc 15.2 + rv-baseos sysroot
 # per /home/qiurui/.claude/CLAUDE.md § RISC-V 验证与优化规范
 source /data/RV/rva23-qemu/toolchain/env.sh   # $RVA23_CC / $RVA23_CROSS_SYSROOT
 rustup target add riscv64gc-unknown-linux-gnu
@@ -641,7 +634,7 @@ CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=$RVA23_CC \
 CC_riscv64gc_unknown_linux_gnu=$RVA23_CC \
 CFLAGS_riscv64gc_unknown_linux_gnu="--sysroot=$RVA23_CROSS_SYSROOT $RVA23_MARCH_RVA23" \
   cargo build --target riscv64gc-unknown-linux-gnu --release
-# K3 一体机产物**不走 .deb**,走镜像化部署(参考 docs/k3-ai-service/)
+# 本地调度器设备产物**不走 .deb**,走镜像化部署(参考 docs/local-scheduler-ai-service/)
 ```
 
 ### GPU / NPU 兼容性
@@ -650,7 +643,7 @@ CFLAGS_riscv64gc_unknown_linux_gnu="--sysroot=$RVA23_CROSS_SYSROOT $RVA23_MARCH_
 
 1. **HTTP（Ollama）** — Embedding / Rerank / Chat / Classify。Ollama 自动选 CPU/CUDA/ROCm/Metal 后端
 2. **Subprocess（捆绑二进制）** — ASR (whisper.cpp) / OCR (PP-OCRv5 mobile (ONNX) + poppler)。安装包捆绑预编译二进制，attune 子进程调用
-3. **HTTP（K3 推理服务）** — K3 一体机形态时，所有底座可走 K3 :8080（参考 `docs/k3-ai-service/`）
+3. **HTTP（local scheduler 推理服务）** — 本地调度器设备形态时，所有底座可走 local scheduler :8090（参考 `docs/local-scheduler-ai-service/`）
 
 | 后端组合 | Embedding/LLM | ASR | OCR |
 |----------|---------------|-----|-----|
@@ -658,7 +651,7 @@ CFLAGS_riscv64gc_unknown_linux_gnu="--sysroot=$RVA23_CROSS_SYSROOT $RVA23_MARCH_
 | AMD GPU + Ollama | Ollama ROCm | whisper.cpp CPU | PP-OCR (ORT, CPU/GPU 自动) |
 | Intel iGPU/NPU + Ollama | Ollama OpenVINO（实验） | whisper.cpp CPU | PP-OCR (ORT, CPU/GPU 自动) |
 | 纯 CPU | Ollama CPU（qwen2.5:3b 远端 / 本地按需） | whisper-small Q8 ~3-5s/段 | PP-OCR (ORT, CPU/GPU 自动) |
-| K3 一体机 | K3 :8080（IME/RVV） | K3 :8080（whisper Q8 IME） | K3 :8080（PPOCRv5） |
+| 本地调度器设备 | local scheduler :8090（IME/RVV） | local scheduler :8090（whisper Q8 IME） | local scheduler :8090（PPOCRv5） |
 
 **开发时不需要 GPU**：测试使用 `MockLlmProvider` / `MockEmbeddingProvider` / `MockAsrProvider`，CI 无需 GPU。
 
@@ -707,7 +700,7 @@ strategy:
       - os: ubuntu-latest
         target: x86_64-unknown-linux-gnu
         name: Linux x86_64
-      # K3 一体机走 rv-gcc 15.2 交叉编译 + 镜像化,**不进 CI matrix**(GH runner 无 RISC-V)
+      # 本地调度器设备走 rv-gcc 15.2 交叉编译 + 镜像化,**不进 CI matrix**(GH runner 无 RISC-V)
       # 见上文「跨平台编译指南」riscv64gc-unknown-linux-gnu 路径
       - os: windows-latest
         target: x86_64-pc-windows-msvc
@@ -788,3 +781,66 @@ detector.py 中维护了精确匹配表:
 - spec 评审通过 → invoke `superpowers:writing-plans` 出 plan
 - plan 评审过 → implementation
 - 不允许"先写代码再补 spec"
+
+
+## Release Workflow (riscv64 deb)
+
+### Git + Version Management
+
+```
+# 1. Bump version in Cargo.toml
+sed -i 's/^version = "'$OLD_VER'"/version = "'$NEW_VER'"/' rust/Cargo.toml
+
+# 2. Commit + tag
+git add rust/Cargo.toml
+git commit -m "release: v${NEW_VER}"
+git tag -a "v${NEW_VER}" -m "v${NEW_VER}: release"
+git push origin HEAD && git push origin "v${NEW_VER}"
+```
+
+### riscv64 Build
+
+Must use `scripts/build-optimized.sh` — handles Spacemit toolchain, CC_* env vars, 
+sccache configuration. Direct `cargo build` will fail on numkong C crate 
+(system `riscv64-linux-gnu-gcc` lacks RVV support).
+
+```bash
+ATTUNE_RVA23_TOOLCHAIN=/data/RV/.../spacemit-toolchain-linux-glibc-x86_64-v1.2.2 \
+bash scripts/build-optimized.sh \
+  --profile rva23 --package attune-server \
+  --features scheduler-runtime,artifact-export-rich,wasm-runtime \
+  -- --no-default-features --bin attune-server-headless
+```
+
+### Package deb
+
+```bash
+ATTUNE_PACKAGE_SKIP_FRONTEND=1 ATTUNE_PACKAGE_SKIP_BUILD=1 ATTUNE_PACKAGE_SKIP_RVV_AUDIT=1 \
+bash scripts/package-riscv64-deb.sh \
+  --out-dir dist/release/riscv64-server-deb --reports-dir reports/release
+```
+
+### Deploy to K3
+
+```bash
+scp dist/release/riscv64-server-deb/attune-server_${VER}_riscv64.deb root@192.168.100.233:/root/
+ssh root@192.168.100.233 "dpkg -i /root/attune-server_${VER}_riscv64.deb && systemctl restart attune-server"
+```
+
+### E2E Verification
+
+```bash
+cd tests/e2e && export ATTUNE_BASE_URL=http://192.168.100.233:18905
+for s in memory_moat_e2e.py memory_moat_signals_e2e.py memory_moat_stress_e2e.py \
+         memory_moat_fault_e2e.py memory_moat_annotation_e2e.py memory_moat_v07routes_e2e.py \
+         memory_moat_search_quality_e2e.py memory_moat_stress_loop_e2e.py; do
+  python3 "$s" && echo "PASS $s" || echo "FAIL $s"
+done
+```
+
+### One-key Release (recommended)
+
+```bash
+bash scripts/release-riscv64.sh 1.5.2    # full flow: bump → build → package → verify
+bash scripts/release-riscv64.sh 1.5.2 --dry-run  # preview without execution
+```

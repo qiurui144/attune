@@ -1,0 +1,96 @@
+# Holdout corpus for ai_annotation_highlights — human-authored GT.
+# Targets are the load-bearing core points: definitions, key formulas/commands,
+# decisive numbers/thresholds, framework "N principles". A faithful highlights
+# annotation must surface these. Precision controls: filler/narrative-only notes
+# where over-highlighting (marking everything) is penalised — targets non-empty
+# but small, so marking unrelated filler still counts as FP.
+angle: highlights
+cases:
+  - id: hl-01-ownership-rules
+    text: |
+      Rust 的所有权有三条规则：每个值有唯一的 owner；同一时刻只能有一个 owner；owner 离开作用域时值被 drop。这套规则在编译期保证内存安全，无需垃圾回收。
+    targets:
+      - "每个值有唯一的 owner"
+      - "owner 离开作用域时值被 drop"
+      - "在编译期保证内存安全"
+
+  - id: hl-02-acid
+    text: |
+      数据库事务的 ACID 特性指原子性、一致性、隔离性和持久性。其中隔离性通过隔离级别控制，最高级别是可串行化。
+    targets:
+      - "原子性、一致性、隔离性和持久性"
+      - "最高级别是可串行化"
+
+  - id: hl-03-tcp-handshake
+    text: |
+      TCP 建立连接需要三次握手：客户端发 SYN，服务端回 SYN-ACK，客户端再回 ACK。断开连接则需要四次挥手。
+    targets:
+      - "三次握手"
+      - "客户端发 SYN，服务端回 SYN-ACK，客户端再回 ACK"
+      - "四次挥手"
+
+  - id: hl-04-bigo
+    text: |
+      二分查找的时间复杂度是 O(log n)，前提是数组必须有序。线性查找则是 O(n)。
+    targets:
+      - "二分查找的时间复杂度是 O(log n)"
+      - "前提是数组必须有序"
+
+  - id: hl-05-http-status
+    text: |
+      HTTP 状态码 200 表示成功，404 表示资源未找到，500 表示服务器内部错误，301 表示永久重定向。
+    targets:
+      - "200 表示成功"
+      - "404 表示资源未找到"
+      - "500 表示服务器内部错误"
+
+  - id: hl-06-normalization
+    text: |
+      数据库第三范式要求：满足第二范式，且任何非主属性不传递依赖于主键。消除传递依赖能减少数据冗余。
+    targets:
+      - "任何非主属性不传递依赖于主键"
+      - "消除传递依赖能减少数据冗余"
+
+  - id: hl-07-git-reset
+    text: |
+      git reset --soft 只移动 HEAD 保留暂存区，--mixed 重置暂存区保留工作区，--hard 则连工作区一起丢弃。
+    targets:
+      - "--soft 只移动 HEAD 保留暂存区"
+      - "--hard 则连工作区一起丢弃"
+
+  - id: hl-08-cap-theorem
+    text: |
+      CAP 定理指出分布式系统在一致性、可用性、分区容错性三者中最多只能同时满足两个。网络分区不可避免时，要在 C 和 A 之间取舍。
+    targets:
+      - "三者中最多只能同时满足两个"
+      - "要在 C 和 A 之间取舍"
+
+  - id: hl-09-photosynthesis
+    text: |
+      光合作用的总反应式是六分子二氧化碳加六分子水在光照和叶绿素作用下生成一分子葡萄糖和六分子氧气。这是地球能量循环的基础。
+    targets:
+      - "六分子二氧化碳加六分子水"
+      - "生成一分子葡萄糖和六分子氧气"
+
+  - id: hl-10-index-btree
+    text: |
+      B+ 树索引的所有数据都存在叶子节点，叶子节点之间用链表相连，因此非常适合范围查询。非叶子节点只存索引键。
+    targets:
+      - "所有数据都存在叶子节点"
+      - "叶子节点之间用链表相连"
+      - "非常适合范围查询"
+
+  - id: hl-11-rsa
+    text: |
+      RSA 加密的安全性基于大整数分解的困难性：公钥用于加密，私钥用于解密，两者由两个大素数的乘积推导。
+    targets:
+      - "基于大整数分解的困难性"
+      - "公钥用于加密，私钥用于解密"
+
+  # ── precision controls: narrative filler, only one true point ──
+  - id: hl-12-mostly-filler
+    text: |
+      今天天气不错，我泡了杯茶坐在窗边看书。书里提到一个有用的结论：复利的本质是利息再生利息，时间越长增长越显著。看完后我又去散了会儿步，心情很好。
+    targets:
+      - "复利的本质是利息再生利息"
+    # most of the note is filler; marking the weather/walk lines is FP.

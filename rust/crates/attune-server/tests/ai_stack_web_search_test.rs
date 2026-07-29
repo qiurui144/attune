@@ -9,10 +9,10 @@
 //! This proves the route reads the live Arc rather than returning a
 //! compile-time constant — a hardcoded `false` would fail case 2.
 
-use std::sync::Arc;
-use std::time::Duration;
 use attune_core::error::Result as CoreResult;
 use attune_core::web_search::{WebSearchProvider, WebSearchResult};
+use std::sync::Arc;
+use std::time::Duration;
 
 // ── Minimal stub that satisfies WebSearchProvider ────────────────────────────
 
@@ -59,10 +59,27 @@ async fn ai_stack_web_search_available_tracks_state() {
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
 
+    // Unlock the vault directly on the Vault object (not via the HTTP
+    // /vault/setup route). The HTTP route calls state.init_search_engines() —
+    // which builds ML providers that construct & drop a nested tokio runtime —
+    // inside this async handler. Dropping a runtime in async context panics
+    // ("Cannot drop a runtime in a context where blocking is not allowed"),
+    // crashing the connection mid-response (hyper IncompleteMessage) and making
+    // the setup assert fail deterministically. Unlocking the Vault directly puts
+    // it in the Unlocked state that vault_guard requires, with zero dependence
+    // on provider init / network / Chrome detection (per §测试隔离规范).
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    vault.setup("ai-stack-test-pw").expect("vault setup");
+    vault.unlock("ai-stack-test-pw").expect("vault unlock");
+
     // Build AppState directly so we hold a reference for later mutation.
-    let vault =
-        attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
-    let state = Arc::new(attune_server::state::AppState::new(vault, false /* require_auth */));
+    let state = Arc::new(attune_server::state::AppState::new(
+        vault, false, /* require_auth */
+    ));
+
+    // Start from a known-None web_search baseline, independent of whether Chrome
+    // is installed on the host (the route reads this live Arc).
+    state.set_web_search(None);
 
     let router = attune_server::build_router(Arc::clone(&state));
 
@@ -75,21 +92,7 @@ async fn ai_stack_web_search_available_tracks_state() {
     let base = format!("http://127.0.0.1:{}", port);
     wait_for_server(&base).await;
 
-    // Vault setup is required so vault_guard permits /ai_stack.
     let client = reqwest::Client::new();
-    let setup = client
-        .post(format!("{}/api/v1/vault/setup", base))
-        .json(&serde_json::json!({"password": "ai-stack-test-pw"}))
-        .send()
-        .await
-        .expect("vault setup");
-    assert_eq!(setup.status().as_u16(), 200, "vault setup failed");
-
-    // Give the background provider-init task a moment to finish (it runs after
-    // vault setup), then explicitly clear web_search so Case 1 starts from a
-    // known-None baseline regardless of whether Chrome is installed on the host.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    state.set_web_search(None);
 
     // ── Case 1: no provider (state.web_search = None) ────────────────────────
     {
@@ -139,9 +142,7 @@ async fn ai_stack_web_search_available_tracks_state() {
         assert_eq!(resp.status().as_u16(), 200, "/ai_stack must return 200");
 
         let body: serde_json::Value = resp.json().await.expect("json body");
-        let ws = body
-            .get("web_search")
-            .expect("`web_search` field missing");
+        let ws = body.get("web_search").expect("`web_search` field missing");
 
         let available = ws.get("available").expect("`web_search.available` missing");
         assert!(

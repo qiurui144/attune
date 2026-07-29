@@ -27,9 +27,9 @@
 //! [`crate::store::items::UpdateOutcome`] 上判断 `content_changed`，只有 true 才调
 //! 本函数，避免每次 metadata-only 的 update 都触发 embedding pipeline。
 
-use crate::chunker;
 use crate::error::Result;
 use crate::index::FulltextIndex;
+use crate::ingest;
 use crate::store::Store;
 use crate::vectors::VectorIndex;
 
@@ -72,23 +72,19 @@ pub fn reindex_item(
     let _ = store.delete_chunk_summaries_for_item(item_id);
     fulltext.add_document(item_id, title, content, source_type)?;
 
-    let mut chunk_counter: usize = 0;
-    let sections = chunker::extract_sections(content);
-    for (section_idx, section_text) in &sections {
-        if section_text.trim().is_empty() {
-            continue;
-        }
-        store.enqueue_embedding(item_id, chunk_counter, section_text, 1, 1, *section_idx)?;
-        chunk_counter += 1;
-    }
-    for (section_idx, section_text) in &sections {
-        for chunk_text in chunker::chunk(section_text, chunker::DEFAULT_CHUNK_SIZE, chunker::DEFAULT_OVERLAP) {
-            store.enqueue_embedding(item_id, chunk_counter, &chunk_text, 2, 2, *section_idx)?;
-            chunk_counter += 1;
-        }
-    }
+    let chunk_counter = ingest::enqueue_content_embeddings(
+        store,
+        item_id,
+        content,
+        None,
+        crate::chunker::ChunkingOptions::default(),
+    )?;
 
-    Ok(ReindexStats { vectors_deleted, queue_cleared, chunks_enqueued: chunk_counter })
+    Ok(ReindexStats {
+        vectors_deleted,
+        queue_cleared,
+        chunks_enqueued: chunk_counter,
+    })
 }
 
 /// 删除路径：清向量 + 清 FTS + 清队列。DB 软删由 caller 单独调
@@ -107,7 +103,11 @@ pub fn purge_item_indexes(
     // QW-5: 删 item 同步删摘要（`delete_item` 软删路径已删，但 reindex_queue
     // 走 purge_item_indexes 时也要确保孤儿被清掉 — defense in depth）。
     let _ = store.delete_chunk_summaries_for_item(item_id);
-    Ok(ReindexStats { vectors_deleted, queue_cleared, chunks_enqueued: 0 })
+    Ok(ReindexStats {
+        vectors_deleted,
+        queue_cleared,
+        chunks_enqueued: 0,
+    })
 }
 
 #[cfg(test)]
@@ -129,13 +129,30 @@ mod tests {
     fn reindex_clears_queue_and_reenqueues() {
         let (_t, store, mut vec, ft, dek) = setup();
         let id = store
-            .insert_item(&dek, "title", "# H1\n\nbody one\n\n# H2\n\nbody two", None, "note", None, None)
+            .insert_item(
+                &dek,
+                "title",
+                "# H1\n\nbody one\n\n# H2\n\nbody two",
+                None,
+                "note",
+                None,
+                None,
+            )
             .unwrap();
         // 入旧队列
         store.enqueue_embedding(&id, 0, "stale", 2, 1, 0).unwrap();
         store.enqueue_embedding(&id, 1, "stale2", 2, 2, 0).unwrap();
 
-        let stats = reindex_item(&store, &mut vec, &ft, &id, "title", "# H1\n\nNEW BODY", "note").unwrap();
+        let stats = reindex_item(
+            &store,
+            &mut vec,
+            &ft,
+            &id,
+            "title",
+            "# H1\n\nNEW BODY",
+            "note",
+        )
+        .unwrap();
         assert_eq!(stats.queue_cleared, 2, "旧两条 stale 必须清掉");
         assert!(stats.chunks_enqueued >= 1, "新内容至少入 1 个 chunk");
     }
@@ -143,7 +160,9 @@ mod tests {
     #[test]
     fn purge_clears_queue() {
         let (_t, store, mut vec, ft, dek) = setup();
-        let id = store.insert_item(&dek, "t", "body", None, "note", None, None).unwrap();
+        let id = store
+            .insert_item(&dek, "t", "body", None, "note", None, None)
+            .unwrap();
         store.enqueue_embedding(&id, 0, "x", 2, 1, 0).unwrap();
         let stats = purge_item_indexes(&store, &mut vec, &ft, &id).unwrap();
         assert_eq!(stats.queue_cleared, 1);
@@ -158,7 +177,15 @@ mod tests {
             .insert_item(&dek, "title", "# H1\n\nbody", None, "note", None, None)
             .unwrap();
         store
-            .put_chunk_summary(&dek, "hash-a", "economical", &id, "test-model", "old summary", 100)
+            .put_chunk_summary(
+                &dek,
+                "hash-a",
+                "economical",
+                &id,
+                "test-model",
+                "old summary",
+                100,
+            )
             .unwrap();
         assert_eq!(store.chunk_summary_count().unwrap(), 1);
 
@@ -174,7 +201,9 @@ mod tests {
     #[test]
     fn purge_indexes_removes_chunk_summaries() {
         let (_t, store, mut vec, ft, dek) = setup();
-        let id = store.insert_item(&dek, "t", "body", None, "note", None, None).unwrap();
+        let id = store
+            .insert_item(&dek, "t", "body", None, "note", None, None)
+            .unwrap();
         store
             .put_chunk_summary(&dek, "hash-b", "economical", &id, "m", "s", 50)
             .unwrap();

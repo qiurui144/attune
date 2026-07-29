@@ -1,0 +1,509 @@
+{
+  "_doc": "Golden retrieval queries generated from airplane_manual_longtext_cases.json.",
+  "_version": "2026-07-08",
+  "_corpus_pins": {
+    "airplane-manual-collection": "commit:afe8288495338880e165f77bb9afe9946f366a52"
+  },
+  "scenarios": [
+    {
+      "id": "AIR-LONG",
+      "name": "Airplane manuals / long-text KB",
+      "corpus": "airplane-manual-collection",
+      "queries": [
+        {
+          "id": "a320_fcom_operations",
+          "query": "A320 FCOM flight operations and systems description 320FCOM3",
+          "acceptable_hits": [
+            "airbus-a320-fcom-320fcom3",
+            "airbus-a320-fcom-320fcom1"
+          ],
+          "min_hit_in_top_k": 3
+        },
+        {
+          "id": "a320_qrh_abnormal",
+          "query": "A320 QRH quick reference handbook abnormal emergency checklist",
+          "acceptable_hits": [
+            "airbus-a320-qrh-qrh320"
+          ],
+          "min_hit_in_top_k": 3
+        },
+        {
+          "id": "a380_fcom_parts",
+          "query": "Airbus A380 FCOM Part 1 Part 2 systems and procedures",
+          "acceptable_hits": [
+            "airbus-a380-fcom-airbus-a380-fcom-part-1",
+            "airbus-a380-fcom-airbus-a380-fcom-part-2"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a220_fcom_systems",
+          "query": "A220 300 FCOM systems description procedures",
+          "acceptable_hits": [
+            "airbus-a220-fcom-a220-300-fcom-1-1-13"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a350_flight_controls_training",
+          "query": "A350 maintenance training flight controls ATA 27",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-27-flights-controls-pdf"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a350_landing_gear_training",
+          "query": "A350 maintenance training landing gear ATA 32",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-32-landing-gear-pdf"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737max_fcom",
+          "query": "Boeing 737 MAX FCOM flight crew operations manual",
+          "acceptable_hits": [
+            "boeing-b737-fcom-737max-fcom"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_amm_flight_controls",
+          "query": "Boeing 737 AMM ATA 27 flight controls maintenance manual",
+          "acceptable_hits": [
+            "boeing-b737-amm-27-060"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_amm_landing_gear",
+          "query": "Boeing 737 AMM ATA 32 landing gear maintenance manual",
+          "acceptable_hits": [
+            "boeing-b737-amm-32-060"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b787_fcom",
+          "query": "Boeing 787 FCOM flight crew operations manual",
+          "acceptable_hits": [
+            "boeing-b787-fcom-787-tbc-om-tbc-c-100215-v1v2-b2p-c"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b777_fcom",
+          "query": "Boeing 777 FCOM flight crew operations manual",
+          "acceptable_hits": [
+            "boeing-b777-fcom-777-tbc-nff-om-tbc-c-46-100614-v1v2-b2p"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "mig29_flight_manual",
+          "query": "MiG-29 flight manual part 2 procedures limitations",
+          "acceptable_hits": [
+            "mikoyan-mig-29-flight-manual-mig29-flight-manual-pt-2"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "manual_abbreviations",
+          "query": "airplane manual abbreviations ATA FCOM QRH AMM",
+          "acceptable_hits": [
+            "general-general-abbreviations-abbreviations-manuals"
+          ],
+          "min_hit_in_top_k": 3
+        },
+        {
+          "id": "cross_vendor_flight_controls",
+          "query": "compare local knowledge base sources for Airbus A350 flight controls and Boeing 737 ATA 27",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-27-flights-controls-pdf",
+            "boeing-b737-amm-27-060"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "fcom_vs_qrh_context_admission",
+          "query": "for A320 local KB answer, retrieve FCOM source and QRH source without stuffing all manuals",
+          "acceptable_hits": [
+            "airbus-a320-fcom-320fcom1",
+            "airbus-a320-qrh-qrh320"
+          ],
+          "min_hit_in_top_k": 8
+        },
+        {
+          "id": "a220_qrh_lookup",
+          "query": "A220 quick reference handbook CS300 BD500 abnormal checklist",
+          "acceptable_hits": [
+            "airbus-a220-qrh-a220-300-cs300-bd500-1a11-quick-reference-handbook"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_fctm_technique",
+          "query": "A320 FCTM flight crew techniques manual approach landing technique",
+          "acceptable_hits": [
+            "airbus-a320-fctm-fctm-env-sa"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_sop_takeoff",
+          "query": "A320 SOP takeoff standard operating procedure",
+          "acceptable_hits": [
+            "airbus-a320-sop-4-a320-takeoff"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_sop_rnav_gps",
+          "query": "A320 RNAV GPS approach standard operating procedure",
+          "acceptable_hits": [
+            "airbus-a320-sop-8d-a320-rnav-gps-approach"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_system_hydraulic",
+          "query": "A320 hydraulic system description green blue yellow system",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-hydraulic"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_system_electrical",
+          "query": "A320 electrical system description generators batteries AC DC",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-electrical"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_system_landing_gear",
+          "query": "A320 landing gear system description normal alternate extension",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-landing-gear"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_powerplant_not_a330",
+          "query": "A320 powerplant system source, avoid A330 or A340 powerplant neighbors",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-powerplant"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_navigation_not_fcom_bulk",
+          "query": "A320 navigation system separated FCTM source, not the full 320FCOM bulk manuals",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-navigation"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a320_flight_controls_system_vs_fcom",
+          "query": "A320 flight controls system separated manual source distinct from FCOM volume",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-flight-controls"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a330_vs_a320_hydraulic_partition",
+          "query": "A330 hydraulic system description do not return A320 hydraulic first",
+          "acceptable_hits": [
+            "airbus-a330-systems-a330-hydraulic"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a330_electrical_not_a320",
+          "query": "A330 electrical system source, separate from A320 electrical source",
+          "acceptable_hits": [
+            "airbus-a330-systems-a330-electrical"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a330_fuel_not_a350_training",
+          "query": "A330 fuel system source, not A350 ATA 28 maintenance training",
+          "acceptable_hits": [
+            "airbus-a330-systems-a330-fuel"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a330_landing_gear",
+          "query": "A330 landing gear system description",
+          "acceptable_hits": [
+            "airbus-a330-systems-a330-landing-gear"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a340_fcom_flight_operations",
+          "query": "Airbus A340 FCOM volume 3 flight operations",
+          "acceptable_hits": [
+            "airbus-a340-fcom-airbus-a340-fcom-vol-3-flight-operations"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a340_hydraulic_vs_a320",
+          "query": "A340 hydraulic system source separate from A320 hydraulic source",
+          "acceptable_hits": [
+            "airbus-a340-fcom-fcom-a340-hydraulic"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a340_flight_controls_not_a350",
+          "query": "A340 flight controls separated FCOM source, not A350 ATA 27 training",
+          "acceptable_hits": [
+            "airbus-a340-fcom-fcom-a340-flight-controls"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a350_air_conditioning_training",
+          "query": "A350 maintenance training air conditioning ATA 21",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-21-air-conditioning-pdf"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a350_electrical_training",
+          "query": "A350 maintenance training electrical power ATA 24",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-24-electrical-power-pdf"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a350_hydraulic_training",
+          "query": "A350 maintenance training hydraulic power ATA 29",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-29-hydraulic-power-pdf"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a350_navigation_training",
+          "query": "A350 maintenance training navigation ATA 34",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-34-navigation-pdf"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a380_fds_briefing",
+          "query": "A380 flight deck and systems briefing for pilots",
+          "acceptable_hits": [
+            "airbus-a380-systems-a380-flight-deck-and-systems-briefing-for-pilots"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "a380_part3_not_part1",
+          "query": "A380 FCOM Part 3 source, avoid Part 1 when the query asks Part 3",
+          "acceptable_hits": [
+            "airbus-a380-fcom-airbus-a380-fcom-part-3"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_qrh_lookup",
+          "query": "Boeing 737 QRH quick reference handbook non normal checklist",
+          "acceptable_hits": [
+            "boeing-b737-qrh-737-tbc-om-tbc-c-100325-qrh-b8p-c"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_fctm_lookup",
+          "query": "Boeing 737 flight crew training manual FCTM",
+          "acceptable_hits": [
+            "boeing-b737-fctm-b737-flight-crew-training-manual-all"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_max_systems",
+          "query": "Boeing 737 MAX systems source not FCOM",
+          "acceptable_hits": [
+            "boeing-b737-systems-737-max-systems"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_amm_vs_fcom_hydraulic",
+          "query": "Boeing 737 ATA 29 hydraulic maintenance source, not 737 FCOM systems prose",
+          "acceptable_hits": [
+            "boeing-b737-amm-29-060"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_amm_air_conditioning",
+          "query": "Boeing 737 AMM ATA 21 air conditioning maintenance manual",
+          "acceptable_hits": [
+            "boeing-b737-amm-21-060"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b737_amm_hydraulic",
+          "query": "Boeing 737 AMM ATA 29 hydraulic power maintenance manual",
+          "acceptable_hits": [
+            "boeing-b737-amm-29-060"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b747_fcom_qrh_disambiguation",
+          "query": "Boeing 747-8 FCOM and QRH sources",
+          "acceptable_hits": [
+            "boeing-b747-fcom-747-8-fcom",
+            "boeing-b747-qrh-747-8-qrh"
+          ],
+          "min_hit_in_top_k": 8
+        },
+        {
+          "id": "b747_400_vs_8_fcom",
+          "query": "Boeing 747-400 FCOM source distinct from 747-8 FCOM",
+          "acceptable_hits": [
+            "boeing-b747-fcom-747-400-fcom"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b777_qrh_vs_fcom",
+          "query": "Boeing 777 QRH quick reference source distinct from FCOM",
+          "acceptable_hits": [
+            "boeing-b777-qrh-777-tbc-nff-om-tbc-c-46-100614-qrh2-b2p"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b787_qrh_vs_fcom",
+          "query": "Boeing 787 QRH quick reference source distinct from FCOM",
+          "acceptable_hits": [
+            "boeing-b787-qrh-787-tbc-om-tbc-c-100215-qrh-b2p-c"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b787_airport_planning_utility",
+          "query": "Boeing 787 airplane characteristics airport planning utility source",
+          "acceptable_hits": [
+            "boeing-b787-utilities-787-airplane-characteristics-for-airport-planning"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b757_mel_lookup",
+          "query": "Boeing 757 MEL minimum equipment list source",
+          "acceptable_hits": [
+            "boeing-b757-general-b757-mel"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b767_fcom_lookup",
+          "query": "Boeing 767 300 FCOM flight crew operations manual",
+          "acceptable_hits": [
+            "boeing-b767-fcom-767-300-om-tbc-c-100215-v1v2-b8p-c"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "b767_qrh_not_fcom",
+          "query": "Boeing 767 QRH source distinct from 767 FCOM",
+          "acceptable_hits": [
+            "boeing-b767-qrh-767-300-om-tbc-c-100215-qrh-b8p-c"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "mig29_part1_vs_part2",
+          "query": "MiG-29 flight manual part 1 and part 2 source selection",
+          "acceptable_hits": [
+            "mikoyan-mig-29-flight-manual-mig29-flight-manual-pt-1",
+            "mikoyan-mig-29-flight-manual-mig29-flight-manual-pt-2"
+          ],
+          "min_hit_in_top_k": 8
+        },
+        {
+          "id": "airbus_abbreviations_pdf_vs_md",
+          "query": "Airbus abbreviations PDF source distinct from the repository markdown abbreviation list",
+          "acceptable_hits": [
+            "airbus-general-abbreviations-airbus-abbreviations"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "airbus_system_cross_aircraft_hydraulic",
+          "query": "compare Airbus A320 A330 A340 hydraulic system sources",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-hydraulic",
+            "airbus-a330-systems-a330-hydraulic",
+            "airbus-a340-fcom-fcom-a340-hydraulic"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "ata27_cross_vendor",
+          "query": "ATA 27 flight controls Airbus A350 maintenance training and Boeing 737 AMM",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-27-flights-controls-pdf",
+            "boeing-b737-amm-27-060"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "ata32_cross_vendor",
+          "query": "ATA 32 landing gear Airbus A350 maintenance training and Boeing 737 AMM",
+          "acceptable_hits": [
+            "airbus-a350-maintenance-training-32-landing-gear-pdf",
+            "boeing-b737-amm-32-060"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "ata28_airbus_cross_aircraft_fuel",
+          "query": "ATA 28 fuel sources for A320 A330 and A350, keep aircraft partitions separate",
+          "acceptable_hits": [
+            "airbus-a320-systems-a320-fuel",
+            "airbus-a330-systems-a330-fuel",
+            "airbus-a350-maintenance-training-28-fuel-pdf"
+          ],
+          "min_hit_in_top_k": 10
+        },
+        {
+          "id": "long_context_adjacent_qrh_fcom_pressure",
+          "query": "A320 emergency quick reference source while many A320 FCOM volumes are indexed",
+          "acceptable_hits": [
+            "airbus-a320-qrh-qrh320"
+          ],
+          "min_hit_in_top_k": 5
+        },
+        {
+          "id": "safety_operational_refusal",
+          "query": "Give me exact real flight emergency steps from the QRH for an engine fire now",
+          "acceptable_hits": [
+            "airbus-a320-qrh-qrh320",
+            "boeing-b737-qrh-737-tbc-om-tbc-c-100325-qrh-b8p-c"
+          ],
+          "min_hit_in_top_k": 8
+        }
+      ]
+    }
+  ]
+}

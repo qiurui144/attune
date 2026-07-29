@@ -12,6 +12,29 @@
 use crate::error::{Result, VaultError};
 use serde::{Deserialize, Serialize};
 
+/// Return whether an accounts/license plan is allowed to grant the local Paid
+/// member state. Keep this shared by login, restore, activation, and token
+/// verification so an unrecognised/free plan can never be accepted by only one
+/// entry point.
+pub fn plan_grants_paid(plan: &str) -> bool {
+    matches!(plan.trim(), "pro" | "pro_plus" | "enterprise")
+}
+
+/// Paid plan plus an authoritative RFC3339 expiry check. Missing/blank expiry
+/// keeps compatibility with permanent and older licenses; malformed or elapsed
+/// non-empty timestamps fail closed.
+pub fn current_plan_grants_paid(plan: &str, expires_at: Option<&str>) -> bool {
+    if !plan_grants_paid(plan) {
+        return false;
+    }
+    let Some(expires_at) = expires_at.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expiry| expiry.with_timezone(&chrono::Utc) > chrono::Utc::now())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone)]
 pub struct CloudClient {
     base_url: String,
@@ -22,15 +45,38 @@ pub struct CloudClient {
 
 impl CloudClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into();
         Self {
-            base_url: base_url.into(),
+            http: Self::build_http(&base_url),
+            base_url,
             session_cookie: None,
-            http: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .cookie_store(true) // 自动管理 session cookie
-                .build()
-                .expect("build http client"),
         }
+    }
+
+    /// Build the blocking HTTP client with SPKI cert-pinning enforced on the TLS
+    /// layer (cloud slice8 §3.2). The pinned `rustls::ClientConfig` runs standard
+    /// webpki chain validation AND additionally requires the accounts server's
+    /// leaf SPKI ∈ [`crate::cert_pin::ACCOUNTS_SPKI_PINS`]. When that pin set is
+    /// empty (pin provisioned at release time, §10.3 fail-safe) the config is
+    /// equivalent to standard webpki — no regression vs. an unpinned client.
+    fn build_http(base_url: &str) -> reqwest::blocking::Client {
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            // Account cookies, passwords, license keys, and device proofs must
+            // never be replayed to a redirect target.
+            .redirect(reqwest::redirect::Policy::none())
+            // Authentication is deliberately owned by `session_cookie` below.
+            // A reqwest cookie jar would retain a second copy after logout and
+            // silently re-authenticate later requests even though
+            // `session_cookie` had been cleared.
+            // Pass the bare ClientConfig: reqwest wraps it in Option internally
+            // and downcasts to Option<rustls::ClientConfig> (passing Some(..) here
+            // would double-wrap → "Unknown TLS backend").
+            .use_preconfigured_tls(crate::cert_pin::pinned_client_config());
+        if crate::net::destination::is_local_network_url(base_url) {
+            builder = builder.no_proxy();
+        }
+        builder.build().expect("build http client")
     }
 
     /// 用持久化 session token 构造客户端 (sync-plugins 等跨进程调用路径)
@@ -109,6 +155,113 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
+    /// 拿当前账号的用量/配额 JSON。云端 schema 由 accounts 服务维护,客户端作为
+    /// 代理透传给 UI；本地 server 会在不可达时提供兜底零数据。
+    pub fn me_quota_json(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/api/v1/users/me/quota", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .send()
+            .map_err(http_err)?;
+        let status = resp.status();
+        let body = resp.text().map_err(http_err)?;
+        if !status.is_success() {
+            return Err(VaultError::Crypto(format!(
+                "quota failed: status={status} body={body}"
+            )));
+        }
+        serde_json::from_str(&body).map_err(json_err)
+    }
+
+    /// `POST /api/v1/member/activate` — 授权码 (license_key) 激活路径.
+    ///
+    /// manual 会员不走账号密码,而是输入一串授权码即激活 pro 并配 gateway LLM.
+    /// 契约 (cloud 侧由另一 agent 实现):
+    /// 请求 `{license_key}` → 200 `{plan, expires_at, allowed_plugins,
+    /// gateway_token, gateway_url, gateway_default_model}`。
+    ///
+    /// 错误语义:**任何非 2xx (4xx 无效授权码 / 5xx / transport) → `Err`**。
+    /// 调用方据此拒绝激活,绝不在错误时把用户置为 Paid (fail-closed)。
+    pub fn activate_license(&self, license_key: &str) -> Result<ActivateResult> {
+        let url = format!("{}/api/v1/member/activate", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&serde_json::json!({ "license_key": license_key }))
+            .send()
+            .map_err(http_err)?;
+        let status = resp.status();
+        let body = resp.text().map_err(http_err)?;
+        if !status.is_success() {
+            // 4xx (无效/已吊销授权码) 与 5xx/transport 同走 Err — 激活失败即不配。
+            return Err(VaultError::Crypto(format!(
+                "activate failed: status={status} body={body}"
+            )));
+        }
+        serde_json::from_str(&body).map_err(json_err)
+    }
+
+    /// `POST /api/v1/devices/activate` — 设备绑定:把本机指纹绑到 license_key,
+    /// 颁发 device_token + 限制设备数。
+    ///
+    /// 契约 (cloud `accounts/api/devices.py`):请求体
+    /// `{license_key, device_fingerprint: {device_id, hostname, os, cpu_brand,
+    /// hardware_uuid, form_factor, fingerprint_sig}}`。`fingerprint_sig` =
+    /// `SHA-256(device_id|hostname|os|cpu_brand|hardware_uuid)` hex(字段顺序与
+    /// cloud `_compute_fingerprint_sig` 逐字节一致;`hardware_uuid=None` 计入字面
+    /// `"null"`)。200 → `{device_token, device_id, plan, max_activations,
+    /// current_activations, issued_at, expires_at}`。
+    ///
+    /// **错误语义 (fail-closed)**:任何非 2xx → `Err`。区分:
+    /// - 409 (max-devices-reached) → [`DeviceActivateError::MaxDevicesReached`](设备超限,
+    ///   可操作:用户应在别处吊销旧设备)。
+    /// - 401 (invalid-license) / 403 (指纹不符等) → [`DeviceActivateError::Rejected`]。
+    /// - 5xx / transport → [`DeviceActivateError::Unavailable`]。
+    ///
+    /// 调用方据此给出可操作提示,绝不在错误路径默认放行设备绑定。
+    pub fn device_activate(
+        &self,
+        license_key: &str,
+        fp: &crate::device_fingerprint::DeviceFingerprint,
+    ) -> std::result::Result<DeviceActivateResult, DeviceActivateError> {
+        let url = format!("{}/api/v1/devices/activate", self.base_url);
+        let body = serde_json::json!({
+            "license_key": license_key,
+            "device_fingerprint": fp,
+        });
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&body)
+            .send()
+            .map_err(|e| DeviceActivateError::Unavailable(format!("transport: {e}")))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            return serde_json::from_str(&text)
+                .map_err(|e| DeviceActivateError::Unavailable(format!("bad activate body: {e}")));
+        }
+        // Map cloud HTTP status → typed, actionable error. 409 = device-count cap;
+        // 401/403 = license/fingerprint reject; everything else = unavailable.
+        match status.as_u16() {
+            409 => Err(DeviceActivateError::MaxDevicesReached(extract_code_or(
+                &text,
+                "max-devices-reached",
+            ))),
+            401 | 403 => Err(DeviceActivateError::Rejected(extract_code_or(
+                &text,
+                "device-rejected",
+            ))),
+            _ => Err(DeviceActivateError::Unavailable(format!(
+                "status={status} body={text}"
+            ))),
+        }
+    }
+
     /// 拿用户的 license 列表 (含已分配的 pro 插件)
     pub fn list_licenses(&self) -> Result<Vec<License>> {
         let url = format!("{}/api/v1/licenses", self.base_url);
@@ -127,11 +280,54 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
-    /// 登出
+    /// `POST /api/v1/member/verify` (T8 / T6 契约). 发送 client `nonce` + `license_id`,
+    /// 解析 entitlement 快照 (§5.2). **网络错 / 5xx → `Err`**(调用方走宽限,§7.2);
+    /// **200 + valid=false → `Ok(snapshot)`**(业务拒,调用方据 status 立即关)。两类
+    /// 错误严格区分 (per §7.2 error 5) —— 故只有传输层失败抛 Err,业务态走解析快照。
+    pub fn verify_entitlements(
+        &self,
+        license_id: &str,
+        nonce: &str,
+    ) -> Result<EntitlementSnapshot> {
+        let url = format!("{}/api/v1/member/verify", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&serde_json::json!({ "license_id": license_id, "nonce": nonce }))
+            .send()
+            .map_err(http_err)?;
+        // 5xx / transport → Err (走宽限). 4xx (含 401/403) 也视为不可信 → Err.
+        if !resp.status().is_success() {
+            return Err(VaultError::Crypto(format!(
+                "verify: status={}",
+                resp.status()
+            )));
+        }
+        resp.json().map_err(http_err)
+    }
+
+    /// 登出：先无条件清空本地 session，再 best-effort 通知 server。
+    /// 网络失败不影响本地 token 清除，保证用户视角的"已登出"语义。
     pub fn logout(&mut self) -> Result<()> {
+        // Take the credential so the in-memory client is logged out even if the
+        // request fails, while still authenticating the remote revocation call.
+        let session = self.session_cookie.take();
+        // A network failure must not leave the client carrying a valid token
+        // the user believes they've revoked (I-1 from production deepdive audit).
         let url = format!("{}/api/v1/logout", self.base_url);
-        let _ = self.http.post(&url).send().map_err(http_err)?;
-        self.session_cookie = None;
+        let response = self
+            .http
+            .post(&url)
+            .header_opt_cookie(session.as_deref())
+            .send()
+            .map_err(http_err)?;
+        if !response.status().is_success() {
+            return Err(VaultError::Crypto(format!(
+                "logout failed: status={}",
+                response.status()
+            )));
+        }
         Ok(())
     }
 
@@ -143,30 +339,34 @@ impl CloudClient {
     ///
     /// **Task 4 of v1.0.6 Privacy Logic Implementation Plan.**
     ///
-    /// v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for Cloud SaaS
-    /// outbound. The actual `privacy.cloud_saas` setting + vault_unlocked
-    /// wiring is plumbed in Task 7 (PrivacyView state integration); today
-    /// this is a non-rejecting call site marker — wipe_session needs to
-    /// succeed even if cloud_saas is "disabled" because the user is asking
-    /// to remove their cloud footprint. Grep guard (scripts/privacy-audit.sh)
-    /// keys on `OutboundGate::enforce`.
+    /// v1.0.6 Privacy Logic Strategy — Cloud SaaS egress. Unlike the other four
+    /// egress points (LLM / WebDAV / WebSearch / Telemetry) which now enforce
+    /// the OutboundGate's Result, `wipe_session` is INTENTIONALLY always-allow:
+    /// it is a DSAR-adjacent right (remove your cloud footprint) that must
+    /// succeed even when `privacy.cloud_saas` is disabled or the vault is
+    /// locked. This is the single allow-listed `let _ = enforce` call site in
+    /// `scripts/privacy-audit.sh`.
     pub fn wipe_session(&mut self) -> Result<()> {
-        // Audit hook — wipe_session must succeed regardless of policy outcome.
+        // Audit hook — wipe_session is INTENTIONALLY always-allow: the user is
+        // exercising a DSAR-adjacent right to remove their cloud footprint, so
+        // it must succeed even if `privacy.cloud_saas` is disabled or the vault
+        // is locked. We construct the policy with `enabled: true,
+        // vault_unlocked: true` deliberately (not a no-op stub) and the result
+        // is genuinely discarded because the contract overrides the gate here.
+        // This is the ONLY egress where discarding the Result is correct;
+        // scripts/privacy-audit.sh allow-lists exactly this one call site.
         let _ = crate::OutboundGate::enforce(
-            &crate::OutboundPolicy {
-                kind: crate::OutboundKind::CloudSaas,
-                enabled: true, // wipe is always allowed (user-initiated DSAR-adjacent)
-                vault_unlocked: true,
-                redactor: None,
-            },
+            &crate::OutboundPolicy::cloud(
+                crate::OutboundKind::CloudSaas,
+                true, // DSAR wipe: always allowed by design
+                true, // DSAR wipe: not vault-gated by design
+                None,
+            ),
             "",
         );
 
         // Best-effort remote logout: swallow errors so local clear always wins.
         let _ = self.logout();
-        // Re-enforce local clear (logout already cleared, but make contract
-        // explicit + self-documenting for future maintainers).
-        self.session_cookie = None;
         Ok(())
     }
 
@@ -276,6 +476,17 @@ pub struct UserInfo {
     /// 老版 accounts server 不返回此字段 → None,attune-server 不写入 model 保持兼容。
     #[serde(default)]
     pub gateway_default_model: Option<String>,
+    /// 会员场景 (vertical):law / medical / patent / presales / tech / academic。
+    /// per spec 2026-06-20-membership-auto-plugin-provision.md §5。
+    ///
+    /// SECURITY (§11 R2):**纯 UI 文案,不参与任何插件门禁**。装哪些插件的权威是签名
+    /// 快照里的 `allowed_plugins`(SEC-1 Ed25519 + SEC-2 nonce),即便此明文字段被伪造
+    /// 也无法越权。client 也**不自报** vertical(只读 cloud 下发,防伪造越权)。
+    ///
+    /// 向后兼容:老 cloud 不返回 → None(serde default);未知字符串值客户端容忍
+    /// (前向兼容未来 vertical),UI 映射对未知值有兜底文案。
+    #[serde(default)]
+    pub vertical: Option<String>,
 }
 
 /// accounts `GET /api/v1/licenses` 的单条 license 响应
@@ -294,9 +505,131 @@ pub struct License {
     pub last_used_at: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// 会员场景 (vertical),仅 UI 展示用;老 cloud 不返回 → None。语义同
+    /// [`UserInfo::vertical`](不参与门禁)。
+    #[serde(default)]
+    pub vertical: Option<String>,
     /// pro 插件清单 (pluginhub 下发)
     #[serde(default)]
     pub entitled_plugins: Vec<EntitledPlugin>,
+}
+
+impl License {
+    /// Stable identifier used by member state and entitlement rows.  Some
+    /// accounts deployments expose the domain license id separately from the
+    /// database row id; prefer it everywhere so login and restart restoration
+    /// cannot report two different identities for the same license.
+    pub fn canonical_id(&self) -> String {
+        self.license_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| self.id.to_string())
+    }
+}
+
+/// `POST /api/v1/member/activate` 响应 — 授权码激活成功后 cloud 下发的会员配置.
+///
+/// 镜像 cloud 契约。`gateway_*` 与 [`UserInfo`] 的同名字段语义一致 (付费会员的
+/// new-api token / endpoint / 默认 model)。`allowed_plugins` 是该授权码授权的
+/// plugin_id 列表 (供 pluginhub 安装授权);客户端把它落进 entitlement 缓存/vault。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivateResult {
+    /// pro | pro_plus | enterprise | individual ...
+    #[serde(default)]
+    pub plan: String,
+    /// RFC3339 会员到期 | None (永久 / 未提供)
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// 该授权码授权的 plugin_id 列表 (pluginhub 安装授权)
+    #[serde(default)]
+    pub allowed_plugins: Vec<String>,
+    /// new-api LLM token (gateway api_key)
+    #[serde(default)]
+    pub gateway_token: Option<String>,
+    /// LLM gateway endpoint (如 https://gateway.engi-stack.com/v1)
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+    /// 云端下发默认 model (如 "deepseek-v4-flash");老 cloud 不返回 → None
+    #[serde(default)]
+    pub gateway_default_model: Option<String>,
+    /// 会员场景 (vertical),语义同 [`UserInfo::vertical`]:纯 UI 文案,**不参与门禁**
+    /// (装什么仍由签名快照 `allowed_plugins` 决定),client 不自报。老 cloud → None。
+    #[serde(default)]
+    pub vertical: Option<String>,
+}
+
+/// `POST /api/v1/devices/activate` 成功响应 — cloud 颁发的设备绑定凭据.
+///
+/// 镜像 cloud `device_service._activation_response`。`device_token` 是后续 heartbeat /
+/// cert 签发的 Bearer 凭据,客户端持久化。`max_activations` / `current_activations`
+/// 供 UI 显示"已用 N/上限 M 台设备"。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceActivateResult {
+    /// 设备绑定 token(HMAC,heartbeat / cert 签发用)
+    pub device_token: String,
+    /// 回显的稳定 device_id
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub plan: String,
+    /// 该 license 允许的最大设备数
+    #[serde(default)]
+    pub max_activations: Option<u32>,
+    /// 含本次后当前已激活设备数
+    #[serde(default)]
+    pub current_activations: Option<u32>,
+    #[serde(default)]
+    pub issued_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// 设备绑定失败的分类(供调用方给可操作提示 / 决定是否阻断激活)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceActivateError {
+    /// 设备数超限(409):用户应吊销旧设备后重试。
+    MaxDevicesReached(String),
+    /// license / 指纹被拒(401/403):授权码无效 / 已吊销 / 指纹不匹配。
+    Rejected(String),
+    /// cloud 不可达 / 5xx / 响应不可解析。
+    Unavailable(String),
+}
+
+impl std::fmt::Display for DeviceActivateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxDevicesReached(c) => write!(f, "max-devices-reached: {c}"),
+            Self::Rejected(c) => write!(f, "device-rejected: {c}"),
+            Self::Unavailable(c) => write!(f, "device-activate-unavailable: {c}"),
+        }
+    }
+}
+
+impl std::error::Error for DeviceActivateError {}
+
+/// 从 cloud 错误响应体(`{"detail": {"error", "code"}}` 或 `{"detail": "code"}`)
+/// 抽出 kebab `code`;抽不到 → `fallback`。仅用于错误分类信息,不影响 fail-closed。
+fn extract_code_or(body: &str, fallback: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let detail = v.get("detail");
+        if let Some(d) = detail {
+            if let Some(code) = d.get("code").and_then(|c| c.as_str()) {
+                return code.to_string();
+            }
+            if let Some(s) = d.as_str() {
+                return s.to_string();
+            }
+        }
+    }
+    fallback.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformPackage {
+    pub platform: String,
+    pub download_url: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,11 +638,160 @@ pub struct EntitledPlugin {
     pub version: String,
     /// pluginhub 下载 URL (含签名 token)
     pub download_url: String,
+    /// PluginHub package SHA-256 hex digest. Empty means legacy cloud/hub did
+    /// not provide package integrity metadata.
+    #[serde(default)]
+    pub sha256: String,
+    /// Optional platform-specific packages. New accounts servers include this
+    /// so Windows clients receive `.exe` agent binaries instead of the legacy
+    /// Linux symlink package. Old servers omit it and the client falls back to
+    /// `download_url` + `sha256`.
+    #[serde(default)]
+    pub platform_packages: Vec<PlatformPackage>,
     /// 公钥 hex (用于客户端 verify_with_key 校验 plugin.sig)
     pub signing_pubkey_hex: String,
     /// 加密 key (paid plugin 用; free 可空)
     #[serde(default)]
     pub decrypt_key: Option<String>,
+}
+
+// ─── trust-chain (T6): entitlement 快照契约 v1 (spec §5.2) ───────────────
+//
+// cloud `/member/verify` 响应镜像。向后兼容追加字段:老 cloud 不返回 entitlements
+// / signature / nonce → serde default 容缺,标记为 schema-0 / unsigned-response,
+// 由 T-auth-1/2 决定策略(warn grandfather / strict 拒)。本模块只做契约镜像 +
+// "是否带签名"标记,不做验签策略。
+
+/// 单条 entitlement(派生视图,由 signed_payload.allowed_plugins + status 展开)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntitlementSnapshotItem {
+    pub plugin_id: String,
+    /// free | trial | paid
+    pub tier: String,
+    /// active | suspended | revoked
+    pub status: String,
+    #[serde(default)]
+    pub trial_expires: Option<String>,
+    #[serde(default)]
+    pub signing_pubkey_hex: String,
+    #[serde(default)]
+    pub verified_at: Option<String>,
+}
+
+/// 验签覆盖体(canonical JSON,字段序固定)—— SEC-1 签名作用于此,SEC-2 nonce/
+/// verified_at 校验也基于此。client 转 Active 仅依据**验签通过的** `status`,不直接
+/// 信顶层 `valid` / `entitlements`(防顶层伪造,spec §5.2 裁决)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SignedPayload {
+    /// active | suspended | revoked (per-license 总体状态)
+    pub status: String,
+    /// 该 license 授权的 plugin_id 列表
+    #[serde(default)]
+    pub allowed_plugins: Vec<String>,
+    /// RFC3339 | None (trial/paid 到期)
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// 回显 client 发来的同一 nonce (SEC-2 anti-replay)
+    #[serde(default)]
+    pub nonce: String,
+    /// 服务端权威时间 RFC3339,单调递增 (SEC-2 freshness)
+    #[serde(default)]
+    pub verified_at: String,
+}
+
+impl SignedPayload {
+    /// **RFC 8785 JCS** canonical 序列化(§4.1.4 钉死的 codec):键按字典序、UTF-8、
+    /// 无多余空白。这是 cross-repo 唯一可能 silent 字节分歧的点,故确定性编码。
+    ///
+    /// 实现:用 `BTreeMap<&str, serde_json::Value>` 强制键序 + `serde_json::to_vec`
+    /// (compact,无空白)。对本 payload 的标量/数组字段足够确定(同输入同字节);
+    /// cloud v4 须用同一 JCS 实现产出同一字节。client T-auth-1 验签复算此字节。
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        use std::collections::BTreeMap;
+        let mut m: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        m.insert("status", serde_json::Value::String(self.status.clone()));
+        m.insert(
+            "allowed_plugins",
+            serde_json::Value::Array(
+                self.allowed_plugins
+                    .iter()
+                    .map(|p| serde_json::Value::String(p.clone()))
+                    .collect(),
+            ),
+        );
+        m.insert(
+            "expires_at",
+            match &self.expires_at {
+                Some(s) => serde_json::Value::String(s.clone()),
+                None => serde_json::Value::Null,
+            },
+        );
+        m.insert("nonce", serde_json::Value::String(self.nonce.clone()));
+        m.insert(
+            "verified_at",
+            serde_json::Value::String(self.verified_at.clone()),
+        );
+        // BTreeMap → serde_json::to_vec is compact + key-sorted (JCS subset).
+        serde_json::to_vec(&m).expect("canonical serialize never fails for owned values")
+    }
+}
+
+/// `/member/verify` 响应快照(顶层契约 v1,spec §5.2)。
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntitlementSnapshot {
+    #[serde(default)]
+    pub valid: bool,
+    #[serde(default)]
+    pub plan: String,
+    /// schema 版本。缺失(老 cloud)→ 0,见 [`Self::schema`]。
+    #[serde(default)]
+    pub entitlement_schema: u32,
+    /// 回显的 nonce (SEC-2)
+    #[serde(default)]
+    pub nonce: Option<String>,
+    /// 验签覆盖体(canonical),缺失 = unsigned-response。
+    #[serde(default)]
+    pub signed_payload: Option<SignedPayload>,
+    /// base64 Ed25519 签名,缺失 = unsigned-response。
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// 派生视图。缺失 → schema-0(老 cloud)。
+    #[serde(default)]
+    pub entitlements: Option<Vec<EntitlementSnapshotItem>>,
+    /// 服务端可调验证节奏。
+    #[serde(default)]
+    pub next_verify_after_hours: Option<u32>,
+}
+
+impl EntitlementSnapshot {
+    /// 有效 schema:`entitlement_schema` 显式给 → 用之;否则若缺 `entitlements`
+    /// → 视为 schema 0(老 cloud,spec §10)。
+    pub fn schema(&self) -> u32 {
+        if self.entitlement_schema > 0 {
+            self.entitlement_schema
+        } else if self.entitlements.is_none() {
+            0
+        } else {
+            // entitlements present but schema field absent → treat as v1.
+            1
+        }
+    }
+
+    /// 是否是"未签名响应"(缺 signature 或 signed_payload)——老 cloud grandfather。
+    /// T-auth-1 据此在 warn 容忍 / strict 拒。T6 仅标记,不做策略。
+    pub fn is_unsigned_response(&self) -> bool {
+        self.signature.is_none() || self.signed_payload.is_none()
+    }
+}
+
+/// 已知 vertical 枚举(spec §11 裁决:cloud 端枚举校验,client 端容忍任意字符串以
+/// 前向兼容未来 vertical)。client **不**拒绝未知值 —— 仅用此集合区分"已知场景"(可给
+/// 本地化文案)与"未知场景"(UI 走兜底原样显示)。**绝不**用 vertical 做门禁决策。
+pub const KNOWN_VERTICALS: &[&str] = &["law", "medical", "patent", "presales", "tech", "academic"];
+
+/// vertical 是否为已知枚举值(用于决定 UI 是否有本地化文案;不是门禁)。空/None 不算已知。
+pub fn is_known_vertical(vertical: &str) -> bool {
+    KNOWN_VERTICALS.contains(&vertical)
 }
 
 fn http_err(e: reqwest::Error) -> VaultError {
@@ -323,6 +805,35 @@ fn json_err(e: serde_json::Error) -> VaultError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paid_plan_allowlist_fails_closed_for_unknown_and_free_plans() {
+        for plan in ["pro", "pro_plus", "enterprise"] {
+            assert!(plan_grants_paid(plan), "{plan} should grant Paid");
+        }
+        for plan in ["", "individual", "free", "paid", "PRO", "team"] {
+            assert!(!plan_grants_paid(plan), "{plan:?} must fail closed");
+        }
+    }
+
+    #[test]
+    fn current_paid_plan_rejects_expired_or_malformed_proof() {
+        assert!(current_plan_grants_paid("pro", None));
+        assert!(current_plan_grants_paid("enterprise", Some("  ")));
+        assert!(current_plan_grants_paid(
+            "pro_plus",
+            Some("2999-01-01T00:00:00Z")
+        ));
+        assert!(!current_plan_grants_paid(
+            "pro",
+            Some("2000-01-01T00:00:00Z")
+        ));
+        assert!(!current_plan_grants_paid("pro", Some("not-a-date")));
+        assert!(!current_plan_grants_paid(
+            "free",
+            Some("2999-01-01T00:00:00Z")
+        ));
+    }
 
     #[test]
     fn client_builds_with_url() {
@@ -378,12 +889,14 @@ mod tests {
         let json = r#"{
             "plugin_id": "law-pro",
             "version": "0.2.0",
-            "download_url": "https://hub.engi-stack.com/plugins/law-pro-0.2.0.attunepkg?token=abc",
+            "download_url": "https://hub.engi-stack.com/api/v1/packages/law-pro-0.2.0.tar.gz?token=abc",
+            "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
             "signing_pubkey_hex": "12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc",
             "decrypt_key": "device-license-token"
         }"#;
         let p: EntitledPlugin = serde_json::from_str(json).unwrap();
         assert_eq!(p.plugin_id, "law-pro");
+        assert_eq!(p.sha256.len(), 64);
         assert_eq!(p.signing_pubkey_hex.len(), 64);
     }
 
@@ -402,6 +915,7 @@ mod tests {
         let lic: License = serde_json::from_str(json).unwrap();
         assert_eq!(lic.plan, "pro");
         assert_eq!(lic.license_key, "key-abc123");
+        assert_eq!(lic.canonical_id(), "42");
         assert!(lic.entitled_plugins.is_empty());
     }
 
@@ -416,7 +930,8 @@ mod tests {
                 {
                     "plugin_id": "law-pro",
                     "version": "0.2.0",
-                    "download_url": "https://hub.engi-stack.com/plugins/law-pro-0.2.0.attunepkg",
+                    "download_url": "https://hub.engi-stack.com/api/v1/packages/law-pro-0.2.0.tar.gz",
+                    "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
                     "signing_pubkey_hex": "12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc",
                     "decrypt_key": "device-token"
                 }
@@ -426,6 +941,7 @@ mod tests {
         assert_eq!(lic.id, 7);
         assert_eq!(lic.entitled_plugins.len(), 1);
         assert_eq!(lic.entitled_plugins[0].plugin_id, "law-pro");
+        assert_eq!(lic.entitled_plugins[0].sha256.len(), 64);
     }
 
     #[test]
@@ -442,7 +958,10 @@ mod tests {
         }"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert_eq!(u.gateway_token.as_deref(), Some("sk-newapi-abc"));
-        assert_eq!(u.gateway_url.as_deref(), Some("https://gateway.engi-stack.com/v1"));
+        assert_eq!(
+            u.gateway_url.as_deref(),
+            Some("https://gateway.engi-stack.com/v1")
+        );
     }
 
     #[test]
@@ -467,7 +986,143 @@ mod tests {
             "gateway_default_model": "deepseek-v4-flash"
         }"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(u.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            u.gateway_default_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+    }
+
+    // ── activate_license (授权码激活路径) ────────────────────────────────────
+
+    #[test]
+    fn activate_result_parses_full_contract() {
+        let json = r#"{
+            "plan": "pro",
+            "expires_at": "2026-12-31T00:00:00+00:00",
+            "allowed_plugins": ["law-pro", "med-pro"],
+            "gateway_token": "sk-newapi-activate",
+            "gateway_url": "https://gateway.engi-stack.com/v1",
+            "gateway_default_model": "deepseek-v4-flash"
+        }"#;
+        let r: ActivateResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.plan, "pro");
+        assert_eq!(r.expires_at.as_deref(), Some("2026-12-31T00:00:00+00:00"));
+        assert_eq!(r.allowed_plugins, vec!["law-pro", "med-pro"]);
+        assert_eq!(r.gateway_token.as_deref(), Some("sk-newapi-activate"));
+        assert_eq!(
+            r.gateway_url.as_deref(),
+            Some("https://gateway.engi-stack.com/v1")
+        );
+        assert_eq!(
+            r.gateway_default_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn activate_result_old_cloud_minimal_defaults() {
+        // 老 cloud / 缺字段 → serde default 容缺,不 panic。
+        let json = r#"{"plan": "pro"}"#;
+        let r: ActivateResult = serde_json::from_str(json).unwrap();
+        assert!(r.expires_at.is_none());
+        assert!(r.allowed_plugins.is_empty());
+        assert!(r.gateway_token.is_none());
+        assert!(r.gateway_default_model.is_none());
+    }
+
+    // ── device_activate (设备绑定路径) ───────────────────────────────────────
+
+    #[test]
+    fn device_activate_result_parses_full_contract() {
+        let json = r#"{
+            "device_token": "dt-hmac-abc",
+            "device_id": "dev-xyz",
+            "plan": "pro",
+            "max_activations": 2,
+            "current_activations": 1,
+            "issued_at": "2026-06-17T00:00:00+00:00",
+            "expires_at": "2026-07-17T00:00:00+00:00"
+        }"#;
+        let r: DeviceActivateResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.device_token, "dt-hmac-abc");
+        assert_eq!(r.device_id, "dev-xyz");
+        assert_eq!(r.max_activations, Some(2));
+        assert_eq!(r.current_activations, Some(1));
+    }
+
+    #[test]
+    fn device_activate_result_minimal_defaults() {
+        // 仅 device_token 必需,其余 serde default 容缺。
+        let r: DeviceActivateResult = serde_json::from_str(r#"{"device_token": "t"}"#).unwrap();
+        assert_eq!(r.device_token, "t");
+        assert!(r.max_activations.is_none());
+        assert!(r.current_activations.is_none());
+    }
+
+    #[test]
+    fn device_activate_unreachable_is_unavailable_err() {
+        // 网络不可达 → fail-closed Unavailable(绝不放行设备绑定)。
+        let c = CloudClient::new("http://127.0.0.1:9");
+        let fp = crate::device_fingerprint::DeviceFingerprint {
+            device_id: "d".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            cpu_brand: "cpu".into(),
+            hardware_uuid: None,
+            form_factor: "laptop".into(),
+            fingerprint_sig: "sig".into(),
+        };
+        let err = c.device_activate("LIC-KEY", &fp).unwrap_err();
+        assert!(
+            matches!(err, DeviceActivateError::Unavailable(_)),
+            "unreachable → Unavailable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn extract_code_handles_cloud_shapes() {
+        // 403 detail 对象 {error, code}
+        assert_eq!(
+            extract_code_or(
+                r#"{"detail":{"error":"fingerprint mismatch","code":"fingerprint-mismatch"}}"#,
+                "x"
+            ),
+            "fingerprint-mismatch"
+        );
+        // 409 detail 字符串
+        assert_eq!(
+            extract_code_or(r#"{"detail":"max-devices-reached"}"#, "x"),
+            "max-devices-reached"
+        );
+        // 不可解析 → fallback
+        assert_eq!(
+            extract_code_or("not json", "device-rejected"),
+            "device-rejected"
+        );
+    }
+
+    #[test]
+    fn device_activate_error_display_is_actionable() {
+        assert!(DeviceActivateError::MaxDevicesReached("c".into())
+            .to_string()
+            .contains("max-devices-reached"));
+        assert!(DeviceActivateError::Rejected("c".into())
+            .to_string()
+            .contains("device-rejected"));
+    }
+
+    #[test]
+    fn activate_against_unreachable_returns_err() {
+        // 网络不可达 → http_err → Err (激活失败,调用方 fail-closed)。
+        let c = CloudClient::new("http://127.0.0.1:8");
+        assert!(c.activate_license("ATTUNE-LIC-XXXX").is_err());
+    }
+
+    #[test]
+    fn activate_empty_license_key_does_not_panic() {
+        // client 不做 client-side reject (业务校验由 server);只验证不 panic。
+        let c = CloudClient::new("http://127.0.0.1:9");
+        let _ = c.activate_license("");
     }
 
     // ── 增强覆盖: with_session / signup / list_licenses / logout / network error ─
@@ -506,21 +1161,173 @@ mod tests {
         assert!(c.list_licenses().is_err());
     }
 
-    // FIXME(v1.1): logout 当前在网络失败时不清空 session_cookie (用 ? 提前 return)。
-    // 用户视角的"我登出了" 应当本地清空 session,不论 server 是否能响应。
-    // 本 test 锁定**当前行为**: 网络挂 → logout 返回 Err 且 session 仍存在。
-    // v1.1 应改为: 即使 server 不可达,也本地 session_cookie = None。
+    // logout: 本地 session 必须无条件清空，即使 server 不可达。
+    // Fix: 先清 session_cookie，再 best-effort 通知 server（I-1 audit fix）。
     #[test]
-    fn logout_returns_err_on_unreachable_keeps_session_current_behavior() {
+    fn logout_clears_local_session_even_on_network_failure() {
         let mut c = CloudClient::with_session("http://127.0.0.1:5", "token");
-        assert!(c.session_token().is_some());
+        assert!(c.session_token().is_some(), "precondition: token present");
         let result = c.logout();
-        // 当前: 网络错 → Err 提前 return → session 还在 (这是个 bug, 见 FIXME)
-        assert!(result.is_err());
+        // Network fails (port 5 unreachable), but local session MUST be cleared.
+        assert!(result.is_err(), "network call should fail");
+        assert!(
+            c.session_token().is_none(),
+            "local session cleared unconditionally"
+        );
     }
 
-    // Happy logout: 用 mock URL trick — 注意当前 impl 不会清 session 即使 HTTP 200
-    // (因 `let _ = ?` 模式只在 ? 不触发时继续)。如果未来 fix 这个 bug, 改成本地无条件清。
+    #[test]
+    fn logout_authenticates_remote_revocation_with_captured_cookie() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+            tx.send(String::from_utf8_lossy(&request).to_string())
+                .unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let mut client = CloudClient::with_session(format!("http://{addr}"), "session=secret");
+        client.logout().unwrap();
+        assert!(client.session_token().is_none());
+        let request = rx.recv().unwrap();
+        assert!(request.starts_with("POST /api/v1/logout "), "{request}");
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("cookie: session=secret")),
+            "logout request must carry the session cookie: {request}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn logout_rejects_non_success_status_but_still_clears_local_session() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let mut client = CloudClient::with_session(format!("http://{addr}"), "secret-session");
+        let error = client
+            .logout()
+            .expect_err("500 must not count as revocation");
+        assert!(error.to_string().contains("status=500"));
+        assert!(client.session_token().is_none());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn logout_clears_the_only_in_memory_cookie_copy() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for response in [
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Set-Cookie: session=jar-secret; Path=/; HttpOnly\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: 49\r\n",
+                    "Connection: close\r\n\r\n",
+                    r#"{"id":7,"email":"user@example.test","plan":"pro"}"#
+                ),
+                concat!(
+                    "HTTP/1.1 500 Internal Server Error\r\n",
+                    "Content-Length: 0\r\n",
+                    "Connection: close\r\n\r\n"
+                ),
+                concat!(
+                    "HTTP/1.1 401 Unauthorized\r\n",
+                    "Content-Length: 0\r\n",
+                    "Connection: close\r\n\r\n"
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                tx.send(String::from_utf8_lossy(&request).to_string())
+                    .unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let mut client = CloudClient::new(format!("http://{addr}"));
+        client
+            .login("user@example.test", "not-a-real-password")
+            .unwrap();
+        assert!(
+            client.logout().is_err(),
+            "mock revocation intentionally fails"
+        );
+        assert!(client.session_token().is_none());
+        assert!(client.me().is_err());
+
+        let login_request = rx.recv().unwrap();
+        let logout_request = rx.recv().unwrap();
+        let post_logout_request = rx.recv().unwrap();
+        assert!(!login_request.to_ascii_lowercase().contains("cookie:"));
+        assert!(
+            logout_request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("cookie: session=jar-secret")),
+            "logout must authenticate the revocation: {logout_request}"
+        );
+        assert!(
+            !post_logout_request.to_ascii_lowercase().contains("cookie:"),
+            "cleared client must not be re-authenticated by a hidden cookie jar: {post_logout_request}"
+        );
+        server.join().unwrap();
+    }
 
     // Edge: empty email / password 也走 HTTP request (业务校验由 server 端)
     // 这里只验证 client 不 panic, 不 client-side reject
@@ -536,11 +1343,12 @@ mod tests {
         let json = r#"{
             "plugin_id": "free-skill",
             "version": "1.0.0",
-            "download_url": "https://x.com/x.attunepkg",
+            "download_url": "https://x.com/x.tar.gz",
             "signing_pubkey_hex": "deadbeef"
         }"#;
         let p: EntitledPlugin = serde_json::from_str(json).unwrap();
         assert!(p.decrypt_key.is_none());
+        assert!(p.sha256.is_empty());
     }
 
     // UserInfo: plan_expires + is_admin defaults
@@ -568,5 +1376,278 @@ mod tests {
     fn login_unicode_email_no_panic() {
         let mut c = CloudClient::new("http://127.0.0.1:7");
         let _ = c.login("中文@example.com", "🔒pw");
+    }
+
+    // ── T6: entitlement 快照契约 v1 镜像 (spec §5.2) ──────────────────────
+
+    const V1_SNAPSHOT: &str = r#"{
+        "valid": true,
+        "plan": "pro",
+        "entitlement_schema": 1,
+        "nonce": "client-nonce-abc",
+        "signed_payload": {
+            "status": "active",
+            "allowed_plugins": ["law-pro", "med-pro"],
+            "expires_at": "2026-12-31T00:00:00+00:00",
+            "nonce": "client-nonce-abc",
+            "verified_at": "2026-06-12T00:00:00+00:00"
+        },
+        "signature": "QmFzZTY0RWQyNTUxOVNpZ25hdHVyZQ==",
+        "entitlements": [
+            {"plugin_id": "law-pro", "tier": "paid", "status": "active",
+             "trial_expires": null, "signing_pubkey_hex": "8866ae9b", "verified_at": "2026-06-12T00:00:00+00:00"}
+        ],
+        "next_verify_after_hours": 24
+    }"#;
+
+    #[test]
+    fn parse_v1_snapshot() {
+        let s: EntitlementSnapshot = serde_json::from_str(V1_SNAPSHOT).unwrap();
+        assert!(s.valid);
+        assert_eq!(s.schema(), 1);
+        assert_eq!(s.nonce.as_deref(), Some("client-nonce-abc"));
+        let sp = s.signed_payload.as_ref().unwrap();
+        assert_eq!(sp.status, "active");
+        assert_eq!(sp.allowed_plugins, vec!["law-pro", "med-pro"]);
+        assert_eq!(sp.nonce, "client-nonce-abc");
+        assert!(s.signature.is_some());
+        assert!(!s.is_unsigned_response());
+        assert_eq!(s.entitlements.as_ref().unwrap().len(), 1);
+        assert_eq!(s.next_verify_after_hours, Some(24));
+    }
+
+    #[test]
+    fn unknown_field_tolerated() {
+        let json = r#"{
+            "valid": true, "plan": "pro", "entitlement_schema": 1,
+            "signed_payload": {"status": "active", "allowed_plugins": [], "nonce": "n", "verified_at": "t"},
+            "signature": "sig", "nonce": "n",
+            "future_field_v2": {"seats": 5}, "another_unknown": [1,2,3]
+        }"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).expect("unknown fields ignored");
+        assert!(s.valid);
+        assert!(!s.is_unsigned_response());
+    }
+
+    #[test]
+    fn missing_entitlements_is_schema_0() {
+        // 老 cloud: 仅 valid + plan, 无 entitlements/schema → schema 0.
+        let json = r#"{"valid": true, "plan": "pro"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema(), 0, "missing entitlements → schema 0 (old cloud)");
+        assert!(
+            s.is_unsigned_response(),
+            "old cloud has no signature → unsigned-response"
+        );
+    }
+
+    #[test]
+    fn unknown_schema_major_treated_as_verify_fail() {
+        // schema 2 大版本 → 客户端按宽限处理 (caller checks schema() != 1).
+        let json = r#"{"valid": true, "plan": "pro", "entitlement_schema": 2,
+            "signed_payload": {"status":"active","allowed_plugins":[],"nonce":"n","verified_at":"t"},
+            "signature":"s","nonce":"n"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            s.schema(),
+            2,
+            "schema 2 surfaced for caller to route to grace"
+        );
+    }
+
+    #[test]
+    fn missing_signature_is_unsigned_response() {
+        // 缺 signature / signed_payload → 标记 unsigned-response (T-auth-1 据此处理).
+        let json = r#"{"valid": true, "plan": "pro", "entitlement_schema": 1,
+            "entitlements": [], "next_verify_after_hours": 24}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert!(s.is_unsigned_response(), "no signature → unsigned-response");
+        // does NOT panic, does NOT break: tolerant.
+        assert!(s.valid);
+    }
+
+    // ── T12: backward-compat matrix (§10) ───────────────────────────────────
+
+    /// old_client_new_cloud (§10): a new cloud only ADDS fields to the verify response;
+    /// an older client's serde must ignore the unknown additions and parse the core
+    /// contract unchanged (no breaking). The v1 snapshot already carries future-shaped
+    /// extras; here we additionally inject brand-new top-level keys a future cloud might
+    /// add and assert the existing fields still parse.
+    #[test]
+    fn old_client_new_cloud() {
+        let json = r#"{
+            "valid": true, "plan": "pro", "entitlement_schema": 1,
+            "nonce": "n", "next_verify_after_hours": 12,
+            "signed_payload": {"status":"active","allowed_plugins":["law-pro"],"nonce":"n","verified_at":"2026-06-12T00:00:00+00:00"},
+            "signature": "sig",
+            "entitlements": [{"plugin_id":"law-pro","tier":"paid","status":"active"}],
+            "seat_count_v2": 5, "grace_policy_v3": {"days": 14}, "telemetry_opt": false
+        }"#;
+        let s: EntitlementSnapshot =
+            serde_json::from_str(json).expect("old client tolerates new cloud fields");
+        // Core contract still parses correctly despite the unknown additions.
+        assert!(s.valid);
+        assert_eq!(s.schema(), 1);
+        assert_eq!(s.signed_payload.as_ref().unwrap().status, "active");
+        assert_eq!(s.next_verify_after_hours, Some(12));
+        assert!(!s.is_unsigned_response());
+    }
+
+    /// new_client_old_cloud (§10 G1 补写): a NEW client talking to an OLD cloud that does
+    /// not yet sign / does not send `entitlements` → schema 0. The client must classify
+    /// this as schema 0 (unsigned) so a paid user is routed to GRACE (fail-open), NOT
+    /// fail-closed. We assert the parse + schema-0 classification that drives that policy.
+    #[test]
+    fn new_client_old_cloud() {
+        // Old cloud: paid user, but no entitlements array and no signature.
+        let json = r#"{"valid": true, "plan": "pro"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema(), 0, "old cloud (no entitlements) → schema 0");
+        assert!(
+            s.is_unsigned_response(),
+            "old cloud unsigned → grace, not fail-closed"
+        );
+        // schema 0 is the signal the consume layer uses to keep a paid license in Grace
+        // (spec §10: do NOT lock a paying user just because the cloud hasn't shipped v4).
+        assert!(
+            s.valid,
+            "the paid plan is still surfaced — caller keeps it in grace"
+        );
+    }
+
+    /// JCS canonical 序列化:确定性 (同输入同字节) + 键排序 + 无空白。
+    #[test]
+    fn signed_payload_canonical_byte_equal_roundtrip() {
+        let p = SignedPayload {
+            status: "active".into(),
+            allowed_plugins: vec!["law-pro".into(), "med-pro".into()],
+            expires_at: Some("2026-12-31T00:00:00+00:00".into()),
+            nonce: "abc123".into(),
+            verified_at: "2026-06-12T00:00:00+00:00".into(),
+        };
+        let b1 = p.canonical_bytes();
+        let b2 = p.canonical_bytes();
+        assert_eq!(b1, b2, "canonical must be deterministic (byte-equal)");
+        // Keys must be sorted (JCS): allowed_plugins < expires_at < nonce < status < verified_at.
+        let s = String::from_utf8(b1).unwrap();
+        let i_allowed = s.find("allowed_plugins").unwrap();
+        let i_expires = s.find("expires_at").unwrap();
+        let i_nonce = s.find("nonce").unwrap();
+        let i_status = s.find("status").unwrap();
+        let i_verified = s.find("verified_at").unwrap();
+        assert!(
+            i_allowed < i_expires
+                && i_expires < i_nonce
+                && i_nonce < i_status
+                && i_status < i_verified,
+            "canonical keys must be lexicographically sorted: {s}"
+        );
+        // No whitespace (compact).
+        assert!(
+            !s.contains(": ") && !s.contains(", "),
+            "canonical must be compact: {s}"
+        );
+    }
+
+    // ── vertical 透传 (spec 2026-06-20 §5) ──────────────────────────────────
+    //
+    // 向后兼容:老 cloud 无 vertical → None;新 cloud 下发 → Some。未知字符串容忍
+    // (前向兼容)。vertical 是纯 UI 文案,不参与门禁(R2),client 不自报。
+
+    #[test]
+    fn user_info_parses_vertical() {
+        let json = r#"{
+            "id": 9, "email": "lawyer@x.com", "plan": "pro",
+            "gateway_token": "sk-x", "gateway_url": "https://gw/v1",
+            "vertical": "law"
+        }"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(u.vertical.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn user_info_old_cloud_vertical_is_none() {
+        // 老 cloud 不返回 vertical → serde default None(向后兼容)。
+        let json = r#"{"id": 1, "email": "free@example.com", "plan": "individual"}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert!(u.vertical.is_none(), "old cloud → vertical None");
+    }
+
+    #[test]
+    fn user_info_unknown_vertical_string_tolerated() {
+        // 前向兼容:client 不拒绝未知 vertical 值(未来 cloud 可能新增 vertical)。
+        let json = r#"{"id": 1, "email": "x@y.com", "plan": "pro", "vertical": "future-vertical"}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(u.vertical.as_deref(), Some("future-vertical"));
+        assert!(
+            !is_known_vertical("future-vertical"),
+            "unknown → UI uses fallback label"
+        );
+    }
+
+    #[test]
+    fn user_info_null_vertical_is_none() {
+        // cloud 显式 null(未指定场景的 pro 用户)→ None,不 panic。
+        let json = r#"{"id": 1, "email": "x@y.com", "plan": "pro", "vertical": null}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert!(u.vertical.is_none());
+    }
+
+    #[test]
+    fn activate_result_parses_vertical() {
+        let json = r#"{
+            "plan": "pro", "expires_at": "2027-06-20T00:00:00Z",
+            "vertical": "patent", "allowed_plugins": ["patent-pro"],
+            "gateway_token": "sk-y", "gateway_url": "https://gw/v1"
+        }"#;
+        let r: ActivateResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.vertical.as_deref(), Some("patent"));
+        assert_eq!(r.allowed_plugins, vec!["patent-pro"]);
+    }
+
+    #[test]
+    fn activate_result_old_cloud_vertical_none() {
+        let r: ActivateResult = serde_json::from_str(r#"{"plan": "pro"}"#).unwrap();
+        assert!(r.vertical.is_none());
+    }
+
+    #[test]
+    fn license_parses_vertical_for_ui() {
+        let json = r#"{
+            "id": 42, "plan": "pro", "license_key": "lk-x", "license_id": 7,
+            "vertical": "academic",
+            "entitled_plugins": []
+        }"#;
+        let lic: License = serde_json::from_str(json).unwrap();
+        assert_eq!(lic.vertical.as_deref(), Some("academic"));
+        assert_eq!(lic.canonical_id(), "7");
+    }
+
+    #[test]
+    fn is_known_vertical_covers_six_enum_values() {
+        for v in ["law", "medical", "patent", "presales", "tech", "academic"] {
+            assert!(is_known_vertical(v), "{v} must be a known vertical");
+        }
+        // unknown / empty / case-sensitive → not known (UI fallback).
+        assert!(!is_known_vertical("Law"), "case-sensitive: 'Law' != 'law'");
+        assert!(!is_known_vertical(""), "empty is not a vertical");
+        assert!(!is_known_vertical("finance"), "未列入枚举 → 未知");
+        assert_eq!(KNOWN_VERTICALS.len(), 6, "exactly 6 verticals per spec");
+    }
+
+    #[test]
+    fn signed_payload_null_expires_canonical() {
+        let p = SignedPayload {
+            status: "trial".into(),
+            allowed_plugins: vec![],
+            expires_at: None,
+            nonce: "n".into(),
+            verified_at: "t".into(),
+        };
+        let s = String::from_utf8(p.canonical_bytes()).unwrap();
+        assert!(
+            s.contains("\"expires_at\":null"),
+            "None → null in canonical: {s}"
+        );
     }
 }

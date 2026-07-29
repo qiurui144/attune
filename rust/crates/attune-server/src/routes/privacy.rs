@@ -2,7 +2,7 @@
 //! v1.0.6 Privacy Logic Strategy — 5 outbound points 总览 + DSAR + 锁定 + wipe-cloud-session
 //!
 //! 端点：
-//! - `GET  /api/v1/privacy/tier` — 返硬件支持的脱敏层 + 推荐选择（v0.6 老接口）
+//! - `GET  /api/v1/privacy/tier` — 返当前生产实现可用的脱敏层（v0.6 老接口）
 //! - `GET  /api/v1/privacy/status` — 5 出网点状态 + vault state + redactor info（v1.0.6 新增）
 //! - `PATCH /api/v1/privacy/settings` — 切换某一出网点开关（v1.0.6 新增）
 //! - `POST /api/v1/privacy/lock` — 立即锁 vault（用户主动）（v1.0.6 新增）
@@ -10,68 +10,50 @@
 //!
 //! 决策（用户 2026-04-28）：
 //! - L1 正则脱敏 → OSS 免费层，所有 tier 都有
-//! - L2 ONNX NER → OSS 免费层，Tier T1+ 可选下载
-//! - L3 LLM 脱敏 → 仅 Tier T3 + T4 + K3 一体机解锁
+//! - L2 ONNX NER → 尚未接入生产路径，能力接口必须 fail-closed
+//! - L3 LLM 脱敏 → 尚未接入生产路径，能力接口必须 fail-closed
 //!
 //! UI 用途：Settings → Privacy 页面根据该 endpoint 渲染 toggle 状态 + 升级提示。
 
+use attune_core::doc_privacy::{
+    enforce_artifact_egress, ArtifactEgressOutcome, DocPrivacyScanner, RedactMode,
+};
+use attune_core::embed::EmbeddingProvider;
+use attune_core::export::Artifact;
+use attune_core::llm::LlmProvider;
 use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
+use attune_core::pii::Redactor;
 use attune_core::platform::{classify_hardware, Tier};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
-/// 返当前硬件可用的脱敏层 + 推荐 LLM 脱敏模型（如适用）。
+/// 返当前生产路径实际可用的脱敏层。
+///
+/// `hardware_tier` 只是诊断信息，不等于功能已实现。L2 NER 目前仍是空
+/// stub，L3 也没有接入生产脱敏路径，因此两者必须始终 fail-closed。
 pub async fn tier(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let hw = &state.hardware;
-    let tier = classify_hardware(hw);
+    Json(tier_payload(classify_hardware(&state.hardware)))
+}
 
-    // 各 tier 解锁的层级
-    // L1 正则 = 所有 tier（即使 T0 也提供，但 T0 通常进不了应用）
-    // L2 NER = T1+（约 300MB 模型）
-    // L3 LLM = T3+ 才有意义
-    let layers: Vec<&str> = match tier {
-        Tier::Unsupported => vec!["L0", "L1"],
-        Tier::Low => vec!["L0", "L1"],
-        Tier::Mid => vec!["L0", "L1", "L2"],
-        Tier::High => vec!["L0", "L1", "L2", "L3"],
-        Tier::Flagship => vec!["L0", "L1", "L2", "L3"],
-    };
-
-    // L3 默认模型（按 tier）
-    let l3_model: Option<&'static str> = match tier {
-        Tier::High => Some("qwen2.5:3b-instruct-q4_K_M"),
-        Tier::Flagship => Some("qwen2.5:7b-instruct-q4_K_M"),
-        _ => None,
-    };
-
-    // 升级提示
-    let upgrade_hint: Option<&'static str> = match tier {
-        Tier::Unsupported | Tier::Low => Some(
-            "你的硬件仅支持 L1 正则脱敏（OSS 免费）。如需 L2 NER / L3 LLM 脱敏，建议升级硬件或选购 K3 一体机。",
-        ),
-        Tier::Mid => Some(
-            "你的硬件支持 L1 + L2 NER 脱敏（OSS 免费）。如需 L3 LLM 语义脱敏，建议升级到 16GB+ RAM / 高性能 CPU。",
-        ),
-        Tier::High | Tier::Flagship => None, // 已是最高，无升级提示
-    };
-
-    let l3_available = matches!(tier, Tier::High | Tier::Flagship);
-
-    Json(json!({
+fn tier_payload(tier: Tier) -> serde_json::Value {
+    json!({
         "hardware_tier": tier.label(),
-        "available_layers": layers,
-        "l1_regex_available": true,           // 所有 tier 必有
-        "l2_ner_available": tier as u8 >= Tier::Mid as u8,
-        "l3_llm_available": l3_available,
-        "l3_model_suggestion": l3_model,
-        "upgrade_hint": upgrade_hint,
-        // 默认推荐：L1 已开（强制），L2 / L3 由用户在 Settings 主动切
+        "available_layers": ["L0", "L1"],
+        "l1_regex_available": true,
+        "l2_ner_available": false,
+        "l3_llm_available": false,
+        "l3_model_suggestion": null,
+        "upgrade_hint": "L2 NER 与 L3 LLM 脱敏尚未接入生产路径；当前版本仅启用 L1 正则脱敏。",
+        "implementation_pending_layers": ["L2", "L3"],
         "default_active_layers": ["L1"],
-    }))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -79,6 +61,33 @@ pub async fn tier(State(state): State<SharedState>) -> Json<serde_json::Value> {
 // per docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md §5.1
 // Task 2 of v1.0.6 Privacy Logic Implementation Plan
 // ─────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    #[test]
+    fn unwired_layers_are_fail_closed_for_every_hardware_tier() {
+        for hardware_tier in [
+            Tier::Unsupported,
+            Tier::Low,
+            Tier::Mid,
+            Tier::High,
+            Tier::Flagship,
+        ] {
+            let payload = tier_payload(hardware_tier);
+            assert_eq!(
+                payload["available_layers"],
+                json!(["L0", "L1"]),
+                "hardware tier {} must not unlock unwired layers",
+                hardware_tier.label()
+            );
+            assert_eq!(payload["l2_ner_available"], json!(false));
+            assert_eq!(payload["l3_llm_available"], json!(false));
+            assert!(payload["l3_model_suggestion"].is_null());
+        }
+    }
+}
 
 const PRIVACY_KEYS: &[&str] = &["llm", "cloud_saas", "webdav", "web_search", "telemetry"];
 
@@ -92,23 +101,20 @@ fn read_privacy_block(state: &SharedState) -> serde_json::Value {
         Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| json!({})),
         None => json!({}),
     };
-    settings
-        .get("privacy")
-        .cloned()
-        .unwrap_or_else(|| {
-            json!({
-                "llm": false,
-                "cloud_saas": false,
-                "webdav": false,
-                "web_search": false,
-                "telemetry": false,
-                "privacy_tour_seen": false,
-            })
+    settings.get("privacy").cloned().unwrap_or_else(|| {
+        json!({
+            "llm": false,
+            "cloud_saas": false,
+            "webdav": false,
+            "web_search": false,
+            "telemetry": false,
+            "privacy_tour_seen": false,
         })
+    })
 }
 
 /// Helper — write a partial privacy patch into settings (merge, not overwrite).
-fn write_privacy_patch(
+pub(crate) fn write_privacy_patch(
     state: &SharedState,
     patch: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -152,6 +158,251 @@ fn write_privacy_patch(
     Ok(serde_json::Value::Object(applied))
 }
 
+/// Read one outbound consent flag. Missing or malformed values fail closed.
+pub(crate) fn outbound_enabled(state: &SharedState, key: &str) -> bool {
+    PRIVACY_KEYS.contains(&key)
+        && read_privacy_block(state)
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// The single route-level boundary for content sent through the configured LLM.
+/// Local providers bypass cloud consent and may process L0 content. Cloud
+/// providers require explicit consent, reject any L0 source, and receive only
+/// the redacting wrapper's payload. Callers should compute `contains_l0` while
+/// materializing their vault inputs and release the vault lock before invoking
+/// the returned provider.
+pub(crate) fn governed_llm(
+    state: &SharedState,
+    contains_l0: bool,
+) -> AppResult<Arc<dyn LlmProvider>> {
+    let inner = state.llm();
+    if let Some(local) = inner.as_ref().filter(|provider| provider.is_local()) {
+        return Ok(local.clone());
+    }
+    if !outbound_enabled(state, "llm") {
+        return Err(AppError::detailed(
+            StatusCode::FORBIDDEN,
+            json!({
+                "error": "cloud LLM is disabled in Privacy settings; enable it to use this operation",
+                "code": "cloud-llm-disabled",
+            }),
+        ));
+    }
+    if contains_l0 {
+        return Err(AppError::detailed(
+            StatusCode::FORBIDDEN,
+            json!({
+                "error": "L0 content cannot be sent to a cloud LLM",
+                "code": "l0-cloud-blocked",
+            }),
+        ));
+    }
+    let inner = inner.ok_or_else(|| {
+        AppError::detailed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "error": "no LLM provider is configured",
+                "code": "llm-unavailable",
+            }),
+        )
+    })?;
+    Ok(Arc::new(
+        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
+    ))
+}
+
+/// Embedding equivalent of [`governed_llm`]. Search queries and watch anchors
+/// can contain PII even though they are not stored vault items, so a cloud
+/// embedding provider is exposed only after consent and only through a wrapper
+/// that sends redacted strings. `None` means the caller must degrade to a
+/// non-vector path. L0 is never eligible for cloud embedding.
+pub(crate) fn governed_embedding(
+    state: &SharedState,
+    contains_l0: bool,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    let (inner, is_local) = state.embedding_with_locality();
+    let inner = inner?;
+    if is_local {
+        return Some(inner);
+    }
+    if contains_l0 || !outbound_enabled(state, "llm") {
+        return None;
+    }
+    let vault_unlocked = state
+        .vault
+        .lock()
+        .map(|vault| matches!(vault.state(), attune_core::vault::VaultState::Unlocked))
+        .unwrap_or(false);
+    if !vault_unlocked {
+        return None;
+    }
+    Some(Arc::new(RedactingEmbeddingProvider {
+        inner,
+        redactor: Redactor::new(),
+    }))
+}
+
+struct RedactingEmbeddingProvider {
+    inner: Arc<dyn EmbeddingProvider>,
+    redactor: Redactor,
+}
+
+impl EmbeddingProvider for RedactingEmbeddingProvider {
+    fn embed(
+        &self,
+        texts: &[&str],
+    ) -> attune_core::error::Result<(Vec<Vec<f32>>, attune_core::usage::TokenUsage)> {
+        let (redacted, _) = self.redactor.redact_batch(texts);
+        let wire: Vec<&str> = redacted.iter().map(String::as_str).collect();
+        self.inner.embed(&wire)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
+    }
+
+    fn model_name(&self) -> String {
+        self.inner.model_name()
+    }
+}
+
+#[cfg(test)]
+mod governed_provider_tests {
+    use super::*;
+
+    struct RecordingEmbedding {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl EmbeddingProvider for RecordingEmbedding {
+        fn embed(
+            &self,
+            texts: &[&str],
+        ) -> attune_core::error::Result<(Vec<Vec<f32>>, attune_core::usage::TokenUsage)> {
+            *self.seen.lock().unwrap_or_else(|e| e.into_inner()) =
+                texts.iter().map(|text| (*text).to_string()).collect();
+            Ok((
+                vec![vec![0.0; 2]; texts.len()],
+                attune_core::usage::TokenUsage::empty("test", "embedding"),
+            ))
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn test_state() -> SharedState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Keep the directory alive for the process-long test state. SQLite has
+        // already opened the file, but the vault also retains paths for reloads.
+        let path = dir.keep();
+        let vault =
+            attune_core::vault::Vault::open(&path.join("vault.db"), &path).expect("open vault");
+        vault.setup("P@ss-governed-llm").expect("setup vault");
+        Arc::new(crate::state::AppState::new(vault, false))
+    }
+
+    fn code(error: AppError) -> String {
+        match error {
+            AppError::Detailed { body, .. } => body["code"].as_str().unwrap_or_default().into(),
+            other => panic!("expected detailed refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cloud_requires_consent_and_rejects_l0() {
+        let state = test_state();
+        state.set_llm(Some(Arc::new(attune_core::llm::MockLlmProvider::new(
+            "cloud",
+        ))));
+        assert_eq!(
+            code(
+                governed_llm(&state, false)
+                    .err()
+                    .expect("consent is required"),
+            ),
+            "cloud-llm-disabled"
+        );
+        set_outbound_enabled(&state, "llm", true).expect("enable consent");
+        assert_eq!(
+            code(
+                governed_llm(&state, true)
+                    .err()
+                    .expect("L0 must be blocked"),
+            ),
+            "l0-cloud-blocked"
+        );
+        assert!(governed_llm(&state, false).is_ok());
+    }
+
+    #[test]
+    fn local_provider_allows_l0_without_cloud_consent() {
+        let state = test_state();
+        state.set_llm(Some(Arc::new(attune_core::llm::OpenAiLlmProvider::new(
+            "http://127.0.0.1:8090/v1",
+            "",
+            "llm-chat",
+        ))));
+        assert!(governed_llm(&state, true).is_ok());
+    }
+
+    #[test]
+    fn cloud_embedding_requires_consent_redacts_and_blocks_l0() {
+        let state = test_state();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        state.set_embedding(Some(Arc::new(RecordingEmbedding { seen: seen.clone() })));
+
+        assert!(governed_embedding(&state, false).is_none());
+        set_outbound_enabled(&state, "llm", true).expect("enable consent");
+        assert!(governed_embedding(&state, true).is_none());
+
+        let embedding = governed_embedding(&state, false).expect("consented cloud embedding");
+        embedding
+            .embed(&["联系 13800138000 或 zhangsan@example.com"])
+            .expect("embed redacted query");
+        let sent = seen.lock().unwrap_or_else(|e| e.into_inner()).join("\n");
+        assert!(!sent.contains("13800138000"), "phone reached wire: {sent}");
+        assert!(
+            !sent.contains("zhangsan@example.com"),
+            "email reached wire: {sent}"
+        );
+        assert!(sent.contains("PHONE_") || sent.contains("EMAIL_"));
+
+        set_outbound_enabled(&state, "llm", false).expect("disable cloud consent");
+        state.set_embedding_with_locality(
+            Some(Arc::new(RecordingEmbedding { seen: seen.clone() })),
+            true,
+        );
+        assert!(governed_embedding(&state, true).is_some());
+    }
+}
+
+/// Persist one outbound consent flag through the same allowlisted merge path as
+/// the public privacy settings endpoint.
+pub(crate) fn set_outbound_enabled(
+    state: &SharedState,
+    key: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    if !PRIVACY_KEYS.contains(&key) {
+        return Err(format!("unknown outbound privacy key: {key}"));
+    }
+    let mut patch = serde_json::Map::new();
+    patch.insert(key.to_string(), serde_json::Value::Bool(enabled));
+    write_privacy_patch(state, &patch).map(|_| ())
+}
+
 /// Helper — write a privacy-audit event into `audit_log` table.
 /// We use category="privacy" + a kebab-case `kind` so the existing
 /// `/api/v1/audit/log` endpoint surfaces these events for DSAR review.
@@ -193,10 +444,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
 
     let mut outbound = serde_json::Map::new();
     for key in PRIVACY_KEYS {
-        let enabled = privacy
-            .get(*key)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let enabled = privacy.get(*key).and_then(|v| v.as_bool()).unwrap_or(false);
         outbound.insert((*key).into(), json!({ "enabled": enabled }));
     }
 
@@ -243,12 +491,8 @@ pub async fn settings_patch(
         )
     })?;
 
-    let applied = write_privacy_patch(&state, patch).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        )
-    })?;
+    let applied = write_privacy_patch(&state, patch)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
 
     record_privacy_event(&state, "settings_changed");
 
@@ -259,53 +503,137 @@ pub async fn settings_patch(
 ///
 /// User-driven lock (vs idle timeout). Returns the new vault state.
 pub async fn lock(State(state): State<SharedState>) -> RouteResult {
-    let result = {
-        let g = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        g.lock()
-    };
+    let result = crate::routes::vault::lock_and_clear_runtime(&state).await;
     match result {
         Ok(()) => {
             record_privacy_event(&state, "vault_lock");
             Ok(Json(json!({ "ok": true, "vault_state": "locked" })))
         }
-        Err(e) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err((StatusCode::CONFLICT, Json(json!({"error": e.to_string()})))),
     }
 }
 
-/// `POST /api/v1/privacy/wipe-cloud-session` — Revoke cloud session + clear
-/// any locally cached cloud session token. Best-effort remote logout +
-/// **unconditional** local clear (per `CloudClient::wipe_session()` contract).
-///
-/// **Note**: today attune-server doesn't hold a long-lived `CloudClient`
-/// instance — cloud calls are made transiently. This endpoint serves as the
-/// surface point users hit to "remove cloud footprint"; it clears the
-/// `cloud_session_token` meta key if present, and records a privacy audit
-/// event. Real CloudClient wiping happens at Task 7 when the client lifecycle
-/// is wired through state.
+/// `POST /api/v1/privacy/wipe-cloud-session` — Revoke the persisted cloud
+/// session, remove membership-managed credentials, and disable Cloud SaaS
+/// egress. This shares the same teardown as `/member/logout`.
 pub async fn wipe_cloud_session(State(state): State<SharedState>) -> RouteResult {
-    let cleared = {
-        let g = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        // Try to clear any persisted cloud session token from meta.
-        // `cloud_session_token` is the conventional meta key used by login flows.
-        let store = g.store();
-        match store.get_meta("cloud_session_token") {
-            Ok(Some(_)) => {
-                let _ = store.set_meta("cloud_session_token", b"");
-                true
-            }
-            _ => false,
-        }
-    };
+    let outcome = crate::routes::member::perform_logout(&state)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
 
     record_privacy_event(&state, "cloud_session_wiped");
 
     Ok(Json(json!({
         "ok": true,
-        "cleared_local_token": cleared,
-        // Remote logout is best-effort; documented as not-guaranteed-success.
-        "remote_logout": "best-effort",
+        "cleared_local_token": outcome.removed_local_session,
+        "cleared_member_credentials": outcome.cleared_member_credentials,
+        "remote_logout_succeeded": outcome.remote_logout_succeeded,
+        "cloud_saas": false,
     })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Document-privacy (INT-2) — classification + export-egress preview
+// per docs/superpowers/specs/2026-06-20-privacy-layer-enhancement.md §5
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Industry confidential markers (INT-2 pro write-end) — merged from installed
+/// pro plugins (`plugin.yaml::confidential_keywords:`) + the optional
+/// `settings.privacy.export_confidential_keywords` override. Mirrors
+/// `routes::export::export_extra_keywords` exactly so the preview verdict matches
+/// the real export. Empty on a bare OSS install (generic markers only).
+fn export_extra_keywords(state: &SharedState) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(state);
+    for kw in plugin_registry.all_confidential_keywords() {
+        if seen.insert(kw.clone()) {
+            out.push(kw);
+        }
+    }
+    let bytes = {
+        let g = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        g.store().get_meta("app_settings").ok().flatten()
+    };
+    if let Some(arr) = bytes
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("export_confidential_keywords"))
+                .and_then(|v| v.as_array().cloned())
+        })
+    {
+        for kw in arr.iter().filter_map(|v| v.as_str()) {
+            let s = kw.trim();
+            if !s.is_empty() && seen.insert(s.to_string()) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+pub struct DocScanRequest {
+    /// Plain extracted document text to classify.
+    pub text: String,
+}
+
+/// `POST /api/v1/doc-privacy/scan` — classify already-extracted document text.
+///
+/// Returns the document grade + PII summary (privacy-first: **no PII values**).
+/// `blocked == true` ⇔ a confidential marker was found ⇔ export is fail-closed.
+/// 🆓 zero-cost (regex + dictionary, no LLM, no vault DEK needed).
+pub async fn doc_scan(Json(req): Json<DocScanRequest>) -> Json<serde_json::Value> {
+    let redactor = Redactor::default();
+    let scanner = DocPrivacyScanner::new(&redactor);
+    let report = scanner.analyze_text(&req.text);
+    Json(json!({
+        "classification": report.classification.as_str(),
+        "blocked": report.blocked,
+        "block_reason": report.block_reason,
+        "warning": report.warning,
+        "pii_summary": report.summary,
+        "pii_count": report.entities.len(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ExportPreviewRequest {
+    /// The export IR (Table | Document) the UI is about to download.
+    pub artifact: Artifact,
+}
+
+/// `POST /api/v1/doc-privacy/export-preview` — dry-run the export egress gate.
+///
+/// Tells the UI **before** it hits `/export` whether the artifact would be
+/// blocked (confidential) or redacted (and how many PII spans), so it can show a
+/// "this download will be redacted / cannot be exported" notice. Does NOT render
+/// any file or leak PII values. 🆓 zero-cost.
+pub async fn doc_export_preview(
+    State(state): State<SharedState>,
+    Json(req): Json<ExportPreviewRequest>,
+) -> Json<serde_json::Value> {
+    let redactor = Redactor::default();
+    let extra = export_extra_keywords(&state);
+    match enforce_artifact_egress(&redactor, &req.artifact, RedactMode::Reversible, &extra) {
+        ArtifactEgressOutcome::Blocked { reason } => Json(json!({
+            "decision": "blocked",
+            "blocked": true,
+            "reason": reason,
+            "classification": "classified",
+        })),
+        ArtifactEgressOutcome::Allowed {
+            redacted,
+            classification,
+            ..
+        } => Json(json!({
+            "decision": "allowed",
+            "blocked": false,
+            "will_redact": redacted > 0,
+            "redacted_count": redacted,
+            "classification": classification.as_str(),
+        })),
+    }
 }

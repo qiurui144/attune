@@ -1,0 +1,137 @@
+use attune_server::rag_orchestrator::{
+    assemble_evidence_pack, build_evidence_pack_prompt, build_local_scheduler_extractive_answer,
+    build_local_scheduler_extractive_summary, local_scheduler_source_lookup_query,
+};
+
+fn search_result(
+    item_id: &str,
+    title: &str,
+    node_kind: &str,
+    text: &str,
+) -> attune_core::search::SearchResult {
+    attune_core::search::SearchResult {
+        item_id: item_id.to_string(),
+        chunk_idx: None,
+        score: 0.9,
+        title: title.to_string(),
+        content: format!("[kind: {node_kind}]\n{text}"),
+        source_type: "local".to_string(),
+        source_path: None,
+        inject_content: None,
+        corpus_domain: "general".to_string(),
+        breadcrumb: Vec::new(),
+        chunk_offset_start: None,
+        chunk_offset_end: None,
+    }
+}
+
+#[test]
+fn rag_orchestrator_detects_source_lookup_and_builds_grounded_answer() {
+    std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+    let knowledge = vec![serde_json::json!({
+        "item_id": "tcp-origin",
+        "title": "TCP Origin",
+        "inject_content": "TCP/IP 起源于美国 DARPA 资助的 ARPANET 研究。"
+    })];
+
+    assert!(local_scheduler_source_lookup_query("tcp/ip起源于哪里？"));
+    let answer = build_local_scheduler_extractive_answer("tcp/ip起源于哪里？", &knowledge)
+        .expect("source lookup should produce grounded answer");
+
+    assert!(answer.contains("TCP Origin"));
+    assert!(answer.contains("ARPANET"));
+    assert!(answer.contains("DARPA"));
+}
+
+#[test]
+fn rag_orchestrator_builds_grounded_summary() {
+    std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+    let knowledge = vec![serde_json::json!({
+        "item_id": "tcp-origin",
+        "title": "TCP Origin",
+        "inject_content": "TCP/IP 起源于美国 DARPA 资助的 ARPANET 研究。"
+    })];
+
+    let summary = build_local_scheduler_extractive_summary("总结这份知识库文档", &knowledge)
+        .expect("summary should use cited knowledge");
+
+    assert!(summary.contains("核心结论"));
+    assert!(summary.contains("关键证据"));
+    assert!(summary.contains("ARPANET"));
+    assert!(summary.contains("DARPA"));
+}
+
+#[test]
+fn evidence_pack_combines_api_procedure_and_troubleshooting_from_same_source() {
+    let results = vec![
+        search_result(
+            "doc-a",
+            "Manual A",
+            "ApiReference",
+            "Prototype: int open_device(void)",
+        ),
+        search_result(
+            "doc-a",
+            "Manual A",
+            "ProcedureStep",
+            "Step 1 Call open_device().",
+        ),
+        search_result(
+            "doc-a",
+            "Manual A",
+            "Troubleshooting",
+            "If output is zero, verify the buffer.",
+        ),
+        search_result("doc-b", "Manual B", "Paragraph", "Overview only."),
+    ];
+    let plan = attune_core::retrieval_plan::plan_query(
+        "How do I open the device and troubleshoot zero output?",
+    );
+    let pack = assemble_evidence_pack(&plan, &results);
+
+    assert_eq!(pack.primary_source_id, "doc-a");
+    assert_eq!(pack.source_title, "Manual A");
+    assert!(pack
+        .nodes
+        .iter()
+        .any(|node| node.node_kind == "ApiReference"));
+    assert!(pack
+        .nodes
+        .iter()
+        .any(|node| node.node_kind == "ProcedureStep"));
+    assert!(pack
+        .nodes
+        .iter()
+        .any(|node| node.node_kind == "Troubleshooting"));
+    assert!(pack.diagnostics.missing_needs.is_empty());
+}
+
+#[test]
+fn prompt_includes_evidence_pack_and_diagnostics_without_domain_template() {
+    let results = vec![
+        search_result(
+            "doc-a",
+            "Manual A",
+            "ApiReference",
+            "Prototype: int open_device(void)",
+        ),
+        search_result(
+            "doc-a",
+            "Manual A",
+            "ProcedureStep",
+            "Step 1 Call open_device().",
+        ),
+    ];
+    let plan = attune_core::retrieval_plan::plan_query("How do I start a transfer?");
+    let pack = assemble_evidence_pack(&plan, &results);
+
+    let prompt = build_evidence_pack_prompt("How do I start a transfer?", &pack);
+
+    assert!(prompt.contains("Evidence Pack"));
+    assert!(prompt.contains("Evidence Diagnostics"));
+    assert!(prompt.contains("ApiReference"));
+    assert!(prompt.contains("ProcedureStep"));
+    assert!(prompt.contains("If evidence is incomplete, say what is missing"));
+    assert!(!prompt.contains("V821"));
+    assert!(!prompt.contains("Rockchip"));
+}

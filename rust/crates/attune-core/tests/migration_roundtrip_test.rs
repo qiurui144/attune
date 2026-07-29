@@ -166,9 +166,7 @@ fn encrypted_breadcrumb_survives_close_and_reopen() {
     // 重开 + 同 dek 解密成功
     {
         let store = Store::open(&path).unwrap();
-        let result = store
-            .get_first_chunk_breadcrumb(&dek, &item_id)
-            .unwrap();
+        let result = store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap();
         let (path_segs, off_start, off_end) = result.expect("第一条 breadcrumb");
         assert!(!path_segs.is_empty(), "path 段非空");
         assert!(path_segs.iter().any(|s| s.contains("Section A")));
@@ -183,7 +181,7 @@ fn encrypted_breadcrumb_survives_close_and_reopen() {
         match result {
             Ok(None) => {} // OK
             Ok(Some(_)) => panic!("错 dek 不应能返回 breadcrumb 内容"),
-            Err(_) => {}   // OK
+            Err(_) => {} // OK
         }
     }
 }

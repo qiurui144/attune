@@ -33,7 +33,11 @@ fn fresh_registry() -> GovernorRegistry {
 fn spawn_cooperative_worker(
     registry: &GovernorRegistry,
     kind: TaskKind,
-) -> (Arc<AtomicUsize>, Arc<std::sync::atomic::AtomicBool>, thread::JoinHandle<()>) {
+) -> (
+    Arc<AtomicUsize>,
+    Arc<std::sync::atomic::AtomicBool>,
+    thread::JoinHandle<()>,
+) {
     let counter = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let governor = registry.register(kind);
@@ -66,8 +70,14 @@ fn pause_all_stops_workers_within_one_second() {
 
     // 让 worker 跑 200ms 累积一些 count
     thread::sleep(Duration::from_millis(200));
-    let pre_pause: Vec<usize> = [&c1, &c2, &c3].iter().map(|c| c.load(Ordering::SeqCst)).collect();
-    assert!(pre_pause.iter().all(|&n| n > 0), "all workers should have made progress: {pre_pause:?}");
+    let pre_pause: Vec<usize> = [&c1, &c2, &c3]
+        .iter()
+        .map(|c| c.load(Ordering::SeqCst))
+        .collect();
+    assert!(
+        pre_pause.iter().all(|&n| n > 0),
+        "all workers should have made progress: {pre_pause:?}"
+    );
 
     // 全局 pause
     let pause_at = Instant::now();
@@ -75,9 +85,15 @@ fn pause_all_stops_workers_within_one_second() {
 
     // 等待 1s 后，再观察 200ms — 这 200ms 内不应有显著新增
     thread::sleep(Duration::from_millis(1000));
-    let after_pause: Vec<usize> = [&c1, &c2, &c3].iter().map(|c| c.load(Ordering::SeqCst)).collect();
+    let after_pause: Vec<usize> = [&c1, &c2, &c3]
+        .iter()
+        .map(|c| c.load(Ordering::SeqCst))
+        .collect();
     thread::sleep(Duration::from_millis(200));
-    let after_settle: Vec<usize> = [&c1, &c2, &c3].iter().map(|c| c.load(Ordering::SeqCst)).collect();
+    let after_settle: Vec<usize> = [&c1, &c2, &c3]
+        .iter()
+        .map(|c| c.load(Ordering::SeqCst))
+        .collect();
 
     // 在 pause 之后的 200ms 观察窗口：每个 worker 增量 ≤ 2（1 round in flight + 1 jitter）
     for i in 0..3 {
@@ -85,7 +101,9 @@ fn pause_all_stops_workers_within_one_second() {
         assert!(
             delta <= 2,
             "worker {i} kept running after pause_all: pre={} post={} settle={}, delta={delta}",
-            pre_pause[i], after_pause[i], after_settle[i]
+            pre_pause[i],
+            after_pause[i],
+            after_settle[i]
         );
     }
     let _ = pause_at; // 已经验证 pause 生效
@@ -114,7 +132,8 @@ fn pause_all_stops_workers_within_one_second() {
         assert!(
             after_resume[i] > after_settle[i],
             "worker {i} did not resume within 2s: settle={} resume={}",
-            after_settle[i], after_resume[i]
+            after_settle[i],
+            after_resume[i]
         );
     }
 
@@ -190,7 +209,10 @@ fn cpu_over_budget_triggers_throttle() {
 
     // 低于 budget（10% < 15% cap）→ 允许运行，after_work 仅最小退让（10ms）。
     mock.set(Sample::new(10.0, 0));
-    assert!(governor.should_run(), "10% CPU 低于 15% cap，should_run 应为 true");
+    assert!(
+        governor.should_run(),
+        "10% CPU 低于 15% cap，should_run 应为 true"
+    );
     assert_eq!(
         governor.after_work(),
         Duration::from_millis(10),

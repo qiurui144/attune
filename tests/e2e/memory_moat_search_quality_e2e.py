@@ -6,7 +6,7 @@
 （中文语义/精确词/混合）+ 跨主题区分度 + 语料上传。
 
 用 item_id 精确匹配（不依赖 title — title 取文档 H1，可能与外部命名不一致）。
-前置：起隔离 server + vault setup（密码 e2e-pass-2026）+ Ollama bge-m3（向量分量）。
+前置：起隔离 server + vault setup（密码 e2e-pass-2026）+ 已配置 embedding provider。
 用法：python3 tests/e2e/memory_moat_search_quality_e2e.py  → 期望 8 PASS / 0 FAIL"""
 import json
 import sys

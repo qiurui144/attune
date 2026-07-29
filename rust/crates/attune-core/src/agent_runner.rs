@@ -10,18 +10,75 @@ use crate::capability_dispatch::{
 use crate::error::{Result, VaultError};
 use crate::plugin_loader::AgentSpec;
 use crate::plugin_registry::PluginRegistry;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// 解析 agent 调用所需的 binary 路径
-fn resolve_agent_binary(plugin_dir: &std::path::Path, agent: &AgentSpec) -> Option<PathBuf> {
+#[derive(Debug, Clone)]
+struct AgentEntry {
+    path: PathBuf,
+    agent_arg: Option<String>,
+}
+
+/// 解析 agent 调用所需的 binary 路径。
+///
+/// Linux 插件包历史上依赖 `bin/agent_xxx -> *_agents` symlink，让 multiplexer 通过
+/// argv[0] 识别 agent。Windows zip 不应复制 N 份 exe，也不能依赖 Unix symlink；
+/// 当 manifest 声明的 per-agent binary 不存在时，回退到 `bin/*_agents(.exe)`，并通过
+/// argv[1] 传入 agent id。所有 pro multiplexer 已支持 `*_agents <agent_id>`。
+fn resolve_agent_entry(plugin_dir: &Path, agent: &AgentSpec) -> Option<AgentEntry> {
     if let Some(rel) = &agent.binary {
         let full = plugin_dir.join(rel);
         if full.exists() {
-            return Some(full);
+            return Some(AgentEntry {
+                path: full,
+                agent_arg: None,
+            });
+        }
+        #[cfg(windows)]
+        {
+            let exe = full.with_extension("exe");
+            if exe.exists() {
+                return Some(AgentEntry {
+                    path: exe,
+                    agent_arg: None,
+                });
+            }
         }
     }
-    crate::capability_dispatch::resolve_binary(plugin_dir, &agent.id)
+    resolve_dispatch_binary(plugin_dir).map(|path| AgentEntry {
+        path,
+        agent_arg: Some(dispatch_arg_for_agent(agent)),
+    })
+}
+
+fn dispatch_arg_for_agent(agent: &AgentSpec) -> String {
+    agent
+        .binary
+        .as_deref()
+        .and_then(|rel| Path::new(rel).file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| agent.id.clone())
+}
+
+fn resolve_dispatch_binary(plugin_dir: &Path) -> Option<PathBuf> {
+    let bin_dir = plugin_dir.join("bin");
+    let entries = std::fs::read_dir(&bin_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        if stem.ends_with("_agents") {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// 调用 agent (通过 subprocess), 返回 raw CapabilityResult.
@@ -50,7 +107,7 @@ pub fn run_agent_subprocess(
     let runtime = parse_runtime(&agent.runtime)?;
     let entry = match runtime {
         CapabilityRuntime::RustBinary => {
-            resolve_agent_binary(plugin_dir, &agent).ok_or_else(|| {
+            resolve_agent_entry(plugin_dir, &agent).ok_or_else(|| {
                 VaultError::InvalidInput(format!(
                     "agent '{agent_id}' binary not found (declared {:?})",
                     agent.binary
@@ -59,13 +116,17 @@ pub fn run_agent_subprocess(
         }
         CapabilityRuntime::Wasm => {
             let rel = agent.wasm.as_deref().ok_or_else(|| {
-                VaultError::InvalidInput(format!("agent '{agent_id}' runtime=wasm but no wasm path"))
-            })?;
-            resolve_wasm(plugin_dir, rel).ok_or_else(|| {
                 VaultError::InvalidInput(format!(
-                    "agent '{agent_id}' wasm module not found: {rel}"
+                    "agent '{agent_id}' runtime=wasm but no wasm path"
                 ))
-            })?
+            })?;
+            let path = resolve_wasm(plugin_dir, rel).ok_or_else(|| {
+                VaultError::InvalidInput(format!("agent '{agent_id}' wasm module not found: {rel}"))
+            })?;
+            AgentEntry {
+                path,
+                agent_arg: None,
+            }
         }
         CapabilityRuntime::DataOnly => {
             return Err(VaultError::InvalidInput(format!(
@@ -74,9 +135,16 @@ pub fn run_agent_subprocess(
         }
     };
 
-    let mut inv = CapabilityInvocation::new(entry)
+    let mut inv = CapabilityInvocation::new(entry.path)
         .stdin(stdin_json)
+        // Agent binaries receive decrypted user input. Never let them inherit
+        // server credentials, cloud API keys, or proxy settings implicitly;
+        // the caller-provided allowlist below is their complete environment.
+        .clear_env()
         .timeout(timeout);
+    if let Some(agent_arg) = entry.agent_arg {
+        inv = inv.arg(agent_arg);
+    }
     for (k, v) in env {
         inv = inv.env(k, v);
     }
@@ -98,7 +166,10 @@ pub fn format_agent_result_for_chat(result: &CapabilityResult, agent_id: &str) -
                     result.stdout.trim()
                 )
             } else {
-                format!("✅ {agent_id} 成功:\n```json\n{}\n```", result.stdout.trim())
+                format!(
+                    "✅ {agent_id} 成功:\n```json\n{}\n```",
+                    result.stdout.trim()
+                )
             }
         }
         2 => format!(
@@ -185,6 +256,80 @@ mod tests {
         assert!(matches!(err, VaultError::InvalidInput(_)));
     }
 
+    fn agent_spec(id: &str, binary: Option<&str>) -> AgentSpec {
+        AgentSpec {
+            id: id.to_string(),
+            description: String::new(),
+            label: None,
+            intent: None,
+            scenario: None,
+            output_modes: None,
+            case_kinds: vec![],
+            consumes_evidence_kinds: vec![],
+            hard_red_lines: vec![],
+            soft_followups: vec![],
+            runtime: "rust_binary".to_string(),
+            binary: binary.map(str::to_string),
+            wasm: None,
+            wasi_caps: vec![],
+            requires_skills: vec![],
+            requires_mcps: vec![],
+            cost: Default::default(),
+            chat_trigger: None,
+        }
+    }
+
+    #[test]
+    fn resolve_agent_entry_prefers_declared_binary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let declared = bin.join("agent_civil_loan");
+        std::fs::write(&declared, b"").unwrap();
+
+        let entry = resolve_agent_entry(
+            tmp.path(),
+            &agent_spec("agent_civil_loan", Some("bin/agent_civil_loan")),
+        )
+        .unwrap();
+        assert_eq!(entry.path, declared);
+        assert_eq!(entry.agent_arg, None);
+    }
+
+    #[test]
+    fn resolve_agent_entry_falls_back_to_dispatch_binary_with_agent_arg() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dispatch = bin.join("law_pro_agents");
+        std::fs::write(&dispatch, b"").unwrap();
+
+        let entry = resolve_agent_entry(
+            tmp.path(),
+            &agent_spec("agent_civil_loan", Some("bin/agent_civil_loan")),
+        )
+        .unwrap();
+        assert_eq!(entry.path, dispatch);
+        assert_eq!(entry.agent_arg.as_deref(), Some("agent_civil_loan"));
+    }
+
+    #[test]
+    fn resolve_agent_entry_fallback_uses_declared_binary_stem_not_registry_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dispatch = bin.join("law_pro_agents.exe");
+        std::fs::write(&dispatch, b"").unwrap();
+
+        let entry = resolve_agent_entry(
+            tmp.path(),
+            &agent_spec("civil_loan_agent", Some("bin/agent_civil_loan")),
+        )
+        .unwrap();
+        assert_eq!(entry.path, dispatch);
+        assert_eq!(entry.agent_arg.as_deref(), Some("agent_civil_loan"));
+    }
+
     // ── 增强覆盖: success without audit / format edge / resolve_agent_binary ─
 
     #[test]
@@ -264,21 +409,14 @@ mod tests {
     fn run_agent_empty_id_returns_invalid_input() {
         let reg = PluginRegistry::new();
         let tmp = tempfile::TempDir::new().unwrap();
-        let err = run_agent_subprocess(
-            &reg,
-            "",
-            tmp.path(),
-            "{}",
-            vec![],
-            Duration::from_secs(1),
-        )
-        .unwrap_err();
+        let err = run_agent_subprocess(&reg, "", tmp.path(), "{}", vec![], Duration::from_secs(1))
+            .unwrap_err();
         assert!(matches!(err, VaultError::InvalidInput(_)));
     }
 
-    // resolve_agent_binary: 给一个不存在的 binary path
+    // resolve_agent_entry: 给一个不存在的 binary path
     #[test]
-    fn resolve_agent_binary_returns_none_for_missing() {
+    fn resolve_agent_entry_returns_none_for_missing() {
         // 用 serde JSON 构造避免直接依赖所有 field
         let yaml = r#"id: test_agent
 runtime: rust_binary
@@ -286,15 +424,14 @@ binary: bin/nonexistent
 "#;
         let agent: AgentSpec = serde_yaml::from_str(yaml).expect("parse spec");
         let tmp = tempfile::TempDir::new().unwrap();
-        // binary 不在 plugin_dir/bin/nonexistent → fallback 到 capability_dispatch::resolve_binary
-        let result = resolve_agent_binary(tmp.path(), &agent);
-        // 大概率 None (bin/nonexistent 不存在 + capability_dispatch 也找不到)
+        // binary 不在 plugin_dir/bin/nonexistent，且没有 *_agents dispatch binary
+        let result = resolve_agent_entry(tmp.path(), &agent);
         assert!(result.is_none());
     }
 
-    // resolve_agent_binary: 给一个存在的 binary path
+    // resolve_agent_entry: 给一个存在的 binary path
     #[test]
-    fn resolve_agent_binary_returns_some_when_exists() {
+    fn resolve_agent_entry_returns_some_when_exists() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -306,9 +443,11 @@ runtime: rust_binary
 binary: bin/test_agent
 "#;
         let agent: AgentSpec = serde_yaml::from_str(yaml).expect("parse spec");
-        let result = resolve_agent_binary(tmp.path(), &agent);
+        let result = resolve_agent_entry(tmp.path(), &agent);
         assert!(result.is_some());
-        assert!(result.unwrap().ends_with("test_agent"));
+        let entry = result.unwrap();
+        assert!(entry.path.ends_with("test_agent"));
+        assert!(entry.agent_arg.is_none());
     }
 
     // adversarial: super long stderr 不爆

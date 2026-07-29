@@ -170,8 +170,7 @@ fn rollup_counts_machine_checkable_vs_external() {
         dash.machine_checkable
     );
     assert_eq!(
-        dash.external,
-        0,
+        dash.external, 0,
         "S4b: 0 external gates remain in OSS manifest (industry gates moved to attune-pro); \
          got {}",
         dash.external
@@ -219,8 +218,7 @@ ignore_baseline:
   attune-core: 0
 "#;
     let m = agent_quality::parse_manifest(manifest).unwrap();
-    let report =
-        agent_quality::check_ignore_spike(&m, tmp.path(), "attune-core").unwrap();
+    let report = agent_quality::check_ignore_spike(&m, tmp.path(), "attune-core").unwrap();
     assert!(report.spiked, "5 ignores over baseline 0+2 must spike");
     assert_eq!(report.observed, 5);
 }

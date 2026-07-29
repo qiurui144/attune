@@ -1,0 +1,14 @@
+id: 04-below-floor-fallback
+description: clean 点 < HDBSCAN_FLOOR(5) → 走子目录 fallback, 绝不调 group_only (库 panic 防护), 全覆盖
+min_cluster_size: 5
+items:
+  - { id: x1, lobe: 0, dir: /caseA, title: doc a one }
+  - { id: x2, lobe: 0, dir: /caseA, title: doc a two }
+  - { id: y1, lobe: 4, dir: /caseB, title: doc b one }
+  - { id: y2, lobe: 4, dir: /caseB, title: doc b two }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

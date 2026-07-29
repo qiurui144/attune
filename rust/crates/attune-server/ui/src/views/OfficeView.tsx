@@ -25,6 +25,7 @@ import {
   type JobState,
   type JobStage,
 } from '../hooks/useOfficeJob';
+import { useFilePicker } from '../hooks/useFilePicker';
 
 type Tab = 'ocr' | 'transcribe';
 
@@ -97,6 +98,59 @@ function TabButton({
   );
 }
 
+const toolGridStyle: JSX.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))',
+  gap: 'var(--space-5)',
+  alignItems: 'start',
+};
+
+const toolPanelStyle: JSX.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-3)',
+  minWidth: 0,
+  padding: 'var(--space-4)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--color-surface)',
+};
+
+const resultPanelStyle: JSX.CSSProperties = {
+  ...toolPanelStyle,
+  minHeight: 320,
+  background: 'var(--color-bg)',
+};
+
+const fieldStyle: JSX.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-2)',
+  minWidth: 0,
+};
+
+const controlStyle: JSX.CSSProperties = {
+  width: '100%',
+  padding: 'var(--space-2)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-base)',
+  background: 'var(--color-bg)',
+  color: 'var(--color-text)',
+  boxSizing: 'border-box',
+};
+
+const selectedFileStyle: JSX.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 'var(--space-2)',
+  padding: 'var(--space-2)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--color-surface-elevated)',
+  minWidth: 0,
+};
+
 // ────────────────────────────────────────────────────────────────────
 // OCR Panel
 // ────────────────────────────────────────────────────────────────────
@@ -121,6 +175,7 @@ function OcrPanel(): JSX.Element {
   const idCardSubtype = useSignal<string>('id_card_cn');
   const loading = useSignal(false);
   const result = useSignal<OcrResponse | null>(null);
+  const { isDesktop, picking, pickFiles } = useFilePicker();
 
   async function runExtract() {
     if (!file.value) {
@@ -154,50 +209,79 @@ function OcrPanel(): JSX.Element {
     const target = ev.target as HTMLInputElement;
     if (target.files && target.files[0]) {
       file.value = target.files[0];
+      result.value = null;
     }
   }
 
   return (
-    <div style={{ display: 'flex', gap: 'var(--space-5)' }}>
-      {/* Left: form */}
-      <section
-        style={{
-          flex: '0 0 320px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 'var(--space-3)',
-        }}
-      >
-        <label
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'var(--space-2)',
-          }}
-        >
+    <div style={toolGridStyle}>
+      <section style={toolPanelStyle}>
+        <label style={fieldStyle}>
           <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
             {t('office.ocr.label.file')}
           </span>
-          <input
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif,.gif"
-            onChange={onFileSelect}
-            aria-label={t('office.ocr.label.file')}
-          />
+          {isDesktop ? (
+            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', flexWrap: 'wrap' }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={picking.value}
+                onClick={async () => {
+                  const { paths, files } = await pickFiles({
+                    multiple: false,
+                    accept: '.pdf,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif,.gif',
+                    title: t('office.ocr.label.file'),
+                  });
+                  if (files.length > 0) {
+                    file.value = files[0];
+                    result.value = null;
+                  } else if (paths.length > 0) {
+                    toast('error', t('picker.toast.read_failed'));
+                  }
+                }}
+              >
+                {`📂 ${t('picker.browse_file')}`}
+              </Button>
+            </div>
+          ) : (
+            <input
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif,.gif"
+              onChange={onFileSelect}
+              aria-label={t('office.ocr.label.file')}
+            />
+          )}
           {file.value && (
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
-              {file.value.name} · {(file.value.size / 1024).toFixed(1)} KB
-            </span>
+            <div style={selectedFileStyle}>
+              <span
+                style={{
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  fontSize: 'var(--text-xs)',
+                  color: 'var(--color-text-muted)',
+                }}
+                title={file.value.name}
+              >
+                {file.value.name} · {(file.value.size / 1024).toFixed(1)} KB
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={t('picker.clear_file')}
+                onClick={() => {
+                  file.value = null;
+                  result.value = null;
+                }}
+              >
+                ×
+              </Button>
+            </div>
           )}
         </label>
 
-        <label
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'var(--space-2)',
-          }}
-        >
+        <label style={fieldStyle}>
           <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
             {t('office.ocr.label.profile')}
           </span>
@@ -205,13 +289,7 @@ function OcrPanel(): JSX.Element {
             value={profile.value}
             onChange={(e) => (profile.value = (e.target as HTMLSelectElement).value)}
             aria-label={t('office.ocr.label.profile')}
-            style={{
-              padding: 'var(--space-2)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-base)',
-              background: 'var(--color-bg)',
-              color: 'var(--color-text)',
-            }}
+            style={controlStyle}
           >
             {OCR_PROFILES.map((p) => (
               <option value={p}>{t(`office.profile.${p}`)}</option>
@@ -220,13 +298,7 @@ function OcrPanel(): JSX.Element {
         </label>
 
         {profile.value === 'id_card' && (
-          <label
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 'var(--space-2)',
-            }}
-          >
+          <label style={fieldStyle}>
             <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
               {t('office.ocr.label.id_card_subtype')}
             </span>
@@ -234,13 +306,7 @@ function OcrPanel(): JSX.Element {
               value={idCardSubtype.value}
               onChange={(e) => (idCardSubtype.value = (e.target as HTMLSelectElement).value)}
               aria-label={t('office.ocr.label.id_card_subtype')}
-              style={{
-                padding: 'var(--space-2)',
-                border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-base)',
-                background: 'var(--color-bg)',
-                color: 'var(--color-text)',
-              }}
+              style={controlStyle}
             >
               {ID_CARD_SUBTYPES.map((s) => (
                 <option value={s}>{t(`office.id_card_subtype.${s}`)}</option>
@@ -258,8 +324,7 @@ function OcrPanel(): JSX.Element {
         </Button>
       </section>
 
-      {/* Right: results */}
-      <section style={{ flex: 1, minWidth: 0 }}>
+      <section style={resultPanelStyle}>
         {!result.value && (
           <EmptyState
             icon="📷"
@@ -462,6 +527,7 @@ function TranscribePanel(): JSX.Element {
   const result = useSignal<unknown | null>(null);
   const errorMsg = useSignal<string | null>(null);
   const closeWs = useSignal<(() => void) | null>(null);
+  const { picking, pickFiles } = useFilePicker();
 
   // Cleanup WS on unmount
   useEffect(() => {
@@ -539,51 +605,65 @@ function TranscribePanel(): JSX.Element {
   }
 
   return (
-    <div style={{ display: 'flex', gap: 'var(--space-5)' }}>
-      {/* Left: form */}
-      <section
-        style={{
-          flex: '0 0 360px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 'var(--space-3)',
-        }}
-      >
-        <label
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'var(--space-2)',
-          }}
-        >
+    <div style={toolGridStyle}>
+      <section style={toolPanelStyle}>
+        <label style={fieldStyle}>
           <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
             {t('office.transcribe.label.file_path')}
           </span>
-          <input
-            type="text"
-            value={filePath.value}
-            placeholder={t('office.transcribe.placeholder.file_path')}
-            onInput={(e) => (filePath.value = (e.target as HTMLInputElement).value)}
-            aria-label={t('office.transcribe.label.file_path')}
-            style={{
-              padding: 'var(--space-2)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-base)',
-              background: 'var(--color-bg)',
-              color: 'var(--color-text)',
-              fontFamily: 'monospace',
-              fontSize: 'var(--text-sm)',
-            }}
-          />
+          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center', minWidth: 0 }}>
+            <input
+              type="text"
+              value={filePath.value}
+              placeholder={t('office.transcribe.placeholder.file_path')}
+              onInput={(e) => (filePath.value = (e.target as HTMLInputElement).value)}
+              aria-label={t('office.transcribe.label.file_path')}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                ...controlStyle,
+                fontFamily: 'monospace',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <Button
+              variant="secondary"
+              loading={picking.value}
+              disabled={submitting.value}
+              onClick={async () => {
+                const { paths, files } = await pickFiles({
+                  multiple: false,
+                  accept: 'audio/*,.wav,.mp3,.m4a,.ogg,.flac',
+                  title: t('office.transcribe.label.file_path'),
+                });
+                if (paths.length > 0) {
+                  filePath.value = paths[0];
+                } else if (files.length > 0) {
+                  filePath.value = (files[0] as any).path ?? files[0].name;
+                }
+              }}
+            >
+              {`📂 ${t('picker.browse_file')}`}
+            </Button>
+            {filePath.value.trim() && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={t('picker.clear_file')}
+                disabled={submitting.value}
+                onClick={() => {
+                  filePath.value = '';
+                  result.value = null;
+                  errorMsg.value = null;
+                }}
+              >
+                ×
+              </Button>
+            )}
+          </div>
         </label>
 
-        <label
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'var(--space-2)',
-          }}
-        >
+        <label style={fieldStyle}>
           <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
             {t('office.transcribe.label.language')}
           </span>
@@ -591,13 +671,7 @@ function TranscribePanel(): JSX.Element {
             value={language.value}
             onChange={(e) => (language.value = (e.target as HTMLSelectElement).value)}
             aria-label={t('office.transcribe.label.language')}
-            style={{
-              padding: 'var(--space-2)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-base)',
-              background: 'var(--color-bg)',
-              color: 'var(--color-text)',
-            }}
+            style={controlStyle}
           >
             <option value="auto">{t('office.transcribe.lang.auto')}</option>
             <option value="zh">{t('office.transcribe.lang.zh')}</option>
@@ -639,8 +713,7 @@ function TranscribePanel(): JSX.Element {
         )}
       </section>
 
-      {/* Right: progress + result */}
-      <section style={{ flex: 1, minWidth: 0 }}>
+      <section style={resultPanelStyle}>
         {!jobId.value && (
           <EmptyState
             icon="🎙️"

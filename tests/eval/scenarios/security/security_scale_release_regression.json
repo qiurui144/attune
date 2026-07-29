@@ -1,0 +1,132 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "security_scale_release_regression",
+  "domain": "security",
+  "scenario_type": "high_complexity_longtext",
+  "difficulty": "stress",
+  "corpus_id": "security_generated_ten_thousand_docs",
+  "coverage": {
+    "question_types": [
+      "fact_lookup",
+      "operation_guidance",
+      "decision_assistance",
+      "summary",
+      "multiturn",
+      "negative_evidence",
+      "out_of_manual_industry_general",
+      "multi_intent_decomposition",
+      "per_topic_source_quota",
+      "terminology_constraints"
+    ],
+    "minimum_turns_per_type": 1,
+    "same_industry_only": true,
+    "scale_focus": ["near_duplicate", "citation_stability", "delete_rescan", "concurrent_read_write"]
+  },
+  "turns": [
+    {
+      "turn_id": "fact_lookup_asset_inventory",
+      "message": "在万级 security 知识库中，asset inventory 证据应该如何定位？",
+      "answer_mode": "fact_lookup",
+      "requires_citations": true,
+      "expected_sources": ["security::asset-inventory"],
+      "must_include": ["security", "asset inventory", "证据", "引用"],
+      "must_not_include": ["networking", "finance", "mechanical"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "operation_guidance_audit_evidence",
+      "message": "如何排查 audit evidence 缺失导致的安全审计问题？",
+      "answer_mode": "operation_guidance",
+      "requires_citations": true,
+      "expected_sources": ["security::audit-evidence", "generated:security-support-workflow"],
+      "must_include": ["audit evidence", "日志", "证据", "不要编造"],
+      "must_not_include": ["无引用结论", "跨行业漂移"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "decision_assistance_access_control",
+      "message": "访问控制修复前，应先收集哪些 security 证据来支持决策？",
+      "answer_mode": "decision_assistance",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::risk-assessment"],
+      "must_include": ["access control", "risk assessment", "先收集", "证据"],
+      "must_not_include": ["直接上线", "无需复核"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "summary_security_scale",
+      "message": "请总结万级 security 知识库中访问控制、资产清单、事件响应、风险评估和审计证据的关系。",
+      "answer_mode": "summary",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::asset-inventory", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "asset inventory", "incident response", "risk assessment", "audit evidence"],
+      "must_not_include": ["无来源总结", "跨行业"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "multiturn_citation_stability",
+      "message": "继续上一问，只沿用 security 来源，列出最容易误判的证据缺口。",
+      "answer_mode": "multiturn",
+      "requires_citations": true,
+      "expected_sources": ["security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["security", "来源", "证据缺口", "引用"],
+      "must_not_include": ["networking", "mechanical"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "negative_evidence_compliance_refusal",
+      "message": "如果只有 asset inventory 记录但没有 audit evidence，能否给出合规结论？",
+      "answer_mode": "negative_evidence",
+      "requires_citations": true,
+      "expected_sources": ["security::asset-inventory", "security::audit-evidence"],
+      "must_include": ["不能", "audit evidence", "证据不足", "继续索取"],
+      "must_not_include": ["已经合规", "无需审计"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "out_of_manual_zero_trust_boundary",
+      "message": "万级 security 知识库没有直接写零信任网络分段时，怎样给出可落地但不越界的整改建议？",
+      "answer_mode": "out_of_manual_industry_general",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::risk-assessment", "security::audit-evidence", "security::asset-inventory"],
+      "must_include": ["知识库未直接覆盖", "行业通用", "证据不足", "不能当作手册结论"],
+      "must_not_include": ["手册已明确要求零信任", "无需引用"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "multi_intent_access_incident_audit_decision",
+      "message": "在万级 security 知识库中，同时拆解 access control 定位、incident response 排查、audit evidence 缺失和 risk assessment 建议边界。",
+      "answer_mode": "multi_intent_decomposition",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::audit-evidence", "security::risk-assessment"],
+      "must_include": ["access control", "incident response", "audit evidence", "risk assessment", "证据"],
+      "must_not_include": ["跨行业漂移", "无引用结论"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "per_topic_source_quota_near_duplicate",
+      "message": "请为 access control、asset inventory、incident response、risk assessment、audit evidence 各选代表性来源，避免万级近重复文档淹没单一主题。",
+      "answer_mode": "per_topic_source_quota",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::asset-inventory", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "asset inventory", "incident response", "risk assessment", "audit evidence"],
+      "must_not_include": ["只引用同一来源", "跨行业"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "terminology_constraints_bilingual_security",
+      "message": "回答时保留原始英文术语 access control、incident response、risk assessment、audit evidence，并用中文解释每个术语对应的证据边界。",
+      "answer_mode": "terminology_constraints",
+      "requires_citations": true,
+      "expected_sources": ["security::access-control", "security::incident-response", "security::risk-assessment", "security::audit-evidence"],
+      "must_include": ["access control", "incident response", "risk assessment", "audit evidence", "中文"],
+      "must_not_include": ["无来源", "跨行业"],
+      "latency_budget_ms": 60000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

@@ -31,8 +31,10 @@ const RISK_YAML: &str = include_str!("../assets/plugins/ai_annotation_risk/plugi
 const RISK_PROMPT: &str = include_str!("../assets/plugins/ai_annotation_risk/prompt.md");
 const OUTDATED_YAML: &str = include_str!("../assets/plugins/ai_annotation_outdated/plugin.yaml");
 const OUTDATED_PROMPT: &str = include_str!("../assets/plugins/ai_annotation_outdated/prompt.md");
-const HIGHLIGHTS_YAML: &str = include_str!("../assets/plugins/ai_annotation_highlights/plugin.yaml");
-const HIGHLIGHTS_PROMPT: &str = include_str!("../assets/plugins/ai_annotation_highlights/prompt.md");
+const HIGHLIGHTS_YAML: &str =
+    include_str!("../assets/plugins/ai_annotation_highlights/plugin.yaml");
+const HIGHLIGHTS_PROMPT: &str =
+    include_str!("../assets/plugins/ai_annotation_highlights/prompt.md");
 const QUESTIONS_YAML: &str = include_str!("../assets/plugins/ai_annotation_questions/plugin.yaml");
 const QUESTIONS_PROMPT: &str = include_str!("../assets/plugins/ai_annotation_questions/prompt.md");
 
@@ -127,6 +129,73 @@ pub struct LocatedFinding {
 /// 大正文截断上限（字符数，插件级常量；各角度插件可选择不同上限未来扩展）
 const MAX_CONTENT_LEN_FOR_LLM: usize = 8000;
 
+/// 最多重试次数（schema-guided JSON + validator-feedback retry，§4.5 §B）。
+const LLM_MAX_ATTEMPTS: usize = 3;
+
+/// findings 响应的 JSON schema —— 传给 backend (Ollama `format=<schema>` /
+/// OpenAI `response_format=json_schema`) 强制结构化输出，消除 JSON parse 不确定性
+/// (§4.5 §A，defamation_extractor mock-0.99/real-0.09 的根因之一)。
+fn findings_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "snippet": {
+                            "type": "string",
+                            "description": "原文里逐字出现的片段 (verbatim)"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "20-80 字的解读/建议"
+                        }
+                    },
+                    "required": ["snippet", "reason"]
+                }
+            }
+        },
+        "required": ["findings"]
+    })
+}
+
+/// Few-shot 范例 (§4.5 §C) —— 给弱模型 (qwen2.5:3b 等) 一个明确的 input→output
+/// 模式: verbatim snippet + 简短 reason，并示范"原文里没有的内容不要编造"。
+/// 内容刻意与真实笔记无关 (通用知识库)，不绑定任何行业。
+fn few_shot_examples() -> Vec<(String, String)> {
+    vec![
+        (
+            "笔记内容:\nRust 的所有权系统在编译期保证内存安全，无需垃圾回收器。".to_string(),
+            r#"{"findings":[{"snippet":"所有权系统在编译期保证内存安全","reason":"Rust 内存安全的核心机制，区别于 GC 语言"}]}"#.to_string(),
+        ),
+        (
+            "笔记内容:\n会议定于下周二召开，地点待定。".to_string(),
+            r#"{"findings":[{"snippet":"地点待定","reason":"信息不完整，需补充确认会议地点"}]}"#.to_string(),
+        ),
+    ]
+}
+
+/// 校验 LLM 原始输出能否解析出 findings 结构 (§4.5 §B 的 validator)。
+/// 通过 → 立即返回；失败 → 错误信息反馈给 LLM 重试。
+/// 注意：空 findings 数组是合法的 (LLM 认为没有可批注内容)。
+fn validate_findings_json(raw: &str) -> std::result::Result<(), String> {
+    let start = raw
+        .find('{')
+        .ok_or_else(|| "输出里找不到 JSON 对象 (缺 '{')".to_string())?;
+    let end = raw
+        .rfind('}')
+        .ok_or_else(|| "输出里找不到 JSON 对象 (缺 '}')".to_string())?;
+    if end < start {
+        return Err("JSON 括号顺序错误".to_string());
+    }
+    let json_text = &raw[start..=end];
+    serde_json::from_str::<RawResponse>(json_text)
+        .map(|_| ())
+        .map_err(|e| format!("findings JSON 解析失败: {e}"))
+}
+
 /// 调 LLM 分析指定内容，返回定位好的 findings 列表。
 ///
 /// `content_scope`：传给 LLM 的正文（可能是整篇，也可能是用户选中的一段）。
@@ -138,7 +207,7 @@ pub fn generate_annotations(
     llm: &dyn LlmProvider,
     content_scope: &str,
     content_full: &str,
-    scope_offset_base: i64,  // content_scope 在 content_full 里的起始偏移（选区模式非零）
+    scope_offset_base: i64, // content_scope 在 content_full 里的起始偏移（选区模式非零）
     angle: AiAngle,
 ) -> Result<Vec<LocatedFinding>> {
     if !llm.is_available() {
@@ -148,7 +217,10 @@ pub fn generate_annotations(
 
     // 截断超长正文。真实场景用户若要分析长文，应分段分析（UI 可引导）。
     let truncated = if content_scope.chars().count() > MAX_CONTENT_LEN_FOR_LLM {
-        content_scope.chars().take(MAX_CONTENT_LEN_FOR_LLM).collect::<String>()
+        content_scope
+            .chars()
+            .take(MAX_CONTENT_LEN_FOR_LLM)
+            .collect::<String>()
     } else {
         content_scope.to_string()
     };
@@ -156,16 +228,34 @@ pub fn generate_annotations(
     // System prompt 直接用插件 prompt（不再动态拼接说明，插件 prompt.md 是完整的）
     let system = &cfg.prompt;
     let user = format!("笔记内容:\n{truncated}");
-    // F-17-PRIVACY: redact note content before LLM (item content from user-ingested docs may contain PII)
+    // §4.5 hardening (defamation_extractor mock-0.99/real-0.09 trap class):
+    //   §A schema-guided JSON  → backend format=<schema> 强制结构化
+    //   §B retry-with-validation → 解析失败把错误反馈给 LLM 重试 (≤3 次)
+    //   §C few-shot examples    → 给弱模型明确 input→output 模式
+    // 全程经 F-17 PII redact/restore (item content 可能含用户 PII，不出网)。
     let redactor = crate::pii::Redactor::default();
-    let raw = crate::pii::llm_chat_redacted(llm, &redactor, system, &user, "ai_annotator")?;
+    let schema = findings_schema();
+    let examples = few_shot_examples();
+    let raw = crate::pii::llm_chat_redacted_hardened(
+        llm,
+        &redactor,
+        system,
+        &user,
+        &examples,
+        Some(&schema),
+        LLM_MAX_ATTEMPTS,
+        &validate_findings_json,
+        "ai_annotator",
+    )?;
     let parsed = parse_response(&raw)?;
 
     let mut located = Vec::new();
     let mut dropped = 0usize;
     for f in parsed.findings.into_iter().take(cfg.max_findings) {
         let snip = f.snippet.trim();
-        if snip.chars().count() < cfg.min_snippet_chars || snip.chars().count() > cfg.max_snippet_chars {
+        if snip.chars().count() < cfg.min_snippet_chars
+            || snip.chars().count() > cfg.max_snippet_chars
+        {
             log::debug!("ai_annotator: skip snippet out of length range: {snip:?}");
             dropped += 1;
             continue;
@@ -174,7 +264,7 @@ pub fn generate_annotations(
         //   1. verbatim —— 完全相等（首选）
         //   2. relaxed  —— 规范化空白/引号后匹配（容忍 LLM 轻度改写）
         if let Some((u16_start, u16_end)) = locate_snippet(content_full, snip) {
-            let _ = scope_offset_base;  // 忽略 —— 已在 content_full 全局搜索
+            let _ = scope_offset_base; // 忽略 —— 已在 content_full 全局搜索
             located.push(LocatedFinding {
                 offset_start: u16_start as i64,
                 offset_end: u16_end as i64,
@@ -203,16 +293,20 @@ pub fn generate_annotations(
 fn locate_snippet(content: &str, snip: &str) -> Option<(usize, usize)> {
     // Phase 1
     if let Some(byte_idx) = content.find(snip) {
-        return Some(byte_range_to_utf16(content, byte_idx, byte_idx + snip.len()));
+        return Some(byte_range_to_utf16(
+            content,
+            byte_idx,
+            byte_idx + snip.len(),
+        ));
     }
     // Phase 2
     let norm_content = normalize_for_match(content);
     let norm_snip = normalize_for_match(snip);
     if norm_snip.len() >= 4 {
         if let Some(rel_byte) = norm_content.find(&norm_snip) {
-            if let Some((s, e)) = map_normalized_byte_to_original(
-                content, rel_byte, rel_byte + norm_snip.len(),
-            ) {
+            if let Some((s, e)) =
+                map_normalized_byte_to_original(content, rel_byte, rel_byte + norm_snip.len())
+            {
                 return Some(byte_range_to_utf16(content, s, e));
             }
         }
@@ -223,11 +317,15 @@ fn locate_snippet(content: &str, snip: &str) -> Option<(usize, usize)> {
     // 立即截断 —— LLM 极少一次引用跨段，这个 cap 防止"AI 改写尾部"导致高亮误扩散到
     // 下一段甚至下一节。容忍单 `\n`（同段内换行），只在 `\n\n` 或本段末尾停。
     let snip_chars: Vec<char> = snip.chars().collect();
-    if snip_chars.len() < 20 { return None; }
+    if snip_chars.len() < 20 {
+        return None;
+    }
     let anchor_len = 10usize;
     let anchor: String = snip_chars[..anchor_len].iter().collect();
     let anchor_norm = normalize_for_match(&anchor);
-    if anchor_norm.chars().count() < 6 { return None; }
+    if anchor_norm.chars().count() < 6 {
+        return None;
+    }
     let rel = norm_content.find(&anchor_norm)?;
     let (orig_s, _) = map_normalized_byte_to_original(content, rel, rel + anchor_norm.len())?;
 
@@ -235,7 +333,9 @@ fn locate_snippet(content: &str, snip: &str) -> Option<(usize, usize)> {
     let mut end_byte = orig_s;
     let mut prev_newline = false;
     for (ch_count, ch) in content[orig_s..].chars().enumerate() {
-        if ch_count >= max_chars { break; }
+        if ch_count >= max_chars {
+            break;
+        }
         // 段落边界：连续两个 \n 立即停（不含末尾 \n，避免截过短）
         if ch == '\n' && prev_newline && ch_count >= anchor_len {
             break;
@@ -256,17 +356,25 @@ fn normalize_for_match(s: &str) -> String {
     let mut prev_space = false;
     for ch in s.chars() {
         let mapped = match ch {
-            '（' => '(', '）' => ')',
-            '【' => '[', '】' => ']',
-            '，' => ',', '。' => '.', '；' => ';', '：' => ':',
-            '！' => '!', '？' => '?',
+            '（' => '(',
+            '）' => ')',
+            '【' => '[',
+            '】' => ']',
+            '，' => ',',
+            '。' => '.',
+            '；' => ';',
+            '：' => ':',
+            '！' => '!',
+            '？' => '?',
             '\u{201C}' | '\u{201D}' | '「' | '」' => '"',
             '\u{2018}' | '\u{2019}' => '\'',
             c if c.is_whitespace() => ' ',
             c => c,
         };
         if mapped == ' ' {
-            if !prev_space && !out.is_empty() { out.push(' '); }
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+            }
             prev_space = true;
         } else {
             out.push(mapped);
@@ -279,7 +387,9 @@ fn normalize_for_match(s: &str) -> String {
 /// 把归一化字符串里的字节区间映射回原始字符串的字节区间。
 /// 实现：遍历原始 chars，同步累积归一化后的字节位置，找到首次 >= norm_start 和 > norm_end 的点。
 fn map_normalized_byte_to_original(
-    original: &str, norm_start: usize, norm_end: usize,
+    original: &str,
+    norm_start: usize,
+    norm_end: usize,
 ) -> Option<(usize, usize)> {
     let mut orig_byte = 0usize;
     let mut norm_byte = 0usize;
@@ -290,10 +400,16 @@ fn map_normalized_byte_to_original(
     for ch in original.chars() {
         let ch_len = ch.len_utf8();
         let mapped = match ch {
-            '（' => '(', '）' => ')',
-            '【' => '[', '】' => ']',
-            '，' => ',', '。' => '.', '；' => ';', '：' => ':',
-            '！' => '!', '？' => '?',
+            '（' => '(',
+            '）' => ')',
+            '【' => '[',
+            '】' => ']',
+            '，' => ',',
+            '。' => '.',
+            '；' => ';',
+            '：' => ':',
+            '！' => '!',
+            '？' => '?',
             '\u{201C}' | '\u{201D}' | '「' | '」' => '"',
             '\u{2018}' | '\u{2019}' => '\'',
             c if c.is_whitespace() => ' ',
@@ -307,8 +423,11 @@ fn map_normalized_byte_to_original(
         }
         norm_byte += mapped_len;
         orig_byte += ch_len;
-        if mapped == ' ' && produces_char { prev_space_in_norm = true; }
-        else if produces_char { prev_space_in_norm = false; }
+        if mapped == ' ' && produces_char {
+            prev_space_in_norm = true;
+        } else if produces_char {
+            prev_space_in_norm = false;
+        }
 
         if norm_byte >= norm_end && orig_end.is_none() {
             orig_end = Some(orig_byte);
@@ -349,18 +468,32 @@ fn parse_response(raw: &str) -> Result<RawResponse> {
     let mut in_str = false;
     let mut escape = false;
     for (i, ch) in json_text.char_indices() {
-        if escape { escape = false; continue; }
-        if ch == '\\' && in_str { escape = true; continue; }
-        if ch == '"' { in_str = !in_str; continue; }
-        if in_str { continue; }
-        if ch == '{' { stack.push(i); }
-        else if ch == '}' {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && in_str {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_str = !in_str;
+            continue;
+        }
+        if in_str {
+            continue;
+        }
+        if ch == '{' {
+            stack.push(i);
+        } else if ch == '}' {
             if let Some(s) = stack.pop() {
                 let end = i + ch.len_utf8();
                 let candidate = &json_text[s..end];
                 // 只尝试解析含 snippet 字段的对象，避免把 `{"findings": [...]}` 当失败
-                if candidate.contains("snippet") || candidate.contains("snpshot")
-                   || candidate.contains("\"text\"") || candidate.contains("\"quote\"")
+                if candidate.contains("snippet")
+                    || candidate.contains("snpshot")
+                    || candidate.contains("\"text\"")
+                    || candidate.contains("\"quote\"")
                 {
                     if let Ok(f) = serde_json::from_str::<RawFinding>(candidate) {
                         if !f.snippet.trim().is_empty() {
@@ -372,7 +505,10 @@ fn parse_response(raw: &str) -> Result<RawResponse> {
         }
     }
     if !salvaged.is_empty() {
-        log::info!("ai_annotator: salvaged {} findings from malformed JSON", salvaged.len());
+        log::info!(
+            "ai_annotator: salvaged {} findings from malformed JSON",
+            salvaged.len()
+        );
         return Ok(RawResponse { findings: salvaged });
     }
     log::warn!("ai_annotator: failed to parse LLM JSON response; raw={raw:?}");
@@ -414,8 +550,14 @@ mod tests {
 
     #[test]
     fn each_angle_has_unique_label_and_color() {
-        let angles = [AiAngle::Risk, AiAngle::Outdated, AiAngle::Highlights, AiAngle::Questions];
-        let labels: std::collections::HashSet<_> = angles.iter().map(|a| a.label_prefix()).collect();
+        let angles = [
+            AiAngle::Risk,
+            AiAngle::Outdated,
+            AiAngle::Highlights,
+            AiAngle::Questions,
+        ];
+        let labels: std::collections::HashSet<_> =
+            angles.iter().map(|a| a.label_prefix()).collect();
         assert_eq!(labels.len(), 4, "labels must be unique per angle");
     }
 
@@ -446,9 +588,9 @@ mod tests {
         let s = "A⭐🔥B";
         // byte 偏移：A=0, ⭐=1..4 (3 bytes), 🔥=4..8 (4 bytes), B=8
         // utf-16 索引：A=0..1, ⭐=1..2, 🔥=2..4, B=4..5
-        let (a, b) = byte_range_to_utf16(s, 4, 8);  // 就 🔥
+        let (a, b) = byte_range_to_utf16(s, 4, 8); // 就 🔥
         assert_eq!(a, 2);
-        assert_eq!(b, 4);  // 2 code units for 🔥
+        assert_eq!(b, 4); // 2 code units for 🔥
     }
 
     #[test]
@@ -459,7 +601,10 @@ mod tests {
 
     #[test]
     fn parse_extracts_json_from_wrapper_text() {
-        let r = parse_response(r#"好的，以下是分析：{"findings":[{"snippet":"数据库","reason":"核心概念"}]}"#).unwrap();
+        let r = parse_response(
+            r#"好的，以下是分析：{"findings":[{"snippet":"数据库","reason":"核心概念"}]}"#,
+        )
+        .unwrap();
         assert_eq!(r.findings.len(), 1);
         assert_eq!(r.findings[0].snippet, "数据库");
     }
@@ -470,10 +615,22 @@ mod tests {
         m
     }
 
+    /// For validator-failing inputs: a real LLM keeps producing the same
+    /// (bad) shape every retry attempt, so the mock queue must hold one
+    /// response per attempt. Mirrors §4.5 §B retry behaviour deterministically.
+    fn mock_with_repeated(response: &str) -> MockLlmProvider {
+        let m = MockLlmProvider::new("mock-model");
+        for _ in 0..LLM_MAX_ATTEMPTS {
+            m.push_response(response);
+        }
+        m
+    }
+
     #[test]
     fn generate_returns_empty_when_snippet_not_found() {
         let content = "数据库管理系统 (DBMS) 完成数据的创建";
-        let mock = mock_with(r#"{"findings":[{"snippet":"完全不在原文里的字符串 XYZ","reason":"test"}]}"#);
+        let mock =
+            mock_with(r#"{"findings":[{"snippet":"完全不在原文里的字符串 XYZ","reason":"test"}]}"#);
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
         assert_eq!(result.len(), 0, "snippet not in content must be dropped");
     }
@@ -486,7 +643,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].snippet, "数据库管理系统");
         assert_eq!(result[0].offset_start, 0);
-        assert_eq!(result[0].offset_end, 7);  // 7 utf-16 code units
+        assert_eq!(result[0].offset_end, 7); // 7 utf-16 code units
         assert_eq!(result[0].reason, "核心概念");
     }
 
@@ -507,8 +664,11 @@ mod tests {
         let mock = mock_with(big);
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Risk).unwrap();
         let cfg_max = AiAngle::Risk.config().max_findings;
-        assert_eq!(result.len(), cfg_max,
-            "must cap at plugin.constraints.max_findings regardless of LLM output size");
+        assert_eq!(
+            result.len(),
+            cfg_max,
+            "must cap at plugin.constraints.max_findings regardless of LLM output size"
+        );
     }
 
     #[test]
@@ -517,7 +677,11 @@ mod tests {
         let content = "xx 1234567890";
         let mock = mock_with(r#"{"findings":[{"snippet":"xx","reason":"r"}]}"#);
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
-        assert_eq!(result.len(), 0, "snippet below plugin.min_snippet_chars rejected");
+        assert_eq!(
+            result.len(),
+            0,
+            "snippet below plugin.min_snippet_chars rejected"
+        );
     }
 
     #[test]
@@ -525,19 +689,40 @@ mod tests {
         // 插件 max_snippet_chars=150，200 chars 被过滤
         let big_snippet = "x".repeat(200);
         let content = big_snippet.clone();
-        let payload = format!(r#"{{"findings":[{{"snippet":"{}","reason":"r"}}]}}"#, big_snippet);
+        let payload = format!(
+            r#"{{"findings":[{{"snippet":"{}","reason":"r"}}]}}"#,
+            big_snippet
+        );
         let mock = mock_with(&payload);
-        let result = generate_annotations(&mock, &content, &content, 0, AiAngle::Highlights).unwrap();
-        assert_eq!(result.len(), 0, "snippet above plugin.max_snippet_chars rejected");
+        let result =
+            generate_annotations(&mock, &content, &content, 0, AiAngle::Highlights).unwrap();
+        assert_eq!(
+            result.len(),
+            0,
+            "snippet above plugin.max_snippet_chars rejected"
+        );
     }
 
     #[test]
     fn each_angle_has_embedded_plugin_config() {
         // 内置 4 个 plugin.yaml 应全部解析成功 + label_prefix 非空
-        for a in [AiAngle::Risk, AiAngle::Outdated, AiAngle::Highlights, AiAngle::Questions] {
+        for a in [
+            AiAngle::Risk,
+            AiAngle::Outdated,
+            AiAngle::Highlights,
+            AiAngle::Questions,
+        ] {
             let c = a.config();
-            assert!(!c.label_prefix.is_empty(), "angle {:?} label_prefix empty", a);
-            assert!(!c.default_color.is_empty(), "angle {:?} default_color empty", a);
+            assert!(
+                !c.label_prefix.is_empty(),
+                "angle {:?} label_prefix empty",
+                a
+            );
+            assert!(
+                !c.default_color.is_empty(),
+                "angle {:?} default_color empty",
+                a
+            );
             assert!(!c.prompt.is_empty(), "angle {:?} prompt empty", a);
             assert!(c.max_findings > 0);
         }
@@ -546,25 +731,38 @@ mod tests {
     #[test]
     fn generate_tolerates_bad_json_from_llm() {
         let content = "whatever content 1234";
-        let mock = mock_with("lol, not json, sorry");
+        // Garbage fails the JSON validator every attempt → retries exhaust →
+        // graceful empty (not Err). Mock must supply one response per attempt.
+        let mock = mock_with_repeated("lol, not json, sorry");
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Risk).unwrap();
-        assert_eq!(result.len(), 0, "garbage LLM output → empty results, not Err");
+        assert_eq!(
+            result.len(),
+            0,
+            "garbage LLM output → empty results, not Err"
+        );
     }
 
     #[test]
     fn relaxed_match_whitespace_normalization() {
         // 原文多空格，LLM 返回标准空格 — 两阶段匹配应成功定位
         let content = "数据库   管理\n  系统 (DBMS) 完成";
-        let mock = mock_with(r#"{"findings":[{"snippet":"数据库 管理 系统 (DBMS) 完成","reason":"核心"}]}"#);
+        let mock = mock_with(
+            r#"{"findings":[{"snippet":"数据库 管理 系统 (DBMS) 完成","reason":"核心"}]}"#,
+        );
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
-        assert_eq!(result.len(), 1, "relaxed match must locate snippet despite whitespace differences");
+        assert_eq!(
+            result.len(),
+            1,
+            "relaxed match must locate snippet despite whitespace differences"
+        );
     }
 
     #[test]
     fn relaxed_match_fullwidth_punctuation() {
         // 原文用全角括号，LLM 返回半角 — relaxed 应匹配
         let content = "数据库管理系统（DBMS）完成数据操作的创建";
-        let mock = mock_with(r#"{"findings":[{"snippet":"数据库管理系统(DBMS)完成","reason":"核心"}]}"#);
+        let mock =
+            mock_with(r#"{"findings":[{"snippet":"数据库管理系统(DBMS)完成","reason":"核心"}]}"#);
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
         assert_eq!(result.len(), 1);
     }
@@ -586,10 +784,14 @@ mod tests {
         let truncated = r#"{"findings": [
             {"snippet": "数据库管理系统", "reason": "核心概念"},
             {"snippet": "数据库应用程序", "reason": "用户界面层"}
-        "#;  // 缺 `]}`
-        let mock = mock_with(truncated);
+        "#; // 缺 `]}` —— 校验失败触发重试，重试耗尽后走 salvage 兜底
+        let mock = mock_with_repeated(truncated);
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
-        assert_eq!(result.len(), 2, "both findings should be salvaged from truncated JSON");
+        assert_eq!(
+            result.len(),
+            2,
+            "both findings should be salvaged from truncated JSON"
+        );
     }
 
     #[test]
@@ -597,9 +799,15 @@ mod tests {
         // LLM 引用了原文前半段，但后半段改写 —— prefix anchor 应定位前 10 字符
         let content = "数据库管理系统（DBMS）主要是进行数据的创建、读取、更新、删除等数据操作，当然还要完成其他一些功能。";
         // LLM 返回的 snippet 前 10 字符在原文里，但尾部改写了
-        let mock = mock_with(r#"{"findings":[{"snippet":"数据库管理系统（DBMS）主要负责数据 CRUD 操作，并完成其他核心任务","reason":"核心"}]}"#);
+        let mock = mock_with(
+            r#"{"findings":[{"snippet":"数据库管理系统（DBMS）主要负责数据 CRUD 操作，并完成其他核心任务","reason":"核心"}]}"#,
+        );
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
-        assert_eq!(result.len(), 1, "prefix-anchor should locate paraphrased snippet");
+        assert_eq!(
+            result.len(),
+            1,
+            "prefix-anchor should locate paraphrased snippet"
+        );
     }
 
     #[test]
@@ -612,17 +820,142 @@ mod tests {
         let payload = format!(r#"{{"findings":[{{"snippet":"{snippet}","reason":"核心"}}]}}"#);
         let mock = mock_with(&payload);
         let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
-        assert_eq!(result.len(), 1, "prefix-anchor should still locate the snippet");
+        assert_eq!(
+            result.len(),
+            1,
+            "prefix-anchor should still locate the snippet"
+        );
         // 高亮文本不得包含"第二节"字样
-        let hl = substring_by_utf16_chars(content, result[0].offset_start as usize, result[0].offset_end as usize);
-        assert!(!hl.contains("第二节"),
-            "highlight crossed paragraph boundary: {hl:?}");
+        let hl = substring_by_utf16_chars(
+            content,
+            result[0].offset_start as usize,
+            result[0].offset_end as usize,
+        );
+        assert!(
+            !hl.contains("第二节"),
+            "highlight crossed paragraph boundary: {hl:?}"
+        );
     }
 
     // 测试辅助：按 UTF-16 code unit 索引切取字符串
     fn substring_by_utf16_chars(s: &str, start: usize, end: usize) -> String {
         let units: Vec<u16> = s.encode_utf16().collect();
-        if end > units.len() { return String::new(); }
+        if end > units.len() {
+            return String::new();
+        }
         String::from_utf16_lossy(&units[start..end])
+    }
+
+    // ── §4.5 hardening (schema-guided + retry-validation + few-shot) ─────────
+
+    #[test]
+    fn findings_schema_is_valid_json_schema_shape() {
+        let s = findings_schema();
+        assert_eq!(s["type"], "object");
+        assert_eq!(s["properties"]["findings"]["type"], "array");
+        let item = &s["properties"]["findings"]["items"];
+        assert_eq!(item["properties"]["snippet"]["type"], "string");
+        assert_eq!(item["properties"]["reason"]["type"], "string");
+        let required = item["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "snippet"));
+    }
+
+    #[test]
+    fn few_shot_has_at_least_two_examples_with_parseable_outputs() {
+        let ex = few_shot_examples();
+        assert!(ex.len() >= 2, "§4.5 §C requires >= 2 few-shot examples");
+        for (user, assistant) in &ex {
+            assert!(
+                user.contains("笔记内容"),
+                "example user must look like a real prompt"
+            );
+            // Each demonstrated assistant output must itself pass the validator —
+            // a few-shot example that teaches a bad shape is worse than none.
+            validate_findings_json(assistant).unwrap_or_else(|e| {
+                panic!("few-shot example output must be valid: {e}\n{assistant}")
+            });
+        }
+    }
+
+    #[test]
+    fn validator_accepts_well_formed_and_rejects_garbage() {
+        assert!(validate_findings_json(r#"{"findings":[{"snippet":"x","reason":"y"}]}"#).is_ok());
+        assert!(
+            validate_findings_json(r#"{"findings":[]}"#).is_ok(),
+            "empty findings is valid"
+        );
+        assert!(validate_findings_json("not json at all").is_err());
+        assert!(
+            validate_findings_json(r#"{"findings": [ {"snippet": "x"  "#).is_err(),
+            "truncated rejected"
+        );
+    }
+
+    #[test]
+    fn retry_recovers_after_first_bad_output() {
+        // Attempt 1 returns garbage (validator fails) → §B feeds error back →
+        // attempt 2 returns valid JSON → located finding. Proves the retry loop
+        // actually re-calls the LLM rather than giving up on first bad output.
+        let content = "数据库管理系统 (DBMS) 完成数据的创建";
+        let mock = MockLlmProvider::new("mock-model");
+        mock.push_response("sorry I can't help with that"); // attempt 1: invalid
+        mock.push_response(r#"{"findings":[{"snippet":"数据库管理系统","reason":"核心概念"}]}"#); // attempt 2: valid
+        let result = generate_annotations(&mock, content, content, 0, AiAngle::Highlights).unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "retry must recover the valid second attempt"
+        );
+        assert_eq!(result[0].snippet, "数据库管理系统");
+    }
+
+    /// Real-LLM gate (§4.5 §D/§E). `#[ignore]` — opt-in nightly lane requiring a
+    /// live Ollama with a chat model (`ollama pull qwen2.5:3b`). Asserts the
+    /// hardened path produces *parseable, located* findings on a real weak model
+    /// — the exact failure mode that bit defamation_extractor (mock 0.99 / real
+    /// 0.09). Run with: `cargo test -p attune-core --release real_llm -- --ignored`.
+    #[test]
+    #[ignore = "requires live Ollama; nightly real-LLM lane"]
+    fn real_llm_ai_annotator_produces_located_findings() {
+        let llm = match crate::llm::OllamaLlmProvider::auto_detect() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIP real_llm gate: no Ollama chat model ({e})");
+                return;
+            }
+        };
+        if !llm.is_available() {
+            eprintln!("SKIP real_llm gate: Ollama not reachable");
+            return;
+        }
+        // A note with clearly annotatable content for the "highlights" angle.
+        let content = "数据库管理系统（DBMS）负责数据的创建、读取、更新和删除操作，\
+                       是现代应用的核心基础设施。事务的 ACID 特性保证了数据一致性。";
+        let result = generate_annotations(&llm, content, content, 0, AiAngle::Highlights)
+            .expect("hardened path must not Err on a real model");
+        // The contract on a real weak model: findings parse + every snippet is
+        // located verbatim in the source (offsets valid, within bounds).
+        assert!(
+            !result.is_empty(),
+            "real model {} returned zero located findings for annotatable content \
+             — schema/retry/few-shot hardening regressed",
+            llm.model_name()
+        );
+        let units = content.encode_utf16().count() as i64;
+        for f in &result {
+            assert!(
+                f.offset_start >= 0 && f.offset_end <= units && f.offset_start < f.offset_end,
+                "located offset out of bounds: {}..{} (len {})",
+                f.offset_start,
+                f.offset_end,
+                units
+            );
+            assert!(!f.snippet.trim().is_empty(), "snippet must be non-empty");
+        }
+        eprintln!(
+            "real_llm gate PASS: {} located findings on {}",
+            result.len(),
+            llm.model_name()
+        );
     }
 }

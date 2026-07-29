@@ -21,15 +21,51 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── 基础 CPU 包(默认 build,无 EP feature)— 不变 ──
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bundles: deb,rpm,appimage
+            variant: ""
+            features: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             # nsis + msi: 历史 desktop-v0.6.0 / v0.6.1 都含 MSI (企业部署
             # 场景需要), rc.4 暂只产 NSIS = regression. 加回 msi.
             # 注: Tauri auto-updater 仅支持 NSIS, MSI 不签 *.sig (仅手动下载).
             bundles: nsis,msi
+            variant: ""
+            features: ""
+          # ── GPU EP 变体(rc.4 范围:Win-DirectML + Linux-CUDA)──
+          # ORT 一二进制一 GPU EP → 各自独立 artifact;EP 运行时栈按需从资源站拉。
+          # 变体产物改名加 -<variant> 后缀,不与基础 CPU 包撞名;updater/latest.json
+          # 仍只取基础包(变体走手动下载,见 latest-json job 的 base-only 装配)。
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            variant: cuda
+            features: cuda
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            variant: directml
+            features: directml
+          # ── OpenVINO 变体(Intel iGPU/NPU)= load-dynamic(ort-dynamic)──
+          # pyke 预编译不含 OpenVINO EP → 必须 ort-dynamic + 运行时经 ORT_DYLIB_PATH 加载
+          # ep-stacks/openvino 的含 provider onnxruntime(首次按需下,§1.6 生效真机验)。
+          # 走 --no-default-features 关掉 ort-bundled(与 ort-dynamic 互斥)+ asr-sensevoice
+          # (避免 sherpa 第二份 onnxruntime ABI 冲突,该变体 ASR 回退 whisper-cli)。
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            variant: openvino
+            features: custom-protocol,ort-dynamic,openvino,wasm-runtime
+            no_default: "--no-default-features"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            variant: openvino
+            features: custom-protocol,ort-dynamic,openvino,wasm-runtime
+            no_default: "--no-default-features"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -56,14 +92,25 @@ jobs:
       - name: Install tauri-cli
         run: cargo install --locked tauri-cli --version "^2.0"
 
-      # Tauri 在 build 时检测到 TAURI_SIGNING_PRIVATE_KEY 即自动对 updater-eligible
-      # bundle (Linux AppImage / Windows NSIS) 签名,产生 *.sig 同名文件.
-      # 未设 secret 时跳过签名(本地 dev 也无需配置).
+      # Release tag 必须配置 TAURI_SIGNING_PRIVATE_KEY；Tauri 用它给
+      # updater-eligible bundle (Linux AppImage tarball / Windows NSIS) 签名。
+      # 本地/dev 非 tag 构建仍允许不签名。
       #
       # shell: bash 必须显式声明 — windows-latest 默认 shell 是 pwsh,
       # 不识别 bash 风格 $BUNDLES (pwsh 用 $env:BUNDLES). 上次 desktop-v1.0.0
       # Windows build 即因此 fail (--bundles "" 触发 clap "value is required").
       # 用 Git Bash (Windows runner 预装) 让 BUNDLES 正常展开,与 Linux 一致.
+      - name: Require updater signing for release tags
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error title=missing-updater-signing-key::TAURI_SIGNING_PRIVATE_KEY is required for desktop-v* releases; unsigned bundles produce an unusable latest.json."
+            exit 1
+          fi
+
       - name: Build Tauri bundles
         working-directory: apps/attune-desktop
         shell: bash
@@ -71,12 +118,50 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           BUNDLES: ${{ matrix.bundles }}
-        run: cargo tauri build --bundles "$BUNDLES"
+          FEATURES: ${{ matrix.features }}
+          NO_DEFAULT: ${{ matrix.no_default }}
+        # FEATURES 空 = 基础 CPU 包(默认 build,行为不变);非空 = EP 变体,经 desktop→
+        # server→core feature passthrough 到 ort/<ep>。
+        # NO_DEFAULT(仅 openvino 变体设 `--no-default-features`):`cargo tauri build` **不认**
+        # `--no-default-features` 为自身 flag(它走 tauri-cli arg 解析)→ 必须经 `--` 转发给
+        # cargo。故 openvino 变体把 no-default + features 全放 `--` 之后给 cargo;其余变体
+        # (base/cuda/directml)保持原 tauri `--features` 路径,**零行为变化**。
+        run: |
+          if [ -n "$NO_DEFAULT" ]; then
+            cargo tauri build --bundles "$BUNDLES" -- $NO_DEFAULT ${FEATURES:+--features "$FEATURES"}
+          else
+            cargo tauri build --bundles "$BUNDLES" ${FEATURES:+--features "$FEATURES"}
+          fi
+
+      # GPU 变体:给所有 installer(+ .sig)在最终扩展名前插入 -<variant>,避免与
+      # 基础 CPU 包在同一 Release 撞名;基础包(variant 空)跳过此步,名字不变。
+      - name: Tag GPU-variant bundles
+        if: matrix.variant != ''
+        shell: bash
+        working-directory: apps/attune-desktop
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euxo pipefail
+          find target/release/bundle -type f \
+            \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" -o -name "*.exe" \
+               -o -name "*.msi" -o -name "*.sig" \) | while read -r f; do
+            dir=$(dirname "$f"); base=$(basename "$f")
+            case "$base" in
+              *.AppImage.sig) new="${base%.AppImage.sig}-${VARIANT}.AppImage.sig" ;;
+              *.exe.sig)      new="${base%.exe.sig}-${VARIANT}.exe.sig" ;;
+              *.*)            ext="${base##*.}"; stem="${base%.*}"; new="${stem}-${VARIANT}.${ext}" ;;
+              *)              new="${base}-${VARIANT}" ;;
+            esac
+            mv "$f" "$dir/$new"
+          done
+          find target/release/bundle -type f
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: attune-desktop-${{ matrix.target }}
+          # 变体用独立 artifact 名 → latest-json / OCI 的 base-dir 装配不会误纳变体
+          name: attune-desktop-${{ matrix.target }}${{ matrix.variant != '' && format('-{0}', matrix.variant) || '' }}
           path: apps/attune-desktop/target/release/bundle/**/*
           retention-days: 30
 
@@ -97,6 +182,7 @@ jobs:
             apps/attune-desktop/target/release/bundle/msi/*.msi
             apps/attune-desktop/target/release/bundle/deb/*.deb
             apps/attune-desktop/target/release/bundle/appimage/*.AppImage
+            apps/attune-desktop/target/release/bundle/appimage/*.AppImage.tar.gz
             apps/attune-desktop/target/release/bundle/appimage/*.sig
             apps/attune-desktop/target/release/bundle/rpm/*.rpm
 
@@ -154,6 +240,7 @@ jobs:
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
           GITHUB_TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
+          ATTUNE_REQUIRE_UPDATER_PLATFORMS: windows-x86_64,linux-x86_64
         run: |
           ./scripts/gen-latest-json.sh "$VERSION" ./bundle > latest.json
           echo "--- latest.json ---"

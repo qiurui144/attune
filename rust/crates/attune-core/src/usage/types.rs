@@ -23,7 +23,7 @@ pub struct TokenUsage {
     /// Concrete model identifier (e.g. `"gemini-1.5-flash"`, `"qwen2.5:3b"`).
     pub model: String,
     /// Provider identifier — one of `ollama` / `openai` / `gemini` /
-    /// `cloud_gateway` / `k3_local` / `mock` / vendor-specific names.
+    /// `cloud_gateway` / `local_scheduler` / `mock` / vendor-specific names.
     pub provider: String,
 }
 
@@ -107,9 +107,9 @@ pub enum UsageKind {
     Embed,
     /// Cross-encoder reranking.
     Rerank,
-    /// OCR (PP-OCRv5, K3, etc.).
+    /// OCR (PP-OCRv5, RISC-V local-scheduler, etc.).
     Ocr,
-    /// ASR (whisper.cpp, K3).
+    /// ASR (whisper.cpp, RISC-V local-scheduler).
     Asr,
     /// Vision-language model (image caption / VQA).
     Vlm,

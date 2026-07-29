@@ -50,7 +50,7 @@ impl Plugin {
 // plugins/<vertical>-pro/builtin/dimensions.yaml。OSS attune 不再内置任何行业分类维度。
 //
 // 加载顺序：attune-server 启动 → load_builtin_plugins() 返回空 Vec
-// → 用户安装 vertical plugin pack (attune-pro/.attunepkg) 后从 plugin_registry 动态加载
+// → 用户安装 vertical plugin pack (attune-pro/.tar.gz) 后从 plugin_registry 动态加载
 // 详见 attune-pro/INTEGRATION.md §13 OSS 委托给 Pro 的 vertical-specific functionality。
 
 pub struct Taxonomy {
@@ -105,7 +105,7 @@ impl Taxonomy {
     }
 
     /// v0.6 OSS 瘦身：所有 id 都返 unknown（无 builtin 行业 plugin）。
-    /// 行业插件由 attune-pro/.attunepkg 安装后通过 PluginRegistry::scan 动态加载。
+    /// 行业插件由 attune-pro/.tar.gz 安装后通过 PluginRegistry::scan 动态加载。
     pub fn load_builtin_plugin(id: &str) -> Result<Plugin> {
         Err(VaultError::Taxonomy(format!(
             "no builtin plugin '{id}': install attune-pro vertical plugin pack instead"
@@ -134,7 +134,8 @@ impl Taxonomy {
             if ext != Some("yaml") && ext != Some("yml") {
                 continue;
             }
-            let filename = path.file_name()
+            let filename = path
+                .file_name()
                 .and_then(|f| f.to_str())
                 .unwrap_or("unknown")
                 .to_string();
@@ -157,7 +158,9 @@ impl Taxonomy {
     }
 
     pub fn build_system_prompt(&self) -> String {
-        let mut s = String::from("你是一个知识库自动分类助手。给定文本内容，输出严格的 JSON 分类结果。\n\n");
+        let mut s = String::from(
+            "你是一个知识库自动分类助手。给定文本内容，输出严格的 JSON 分类结果。\n\n",
+        );
         s.push_str("维度定义:\n\n");
 
         s.push_str("## 核心维度 (core):\n");
@@ -173,7 +176,10 @@ impl Taxonomy {
         if !self.plugins.is_empty() {
             s.push_str("\n## 插件维度 (plugin):\n");
             for p in &self.plugins {
-                s.push_str(&format!("\n### 插件 {} ({})\n{}\n", p.id, p.name, p.prompt_hint));
+                s.push_str(&format!(
+                    "\n### 插件 {} ({})\n{}\n",
+                    p.id, p.name, p.prompt_hint
+                ));
                 for d in &p.dimensions {
                     s.push_str(&format_dimension(d));
                 }
@@ -185,8 +191,14 @@ impl Taxonomy {
         s.push_str("  \"universal\": {\"difficulty\": \"...\", \"freshness\": \"...\", \"action_type\": \"...\"},\n");
         s.push_str("  \"plugin\": {");
         for (i, p) in self.plugins.iter().enumerate() {
-            if i > 0 { s.push_str(", "); }
-            let dims: Vec<String> = p.dimensions.iter().map(|d| format!("\"{}\": [...]", d.name)).collect();
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let dims: Vec<String> = p
+                .dimensions
+                .iter()
+                .map(|d| format!("\"{}\": [...]", d.name))
+                .collect();
             s.push_str(&format!("\"{}\": {{{}}}", p.id, dims.join(", ")));
         }
         s.push_str("}\n}\n\n");
@@ -198,12 +210,20 @@ impl Taxonomy {
         let mut s = format!("请分类以下 {} 条内容:\n\n", items.len());
         for (i, (title, content)) in items.iter().enumerate() {
             let truncated: String = content.chars().take(2000).collect();
-            s.push_str(&format!("[{}]\n标题: {}\n内容: {}\n\n", i + 1, title, truncated));
+            s.push_str(&format!(
+                "[{}]\n标题: {}\n内容: {}\n\n",
+                i + 1,
+                title,
+                truncated
+            ));
         }
         if items.len() == 1 {
             s.push_str("输出 JSON 对象（非数组）。\n");
         } else {
-            s.push_str(&format!("输出 JSON 数组，包含 {} 个对象，顺序对应。\n", items.len()));
+            s.push_str(&format!(
+                "输出 JSON 数组，包含 {} 个对象，顺序对应。\n",
+                items.len()
+            ));
         }
         s
     }
@@ -211,7 +231,10 @@ impl Taxonomy {
     pub fn validate(&self, result: &ClassificationResult) -> Result<()> {
         for d in &self.core {
             if !result.core.contains_key(&d.name) {
-                return Err(VaultError::Classification(format!("missing core dimension: {}", d.name)));
+                return Err(VaultError::Classification(format!(
+                    "missing core dimension: {}",
+                    d.name
+                )));
             }
             let values = &result.core[&d.name];
             self.check_cardinality(&d.cardinality, values.len(), &d.name)?;
@@ -219,31 +242,49 @@ impl Taxonomy {
         }
         for d in &self.universal {
             if !result.universal.contains_key(&d.name) {
-                return Err(VaultError::Classification(format!("missing universal dimension: {}", d.name)));
+                return Err(VaultError::Classification(format!(
+                    "missing universal dimension: {}",
+                    d.name
+                )));
             }
             let value = &result.universal[&d.name];
-            self.check_value_type(&d.value_type, &d.suggested_values, std::slice::from_ref(value), &d.name)?;
+            self.check_value_type(
+                &d.value_type,
+                &d.suggested_values,
+                std::slice::from_ref(value),
+                &d.name,
+            )?;
         }
         Ok(())
     }
 
     fn check_cardinality(&self, c: &Cardinality, count: usize, name: &str) -> Result<()> {
         match c {
-            Cardinality::Single if count != 1 => {
-                Err(VaultError::Classification(format!("dimension {name} expects single value, got {count}")))
-            }
+            Cardinality::Single if count != 1 => Err(VaultError::Classification(format!(
+                "dimension {name} expects single value, got {count}"
+            ))),
             Cardinality::Multi { max } if count > *max || count == 0 => {
-                Err(VaultError::Classification(format!("dimension {name} expects 1..={max} values, got {count}")))
+                Err(VaultError::Classification(format!(
+                    "dimension {name} expects 1..={max} values, got {count}"
+                )))
             }
             _ => Ok(()),
         }
     }
 
-    fn check_value_type(&self, vt: &ValueType, allowed: &[String], values: &[String], name: &str) -> Result<()> {
+    fn check_value_type(
+        &self,
+        vt: &ValueType,
+        allowed: &[String],
+        values: &[String],
+        name: &str,
+    ) -> Result<()> {
         if matches!(vt, ValueType::Closed) {
             for v in values {
                 if !allowed.iter().any(|a| a == v) {
-                    return Err(VaultError::Classification(format!("dimension {name} closed value {v} not in allowed set")));
+                    return Err(VaultError::Classification(format!(
+                        "dimension {name} closed value {v} not in allowed set"
+                    )));
                 }
             }
         }
@@ -259,9 +300,16 @@ impl Taxonomy {
                 cardinality: Cardinality::Single,
                 value_type: ValueType::Hybrid,
                 suggested_values: vec![
-                    "技术".into(), "商业".into(), "法律".into(), "医疗".into(),
-                    "金融".into(), "生活".into(), "学习".into(), "科研".into(),
-                    "艺术".into(), "政策".into(),
+                    "技术".into(),
+                    "商业".into(),
+                    "法律".into(),
+                    "医疗".into(),
+                    "金融".into(),
+                    "生活".into(),
+                    "学习".into(),
+                    "科研".into(),
+                    "艺术".into(),
+                    "政策".into(),
                 ],
             },
             Dimension {
@@ -279,8 +327,12 @@ impl Taxonomy {
                 cardinality: Cardinality::Single,
                 value_type: ValueType::Closed,
                 suggested_values: vec![
-                    "参考资料".into(), "个人笔记".into(), "待办草稿".into(),
-                    "问答记录".into(), "归档".into(), "灵感".into(),
+                    "参考资料".into(),
+                    "个人笔记".into(),
+                    "待办草稿".into(),
+                    "问答记录".into(),
+                    "归档".into(),
+                    "灵感".into(),
                 ],
             },
             Dimension {
@@ -310,9 +362,7 @@ impl Taxonomy {
                 description: "内容的专业深度".into(),
                 cardinality: Cardinality::Single,
                 value_type: ValueType::Closed,
-                suggested_values: vec![
-                    "入门".into(), "进阶".into(), "专家".into(), "N/A".into(),
-                ],
+                suggested_values: vec!["入门".into(), "进阶".into(), "专家".into(), "N/A".into()],
             },
             Dimension {
                 name: "freshness".into(),
@@ -320,9 +370,7 @@ impl Taxonomy {
                 description: "知识的保质期".into(),
                 cardinality: Cardinality::Single,
                 value_type: ValueType::Closed,
-                suggested_values: vec![
-                    "常青".into(), "时效性".into(), "已过期".into(),
-                ],
+                suggested_values: vec!["常青".into(), "时效性".into(), "已过期".into()],
             },
             Dimension {
                 name: "action_type".into(),
@@ -331,8 +379,11 @@ impl Taxonomy {
                 cardinality: Cardinality::Single,
                 value_type: ValueType::Closed,
                 suggested_values: vec![
-                    "待办".into(), "学习".into(), "参考".into(),
-                    "决策依据".into(), "纯归档".into(),
+                    "待办".into(),
+                    "学习".into(),
+                    "参考".into(),
+                    "决策依据".into(),
+                    "纯归档".into(),
                 ],
             },
         ]
@@ -349,7 +400,10 @@ fn format_dimension(d: &Dimension) -> String {
         Cardinality::Single => "单值".to_string(),
         Cardinality::Multi { max } => format!("最多 {} 值", max),
     };
-    format!("- {} ({}): {} / {} / {}\n", d.name, d.label, d.description, card, vt_desc)
+    format!(
+        "- {} ({}): {} / {} / {}\n",
+        d.name, d.label, d.description, card, vt_desc
+    )
 }
 
 #[cfg(test)]

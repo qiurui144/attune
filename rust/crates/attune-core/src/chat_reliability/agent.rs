@@ -274,11 +274,13 @@ pub fn confidence_from_signals(
     config: &ChatReliabilityConfig,
 ) -> f32 {
     let total_cites = citations.len() as f32;
-    let (weak, fabricated) = citations.iter().fold((0.0_f32, 0.0_f32), |acc, c| match c.status {
-        CitationStatus::Grounded => acc,
-        CitationStatus::WeakOverlap => (acc.0 + 1.0, acc.1),
-        CitationStatus::Fabricated => (acc.0, acc.1 + 1.0),
-    });
+    let (weak, fabricated) = citations
+        .iter()
+        .fold((0.0_f32, 0.0_f32), |acc, c| match c.status {
+            CitationStatus::Grounded => acc,
+            CitationStatus::WeakOverlap => (acc.0 + 1.0, acc.1),
+            CitationStatus::Fabricated => (acc.0, acc.1 + 1.0),
+        });
     let citation_penalty = if total_cites > 0.0 {
         ((weak + 2.0 * fabricated) / total_cites).min(1.0) * config.weight_citation
     } else {
@@ -379,12 +381,8 @@ fn find_contradictions(response: &str, chunks: &[RetrievedChunk]) -> Vec<Contrad
                 if c_ent.value == r_ent.value {
                     continue; // identical → not a contradiction
                 }
-                let c_context = context_window(
-                    &chunk.chunk_text,
-                    c_ent.byte_start,
-                    c_ent.byte_end,
-                    16,
-                );
+                let c_context =
+                    context_window(&chunk.chunk_text, c_ent.byte_start, c_ent.byte_end, 16);
                 if context_overlap(&r_context, &c_context) {
                     out.push(Contradiction {
                         kind: ContradictionKind::Date,
@@ -401,16 +399,15 @@ fn find_contradictions(response: &str, chunks: &[RetrievedChunk]) -> Vec<Contrad
         let r_context = context_window(response, r_ent.byte_start, r_ent.byte_end, 16);
         for chunk in chunks {
             let chunk_entities = extract_entities(&chunk.chunk_text);
-            for c_ent in chunk_entities.iter().filter(|e| e.kind == EntityKind::Money) {
+            for c_ent in chunk_entities
+                .iter()
+                .filter(|e| e.kind == EntityKind::Money)
+            {
                 if c_ent.value == r_ent.value {
                     continue;
                 }
-                let c_context = context_window(
-                    &chunk.chunk_text,
-                    c_ent.byte_start,
-                    c_ent.byte_end,
-                    16,
-                );
+                let c_context =
+                    context_window(&chunk.chunk_text, c_ent.byte_start, c_ent.byte_end, 16);
                 if context_overlap(&r_context, &c_context) {
                     out.push(Contradiction {
                         kind: ContradictionKind::Money,
@@ -682,7 +679,10 @@ mod tests {
         let chunks = vec![RetrievedChunk::new("real-id", "some text".to_string())];
         let report = evaluate_response(response, &chunks, "q", &cfg());
         assert_eq!(report.citation_grounded.len(), 1);
-        assert_eq!(report.citation_grounded[0].status, CitationStatus::Fabricated);
+        assert_eq!(
+            report.citation_grounded[0].status,
+            CitationStatus::Fabricated
+        );
         // 2 * fabricated / 1 = 2, min 1.0 → full weight_citation deducted
         let expected = 1.0 - cfg().weight_citation;
         assert!(
@@ -701,14 +701,8 @@ mod tests {
             又依据 [item:fake3]，金额 ¥88888，日期 2098-11-30，由 某虚构有限公司 出具。";
         let chunks = vec![
             // Chunk asserts a *different* money + date for the same context.
-            RetrievedChunk::new(
-                "real-1",
-                "依据原始记录，金额为 ¥10000，日期 2024-03-15。",
-            ),
-            RetrievedChunk::new(
-                "real-2",
-                "依据原始记录，金额 ¥20000，日期 2024-04-15。",
-            ),
+            RetrievedChunk::new("real-1", "依据原始记录，金额为 ¥10000，日期 2024-03-15。"),
+            RetrievedChunk::new("real-2", "依据原始记录，金额 ¥20000，日期 2024-04-15。"),
         ];
         let report = evaluate_response(response, &chunks, "q", &cfg());
         assert!(report.overall_confidence >= 0.0);
@@ -739,7 +733,10 @@ mod tests {
         let response = "答案见 [item:fake] 和 [item:fake] 和 [item:fake]。";
         let report = evaluate_response(response, &[], "q", &cfg());
         assert_eq!(report.citation_grounded.len(), 1);
-        assert_eq!(report.citation_grounded[0].status, CitationStatus::Fabricated);
+        assert_eq!(
+            report.citation_grounded[0].status,
+            CitationStatus::Fabricated
+        );
     }
 
     /// Boundary 7: hallucination de-dup — repeated token reported once.
@@ -761,10 +758,7 @@ mod tests {
     fn boundary_one_contradiction_half_weight_deduction() {
         // Single date contradiction at the same context window.
         let response = "事件发生于 2024-03-15 当时。";
-        let chunks = vec![RetrievedChunk::new(
-            "src",
-            "事件发生于 2025-06-01 当时。",
-        )];
+        let chunks = vec![RetrievedChunk::new("src", "事件发生于 2025-06-01 当时。")];
         let report = evaluate_response(response, &chunks, "q", &cfg());
         assert_eq!(report.contradictions.len(), 1);
         let expected = 1.0 - 0.5 * cfg().weight_contradiction;

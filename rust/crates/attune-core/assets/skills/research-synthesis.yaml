@@ -1,0 +1,48 @@
+# OSS 通用 skill: 多域知识综合 (用户例 1 + 2)
+# "多域知识检索 → 综合 → 结构化实操方案 / 评测框架"
+# (如: 算法靶点 + 中医结合方案; 全维度评测体系)
+#
+# 步骤: rag(取多域 KB 文档, 保留每源 item_id) → agent(综合 + judge-grounding 防编造)
+#        → render(成 Document IR, 未核实段落标记 [需核实]) → export(docx, 也可 pdf/md)
+# 💰 多步 LLM skill → 必须用户显式触发 (trigger.on=manual)。
+# OSS 通用版: 综合引擎零行业逻辑; 行业 agent 编排 (靶点/中医) 走 attune-pro。
+id: research-synthesis
+type: skill
+version: "1.0.0"
+title: 多域知识综合方案
+description: 跨多个知识来源检索并综合成结构化方案/框架文档，每条结论回溯来源（未核实段落标记），可下载 docx/pdf
+cost_tier: llm_multi_step
+trigger:
+  on: manual
+  scope: project
+inputs:
+  - { name: query, type: string, required: false }
+  - { name: item_ids, type: string_list, required: true }
+  - { name: structure, type: string, required: false }
+  - { name: title, type: string, required: false }
+steps:
+  - type: rag
+    id: load
+    input:
+      item_ids: ["${item_ids}"]
+    output: docs
+  - type: agent
+    id: synth
+    agent: writing.research_synthesis
+    input:
+      sources: "${docs}"
+      structure: "${structure}"
+    output: synthesis
+  - type: render
+    id: build
+    as_kind: document
+    input:
+      from: "${synthesis}"
+      title: "${title}"
+    output: artifact
+  - type: export
+    id: out
+    input:
+      artifact: "${artifact}"
+      format: docx
+    output: file

@@ -32,9 +32,7 @@
 
 use serde::Serialize;
 
-use attune_core::agents::flow::{
-    resolve_flow, run_flow, FlowResult, FlowSet, FlowStatus, Payload,
-};
+use attune_core::agents::flow::{resolve_flow, run_flow, FlowResult, FlowSet, FlowStatus, Payload};
 use attune_core::agents::flow_runner::{DeterministicDispatch, GovernedStepRunner};
 use attune_core::agents::registry::AgentRegistry;
 use attune_core::agents::scheduler::{Entitlement, Scheduler};
@@ -251,10 +249,9 @@ produces = "Y"
         // Mock LLM returns a JSON object the next step consumes as `Facts`.
         let provider = MockLlmProvider::new("qwen2.5:3b");
         provider.push_response(r#"{"victim":"A"}"#);
-        let mut dispatch =
-            |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
-                Ok(serde_json::json!({"award": 5000}))
-            };
+        let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
+            Ok(serde_json::json!({"award": 5000}))
+        };
         let out = run_chat_flow(
             "名誉权纠纷",
             &flows,
@@ -270,8 +267,61 @@ produces = "Y"
         assert_eq!(out.flow_id, "legal_defamation");
         assert_eq!(out.status, "complete");
         assert_eq!(out.steps.len(), 2);
-        assert!(out.steps.iter().all(|s| s.ran), "both steps must run: {out:?}");
+        assert!(
+            out.steps.iter().all(|s| s.ran),
+            "both steps must run: {out:?}"
+        );
         assert_eq!(out.final_type, "Award");
+    }
+
+    #[test]
+    fn cloud_flow_redacts_seed_before_the_wire() {
+        let reg = defamation_registry();
+        let flows = defamation_flow();
+        flows.validate_against(&reg).unwrap();
+
+        // A cloud provider returned by routes::privacy::governed_llm has this
+        // decorator. Assert the actual flow-runner payload seen by its inner
+        // (wire-facing) provider contains placeholders, never the raw PII from
+        // the seed passed to run_chat_flow.
+        let inner = Arc::new(MockLlmProvider::new("cloud-model"));
+        inner.push_response(r#"{"victim":"A"}"#);
+        let provider =
+            attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner.clone());
+        let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
+            Ok(serde_json::json!({"award": 5000}))
+        };
+
+        let out = run_chat_flow(
+            "名誉权纠纷，联系 13800138000 或 zhangsan@example.com",
+            &flows,
+            &reg,
+            &provider,
+            None,
+            None,
+            Entitlement::paid_with_quota(1000),
+            &HashSet::new(),
+            &mut dispatch,
+        )
+        .expect("declared flow must run");
+        assert_eq!(out.status, "complete");
+
+        let sent = inner
+            .call_log()
+            .into_iter()
+            .flatten()
+            .map(|message| message.content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!sent.contains("13800138000"), "phone reached wire: {sent}");
+        assert!(
+            !sent.contains("zhangsan@example.com"),
+            "email reached wire: {sent}"
+        );
+        assert!(
+            sent.contains("PHONE_") || sent.contains("EMAIL_"),
+            "redaction placeholder missing from wire payload: {sent}"
+        );
     }
 
     // ①-telemetry: a usage aggregator records the LLM extractor step.
@@ -283,10 +333,9 @@ produces = "Y"
         provider.push_response(r#"{"victim":"A"}"#);
         let store = Arc::new(Mutex::new(Store::open_memory().expect("memory store")));
         let usage = UsageAggregator::new(store, 50, 1000);
-        let mut dispatch =
-            |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
-                Ok(serde_json::json!({"award": 5000}))
-            };
+        let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
+            Ok(serde_json::json!({"award": 5000}))
+        };
         let out = run_chat_flow(
             "名誉权纠纷",
             &flows,
@@ -302,7 +351,9 @@ produces = "Y"
         assert_eq!(out.status, "complete");
         let events = usage.recent(16);
         assert!(
-            events.iter().any(|e| e.agent_id.as_deref() == Some("extractor")),
+            events
+                .iter()
+                .any(|e| e.agent_id.as_deref() == Some("extractor")),
             "extractor LLM call must record telemetry; got {events:?}"
         );
     }
@@ -327,7 +378,10 @@ produces = "Y"
             &HashSet::new(),
             &mut dispatch,
         );
-        assert!(out.is_none(), "single-agent intent must fall back to free-form chat");
+        assert!(
+            out.is_none(),
+            "single-agent intent must fall back to free-form chat"
+        );
     }
 
     // ② No regression: a non-matching message returns None (free-form chat path).
@@ -360,10 +414,9 @@ produces = "Y"
         let reg = defamation_registry();
         let flows = defamation_flow();
         let provider = MockLlmProvider::new("qwen2.5:3b");
-        let mut dispatch =
-            |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
-                Ok(serde_json::json!({"award": 5000}))
-            };
+        let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
+            Ok(serde_json::json!({"award": 5000}))
+        };
         // Free user: paid extractor (tier=paid) is blocked by entitlement.
         let out = run_chat_flow(
             "名誉权纠纷",
@@ -378,9 +431,14 @@ produces = "Y"
         )
         .expect("flow resolves even if a step blocks");
         // The blocked non-optional first step degrades the flow (not silent).
-        assert_ne!(out.status, "complete", "a blocked paid step must not complete silently");
+        assert_ne!(
+            out.status, "complete",
+            "a blocked paid step must not complete silently"
+        );
         assert!(
-            out.steps.iter().any(|s| !s.ran && s.note.to_lowercase().contains("paid")),
+            out.steps
+                .iter()
+                .any(|s| !s.ran && s.note.to_lowercase().contains("paid")),
             "the block reason must be recorded in the trace: {out:?}"
         );
     }
@@ -394,10 +452,9 @@ produces = "Y"
         let flows = defamation_flow();
         let provider = MockLlmProvider::new("qwen2.5:3b");
         provider.push_response(r#"{"victim":"A"}"#);
-        let mut dispatch =
-            |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
-                Err("no agent binary in OSS install".to_string())
-            };
+        let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec, _i: &Payload| {
+            Err("no agent binary in OSS install".to_string())
+        };
         let out = run_chat_flow(
             "名誉权纠纷",
             &flows,

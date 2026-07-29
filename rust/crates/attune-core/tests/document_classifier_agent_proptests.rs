@@ -13,8 +13,10 @@ use attune_core::agents::document_classifier::{run, DocumentInput};
 use proptest::prelude::*;
 
 fn arb_text() -> impl Strategy<Value = String> {
-    proptest::string::string_regex("[a-zA-Z0-9 借条买卖合同流水微信收据判决书出借人借款人本金月利率\u{4e00}-\u{9fff}]{0,200}")
-        .unwrap()
+    proptest::string::string_regex(
+        "[a-zA-Z0-9 借条买卖合同流水微信收据判决书出借人借款人本金月利率\u{4e00}-\u{9fff}]{0,200}",
+    )
+    .unwrap()
 }
 
 fn arb_file() -> impl Strategy<Value = String> {

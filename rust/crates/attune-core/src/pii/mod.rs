@@ -4,7 +4,7 @@
 //!
 //! - **L1 正则 + 词典**：OSS 免费层，所有 tier 必跑（本模块）
 //! - **L2 ONNX NER**：OSS 免费层，Tier T1+ 可下载（见 `pii::ner`，待实现）
-//! - **L3 LLM 脱敏**：高端硬件 (T3+T4+K3) 增值层（见 `pii::llm`，v0.7+）
+//! - **L3 LLM 脱敏**：高端硬件 (T3+T4+local-scheduler) 增值层（见 `pii::llm`，v0.7+）
 //!
 //! ## 核心承诺
 //!
@@ -17,9 +17,9 @@
 //! - `entities`: 通用语义实体（Person / Money / Date / Org），用于 Project 推荐归类
 //! - `pii`: 敏感字段闭合清单，用于出网前脱敏（输出可逆 placeholder）
 
-pub mod patterns;
 pub mod dictionary;
 pub mod ner;
+pub mod patterns;
 
 // ── F-17 LLM call wrapper helpers ──────────────────────────────────────────
 //
@@ -70,6 +70,122 @@ pub fn llm_chat_redacted(
 
     let (raw, _usage) = llm.chat(&redacted[0], &redacted[1])?;
     Ok(redactor.restore(&raw, &mappings))
+}
+
+/// Hardened variant of [`llm_chat_redacted`] — same PII redact/restore wrapping,
+/// but routes the LLM call through the §4.5 robustness primitives so weak models
+/// (qwen2.5:3b, gemini-flash, …) degrade meaningfully instead of returning garbage
+/// (the defamation_extractor mock-0.99 / real-0.09 trap class):
+///
+/// 1. **Few-shot** — `examples` ([(user, assistant)]) are prepended as prior turns
+///    (small models follow the pattern; large models are unaffected).
+/// 2. **Schema-guided JSON** — `schema` forces `format=json` / `response_format`
+///    at the backend (Ollama / OpenAI override the trait default).
+/// 3. **Retry-with-validation** — each attempt is checked by `validator`; on
+///    failure the error is fed back to the LLM and it retries (≤ `max_attempts`).
+///
+/// PII is redacted across [system, user, all example pairs] with globally unique
+/// placeholders before any token leaves the process, and restored on the final
+/// raw output. Returns the *restored* raw string; the caller deserializes.
+///
+/// Used by `ai_annotator::generate_annotations`.
+#[allow(clippy::too_many_arguments)]
+pub fn llm_chat_redacted_hardened(
+    llm: &dyn crate::llm::LlmProvider,
+    redactor: &Redactor,
+    system: &str,
+    user: &str,
+    examples: &[(String, String)],
+    schema: Option<&serde_json::Value>,
+    max_attempts: usize,
+    validator: &dyn Fn(&str) -> std::result::Result<(), String>,
+    call_site: &str,
+) -> crate::error::Result<String> {
+    use crate::llm::ChatMessage;
+
+    // Redact every outbound string in one batch so identical PII shares one
+    // placeholder across system / user / few-shot examples (semantic consistency).
+    let mut batch: Vec<&str> = Vec::with_capacity(2 + examples.len() * 2);
+    batch.push(system);
+    batch.push(user);
+    for (u_ex, a_ex) in examples {
+        batch.push(u_ex);
+        batch.push(a_ex);
+    }
+    let (redacted, mappings) = redactor.redact_batch(&batch);
+
+    if !mappings.is_empty() {
+        let mut by_kind: HashMap<String, usize> = HashMap::new();
+        for m in &mappings {
+            let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+            *by_kind.entry(prefix).or_insert(0) += 1;
+        }
+        log::info!(
+            target: "outbound_audit",
+            "F-17: PII redacted in {} outbound — kinds={:?} total={} model={}",
+            call_site,
+            by_kind,
+            mappings.len(),
+            llm.model_name()
+        );
+    }
+
+    let red_system = &redacted[0];
+    let red_user = &redacted[1];
+
+    // Build the few-shot prefix once: [system, ex1.user, ex1.assistant, ...].
+    // schema-guided + retry are layered on top of this conversation.
+    let mut base_messages: Vec<ChatMessage> = Vec::with_capacity(1 + examples.len() * 2);
+    base_messages.push(ChatMessage::system(red_system));
+    for i in 0..examples.len() {
+        base_messages.push(ChatMessage::user(&redacted[2 + i * 2]));
+        base_messages.push(ChatMessage::assistant(&redacted[2 + i * 2 + 1]));
+    }
+
+    if max_attempts == 0 {
+        return Err(crate::error::VaultError::Classification(
+            "llm_chat_redacted_hardened: max_attempts must be >= 1".into(),
+        ));
+    }
+
+    let mut messages = base_messages;
+    messages.push(ChatMessage::user(red_user));
+    let mut last_err = String::new();
+    let mut last_raw = String::new();
+    let has_history = !examples.is_empty();
+
+    for attempt in 1..=max_attempts {
+        // Attempt 1 with no few-shot history → single schema-guided call so the
+        // Ollama/OpenAI native JSON-mode path constrains output at the backend.
+        // Few-shot / retry attempts reuse the full conversation (incl. the prior
+        // bad output + the validator error) via chat_with_history.
+        let (raw, _usage) = if attempt == 1 && !has_history {
+            llm.chat_with_format_json(red_system, red_user, schema)?
+        } else {
+            llm.chat_with_history(&messages)?
+        };
+        last_raw = raw.clone();
+
+        match validator(&raw) {
+            Ok(()) => return Ok(redactor.restore(&raw, &mappings)),
+            Err(e) => {
+                last_err = e.clone();
+                if attempt < max_attempts {
+                    messages.push(ChatMessage::assistant(&raw));
+                    messages.push(ChatMessage::user(&format!(
+                        "你上一次的输出无法通过校验: {e}\n请根据错误信息重新输出有效 JSON, 不要重复上次的错误, 不要包裹 markdown 代码块."
+                    )));
+                }
+            }
+        }
+    }
+
+    // All attempts failed validation. Restore + return the last raw output so the
+    // caller's salvage parser still gets a chance (graceful degradation, not Err).
+    log::warn!(
+        "{call_site}: LLM output failed validation after {max_attempts} attempts: {last_err}"
+    );
+    Ok(redactor.restore(&last_raw, &mappings))
 }
 
 use serde::{Deserialize, Serialize};
@@ -203,7 +319,8 @@ impl Redactor {
     /// 便利方法：注册一个由 (name, regex) 描述的 PII 模式。
     /// vertical plugin 提供的行业 PII 用这条路径（PluginRegistry::all_pii_patterns 聚合后批量注入）。
     pub fn add_pattern(&mut self, name: &str, regex: &str) -> std::io::Result<()> {
-        self.user_dict.push(dictionary::DictEntry::from_regex(name, regex)?);
+        self.user_dict
+            .push(dictionary::DictEntry::from_regex(name, regex)?);
         Ok(())
     }
 
@@ -270,11 +387,8 @@ impl Redactor {
             .join(SEP);
 
         let result = self.redact(&joined);
-        let redacted_segments: Vec<String> = result
-            .redacted_text
-            .split(SEP)
-            .map(String::from)
-            .collect();
+        let redacted_segments: Vec<String> =
+            result.redacted_text.split(SEP).map(String::from).collect();
 
         // mappings 中的 byte_start/byte_end 是相对 joined 字符串的，对调用方来说
         // 通常只用于 restore（按 placeholder 字面量替换，不依赖 offset），所以
@@ -308,16 +422,51 @@ impl Redactor {
         // 内置 patterns（顺序：长 → 短，减少 overlap 时短的吞掉长的）
         push_matches(&mut raw, PiiKind::Url, patterns::detect_url(text), text);
         push_matches(&mut raw, PiiKind::Email, patterns::detect_email(text), text);
-        push_matches(&mut raw, PiiKind::IdCard, patterns::detect_id_card(text), text);
-        push_matches(&mut raw, PiiKind::CreditCard, patterns::detect_credit_card(text), text);
-        push_matches(&mut raw, PiiKind::BankCard, patterns::detect_bank_card(text), text);
-        push_matches(&mut raw, PiiKind::ApiKey, patterns::detect_api_key(text), text);
+        push_matches(
+            &mut raw,
+            PiiKind::IdCard,
+            patterns::detect_id_card(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::CreditCard,
+            patterns::detect_credit_card(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::BankCard,
+            patterns::detect_bank_card(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::ApiKey,
+            patterns::detect_api_key(text),
+            text,
+        );
         push_matches(&mut raw, PiiKind::Ipv6, patterns::detect_ipv6(text), text);
         push_matches(&mut raw, PiiKind::Ipv4, patterns::detect_ipv4(text), text);
         push_matches(&mut raw, PiiKind::Phone, patterns::detect_phone(text), text);
-        push_matches(&mut raw, PiiKind::PlateNumber, patterns::detect_plate_number(text), text);
-        push_matches(&mut raw, PiiKind::MacAddress, patterns::detect_mac(text), text);
-        push_matches(&mut raw, PiiKind::Coordinate, patterns::detect_gps(text), text);
+        push_matches(
+            &mut raw,
+            PiiKind::PlateNumber,
+            patterns::detect_plate_number(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::MacAddress,
+            patterns::detect_mac(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::Coordinate,
+            patterns::detect_gps(text),
+            text,
+        );
 
         // 用户词典
         for entry in &self.user_dict {
@@ -694,20 +843,35 @@ mod tests {
         // 模拟 LLM 把所有 placeholder 都 echo 回来
         let llm_response = format!(
             "User reports {} and {}. Earlier said {}. Key={}",
-            redacted[0].split_whitespace().nth(1).unwrap_or(""),  // [PHONE_1]
-            redacted[0].split_whitespace().last().unwrap_or(""),   // [EMAIL_1]
-            redacted[1].split_whitespace().last().unwrap_or(""),   // [PHONE_2]
-            redacted[2].split_whitespace().last().unwrap_or(""),   // [APIKEY_1]
+            redacted[0].split_whitespace().nth(1).unwrap_or(""), // [PHONE_1]
+            redacted[0].split_whitespace().last().unwrap_or(""), // [EMAIL_1]
+            redacted[1].split_whitespace().last().unwrap_or(""), // [PHONE_2]
+            redacted[2].split_whitespace().last().unwrap_or(""), // [APIKEY_1]
         );
 
         let restored = r.restore(&llm_response, &mappings);
 
         // 所有原始 PII 都应该在 restored 中
-        assert!(restored.contains("13812345678"), "user phone restored: {}", restored);
-        assert!(restored.contains("alice@example.com"), "user email restored: {}", restored);
-        assert!(restored.contains("13987654321"), "history phone restored: {}", restored);
-        assert!(restored.contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
-            "api_key restored: {}", restored);
+        assert!(
+            restored.contains("13812345678"),
+            "user phone restored: {}",
+            restored
+        );
+        assert!(
+            restored.contains("alice@example.com"),
+            "user email restored: {}",
+            restored
+        );
+        assert!(
+            restored.contains("13987654321"),
+            "history phone restored: {}",
+            restored
+        );
+        assert!(
+            restored.contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
+            "api_key restored: {}",
+            restored
+        );
     }
 
     // ── R14 v0.6.4 fuzz-style robustness for Redactor::redact ──────────────
@@ -719,26 +883,29 @@ mod tests {
         // 层有 panic 风险 (utf-8 boundary / overlap dedupe / placeholder collision).
         let r = make_redactor();
         let cases: Vec<String> = vec![
-            "".to_string(),                                    // empty
-            "a".repeat(100_000),                               // 100KB plain
-            "a".repeat(1_000_000),                             // 1MB plain (regex linear time check)
-            "@".repeat(10_000),                                // pathological email-like
-            "1".repeat(50_000),                                // 50K digits (id card / phone / bank / credit prefixes)
-            "https://".to_string() + &"a".repeat(50_000),      // long URL
-            "中".repeat(10_000),                               // 10K cn chars
-            "🌿".repeat(5_000),                                  // 5K emoji
+            "".to_string(),                                     // empty
+            "a".repeat(100_000),                                // 100KB plain
+            "a".repeat(1_000_000), // 1MB plain (regex linear time check)
+            "@".repeat(10_000),    // pathological email-like
+            "1".repeat(50_000),    // 50K digits (id card / phone / bank / credit prefixes)
+            "https://".to_string() + &"a".repeat(50_000), // long URL
+            "中".repeat(10_000),   // 10K cn chars
+            "🌿".repeat(5_000),    // 5K emoji
             (0u8..=255).map(|b| b as char).collect::<String>(), // every byte as char
-            "13800138000\n".repeat(10_000),                    // 10K phone numbers
-            "tel://13800138000 ".repeat(1_000),                // mixed real PII
+            "13800138000\n".repeat(10_000), // 10K phone numbers
+            "tel://13800138000 ".repeat(1_000), // mixed real PII
         ];
         for (i, input) in cases.iter().enumerate() {
-            let _result = r.redact(input);  // must not panic
-            // restore must also be panic-safe even with empty mappings
+            let _result = r.redact(input); // must not panic
+                                           // restore must also be panic-safe even with empty mappings
             let _restored = r.restore(input, &[]);
             // round-trip on text WITHOUT PII: redacted_text == original
             let r2 = r.redact(input);
             if r2.mappings.is_empty() {
-                assert_eq!(r2.redacted_text, *input, "case {i}: PII-free input should pass through");
+                assert_eq!(
+                    r2.redacted_text, *input,
+                    "case {i}: PII-free input should pass through"
+                );
             }
         }
     }
@@ -758,7 +925,9 @@ mod tests {
             let restored = r.restore(&result.redacted_text, &result.mappings);
             // 不变量: restore 后所有 placeholder 都被还原
             assert!(
-                !restored.contains("[PHONE_") && !restored.contains("[EMAIL_") && !restored.contains("[URL_"),
+                !restored.contains("[PHONE_")
+                    && !restored.contains("[EMAIL_")
+                    && !restored.contains("[URL_"),
                 "restore should remove all placeholders, got: {}",
                 restored
             );
@@ -769,9 +938,9 @@ mod tests {
     fn redact_invalid_utf8_boundary_safe() {
         // 字节级正则可能落在 multi-byte char 中间. Redactor 必须 char-boundary safe.
         let cases = vec![
-            "前缀 13800138000 中文",                  // CJK bordering ASCII
-            "🌿邮箱alice@example.com🌿",              // emoji + email
-            "测试①13800138000测试②13987654321测试",   // CJK + numbered + phone
+            "前缀 13800138000 中文",                // CJK bordering ASCII
+            "🌿邮箱alice@example.com🌿",            // emoji + email
+            "测试①13800138000测试②13987654321测试", // CJK + numbered + phone
         ];
         let r = make_redactor();
         for input in cases {
@@ -780,7 +949,10 @@ mod tests {
             let restored = r.restore(&result.redacted_text, &result.mappings);
             assert!(restored.is_char_boundary(0));
             assert!(restored.is_char_boundary(restored.len()));
-            assert!(std::str::from_utf8(restored.as_bytes()).is_ok(), "valid UTF-8");
+            assert!(
+                std::str::from_utf8(restored.as_bytes()).is_ok(),
+                "valid UTF-8"
+            );
         }
     }
 

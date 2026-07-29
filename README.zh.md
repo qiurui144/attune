@@ -12,28 +12,16 @@ Attune 是面向**任何领域个人知识工作者**的通用 AI 知识库 — 
 
 ## 📥 下载安装包
 
-最新正式版：**server v0.6.1** · **desktop v0.6.0**
-最新预发版：**v0.6.3-rc.1**（仅 server tarball；desktop 安装包待 NSIS 修复后发版）
+最新正式版：**server v1.2.0** · **desktop v1.2.0**（2026-06-01：GitConnector + WASM 跨平台 agent 分发 + 一键依赖部署），建立在 **v1.1.0（Agent Control Plane / ACP）** 与 **v1.0 GA** 之上。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md)（版本 SSOT）。
 
-### 桌面应用（含 Web UI + 系统托盘） — [desktop-v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0)
+去 [Releases 页面](https://github.com/qiurui144/attune/releases) 取二进制 — 选最新的 `vX.Y.Z`（server/CLI tarball）与 `desktop-vX.Y.Z`（Tauri 安装器）tag。每个归档随附 SHA256 校验文件。
 
-| 平台 | 文件 | 大小 | 说明 |
-|------|------|------|------|
-| Windows | [`Attune_0.6.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_x64-setup.exe) | 16 MB | NSIS 安装器（推荐）|
-| Windows | [`Attune_0.6.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_x64_en-US.msi) | 31 MB | MSI 企业部署 |
-| Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
-| Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.AppImage) | 94 MB | 通用 Linux |
+| 形态 | tag 前缀 | 产物 |
+|------|---------|------|
+| **桌面应用**（含 Web UI + 系统托盘） | `desktop-vX.Y.Z` | Windows NSIS `.exe` / MSI · Linux `.deb` / `.rpm` / `.AppImage` |
+| **Server / CLI**（headless / NAS / 服务器） | `vX.Y.Z` | `attune-linux-x86_64.tar.gz` · `attune-linux-aarch64.tar.gz` · `attune-macos-aarch64.tar.gz` · `attune-windows-x86_64.zip` |
 
-### Server / CLI 二进制（headless / NAS / 服务器） — [v0.6.1 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.1)
-
-| 平台 | 文件 |
-|------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-x86_64.tar.gz) |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-aarch64.tar.gz) |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-macos-aarch64.tar.gz) |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-windows-x86_64.zip) |
-
-> macOS Intel 走源码编译: `cargo build --release` (Apple Silicon Mac 已覆盖现代用户)。SHA256 校验文件随每个归档发布。
+> macOS Intel 走源码编译: `cargo build --release`（Apple Silicon Mac 已覆盖现代用户）。
 
 ### 系统包管理器（v1.0+ 推荐）
 
@@ -53,42 +41,31 @@ sudo curl -fsSL -o /etc/yum.repos.d/attune.repo https://qiurui144.github.io/attu
 sudo dnf install attune
 ```
 
-桌面应用还内置 **Tauri auto-updater** — 装上一次后,新版本会在应用内静默提示,点 "立即更新" 即可下载升级.完整安装 + 排障指南: [`docs/install-package-managers.md`](docs/install-package-managers.md).
+桌面应用还内置 **Tauri auto-updater** — 装上一次后,新版本会在应用内静默提示,点 "立即更新" 即可下载升级.完整安装 + 排障指南: [`docs/INSTALL.md`](docs/INSTALL.md).
 
-## v0.6.0-rc.5 亮点（2026-04-28）
+## v1.0 GA 以来的更新（当前：v1.2.0）
 
-🎯 **三赛道 PRO 级 benchmark** — 法律 + 通用英文 + 中文八股双赛道端到端验证：
+v1.0→v1.2 在 GA 核心之上叠加生产级治理与跨平台能力。完整发布说明见 [`rust/RELEASE.md`](rust/RELEASE.md)；各能力 × 模块 × 技术栈映射见 [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型)。
 
-| 场景 | Hit@10 | MRR | 评级 |
-|------|--------|-----|------|
-| 法律 / legal corpus | **0.80** | 0.50 | ✅ PRO |
-| Rust / rust-book | **1.00** | **1.00** | ✅ PRO 满分 |
-| 中文八股 / cs-notes | **1.00** | **1.00** | ✅ PRO 满分 |
-| **答案 5 维度 (legal golden_qa)** | **25.00/25** (100%) | 10/10 excellent | ✅ vs baseline +39% |
+- **Agent Control Plane（ACP，v1.1.0）** — 中央 agent 注册表 + typed handoff，声明式 DAG flow 执行器，每 `agent×model` 失败 telemetry，cost-aware 调度器，workspace 级质量门（阈值只升不降）。把整个 agent 生态当一个工程组织治理。
+- **跨平台 agent 分发（WASM，v1.2.0）** — 确定性 agent/skill 可编到 `wasm32-wasip1`，由内嵌 `wasmtime` 执行；一个签名 `.tar.gz` 插件包含一份 `.wasm` 即在 Windows / Linux / riscv64 全平台运行。WASM-safe 的 `attune-agent-sdk` leaf crate 让 `Agent` trait 零 native 依赖。
+- **GitConnector（v1.2.0）** — 直接从 Git 仓库导入知识库（GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht 的 HTTPS）：clone → glob 过滤 → 入库 → 跟随上游 commit。本地完成、导入路径零 LLM 调用，带 SSRF 防护。
+- **隐私出网门 OutboundGate + `PrivacyTier::L0`「永不出网」** — 每个网络 egress（LLM / Cloud / WebDAV / Web Search / Telemetry）统一经一处 gate 裁决 settings + PII 脱敏；标 L0 的内容拒绝任何云端 LLM 调用。
+- **Cloud/BYOK + edge scheduler 配置** — 首启向导配置云端/OpenAI-compatible endpoint 或 edge scheduler；安装包不再安装或管理具体本地 AI worker。
 
-🔒 **Phase A.5 三层隐私模型**：
-- **L0 🔒**：文件级标记，chunk 永不出网（强制本地 LLM）
-- **L1 默认**：12 类格式化 PII（身份证 ISO 7064 / 手机 / 邮箱 / 8 家 API key 等）+ 可逆 `[KIND_N]` placeholder + 出网审计 + CSV 导出（合规审查可用）
-- **L3**（v0.7）：LLM 语义脱敏，Tier T3+/K3 硬件自动启用
-
-🌐 **F-Pro 跨域污染防御**：
-- `items.corpus_domain` 字段 + `[领域: legal]` chunk 前缀 + 跨域 penalty (0.4) + 关键词 query intent 检测（零 LLM 调用）
-- 共享 vault 也能"逻辑分域" — 中文法律 query 不再拉出 Java 算法内容
-
-📋 **证据流端到端**：chat citation 现在含真实 `breadcrumb`（章节路径）+ `chunk_offset_start/end`（Reader 跳转锚点）+ `confidence`（1-5，从 LLM 严格 prompt 解析）。
-
-复现命令：`bash scripts/bench-orchestrator.sh all && python3 scripts/run-final-eval.py`。完整 benchmark 方法论见 [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md)，发布说明见 [`docs/v0.6-release-notes.zh.md`](docs/v0.6-release-notes.zh.md)。
+> **v1.0 GA（2026-05-25）** 交付了 Office Helper（OCR 场景 + 卡证校验位 + whisper.cpp 转写）、4 个 OSS 确定性/启发式 agent、真 LLM 验证门，以及 Agent 验证铁律 6 类下限。逐版本发布说明（含 v0.7 记忆护城河、v0.6 RAG 质量 benchmark）见 [`rust/RELEASE.md`](rust/RELEASE.md)（版本 SSOT）；benchmark 方法论见 [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md)。
 
 ---
 
-## 双产品线
+## 仓库结构
 
-本仓库包含两条并行的产品线：
+本仓库为 Rust-first；当前运行时代码在 Rust workspace 与浏览器/桌面前端中维护。
 
-- **Python 原型线**（`python/src/attune_python/`）— 快速验证算法与实验特性。基于 FastAPI + ChromaDB + SQLite FTS5
-- **Rust 商用线**（`rust/`）— 面向**任何领域个人知识工作者**的通用 AI 知识库：主动进化、对话式、混合智能、本地加密。详见 [`rust/README.md`](rust/README.md)
+- **Rust 生产线**（`rust/`）— 面向**任何领域个人知识工作者**的通用 AI 知识库：主动进化、对话式、混合智能、本地加密。详见 [`rust/README.md`](rust/README.md)
+- **Chrome 扩展**（`extension/`）— 浏览器采集与侧栏入口，对接 Rust HTTP API。
+- **桌面壳**（`apps/attune-desktop/`）— Tauri 桌面封装。
 
-Chrome 扩展协议相同，两个后端可任意切换。
+Chrome 扩展和桌面端统一对接 Rust 后端。
 
 ---
 
@@ -99,7 +76,7 @@ Chrome 扩展协议相同，两个后端可任意切换。
 | 产品 | License | 形态 | 用户群 |
 |------|---------|------|--------|
 | **`attune`**（本仓） | Apache-2.0 | Tauri 桌面 / Chrome 扩展 | **个人通用用户** — 通用 RAG / 加密 vault / 浏览捕获 / MCP outlet |
-| **`attune-pro`**（私有） | Proprietary | Plugin packs (.attunepkg signed) 装载到 attune | **个人行业用户** — 律师 / 售前 / 专利 / 技术 / 医疗 / 学术 纵向 packs |
+| **`attune-pro`**（私有） | Proprietary | 签名 `.tar.gz` plugin packs 装载到 attune | **个人行业用户** — 律师 / 售前 / 专利 / 技术 / 医疗 / 学术 纵向 packs |
 | **`attune-enterprise`**（独立产品） | Proprietary | Django + Vue B2B SaaS | **律所小团队** — 多租户 RBAC + 案件分配 + 多人协作 |
 
 **等式**：
@@ -107,7 +84,7 @@ Chrome 扩展协议相同，两个后端可任意切换。
 - 个人行业用户 = `attune (OSS)` + `attune-pro/<vertical>-pro` plugin pack
 - 行业小团队 = `attune-enterprise`
 
-三者技术上独立运行（无跨产品运行时依赖），战略上配套（同团队不同用户群）。完整战略 + 准入规则见 [`docs/oss-pro-strategy.zh.md`](docs/oss-pro-strategy.zh.md)（双语）。
+三者技术上独立运行（无跨产品运行时依赖），战略上配套（同团队不同用户群）。完整战略 + 准入规则见 [`docs/oss-pro-strategy.md`](docs/oss-pro-strategy.md)（双语）。
 
 > **2026-04 更新**：Rust 线新增 6 大能力 — 用户批注 + AI 批注（4 角度分析）、
 > 上下文压缩流水线（摘要缓存 70-85% token 节省）、批注加权 RAG、Token Chip 成本透明、
@@ -160,21 +137,23 @@ RAG Chat 是主界面。每个回答都带可点的 citation chip 在侧栏打�
 
 ## 功能
 
-- **自动捕获** — MutationObserver 监听 ChatGPT / Claude / Gemini 对话，user+assistant 配对后自动入库
-- **无感注入** — 发送提问时自动搜索知识库，将相关知识按类型（笔记 / 历史对话 / 网页）以前缀拼接；动态预算 2000 字，按相关性分配
-- **层级语义分块** — 两层粒度（章节 ~1500 字 / 段落块 512 字），两阶段层级检索（章节召回 → 段落精排 → 父章节上下文），语义完整性显著优于固定截断
-- **文件直传** — Side Panel 拖拽上传 PDF / DOCX / MD / TXT / 代码，后端自动解析入库，会话内上传文件优先检索
-- **混合搜索** — 向量语义搜索（ChromaDB）+ FTS5 全文搜索（jieba 分词），RRF 融合排序
-- **本地目录索引** — 绑定文件夹，watchdog 实时监听变更，自动解析 MD / TXT / 代码 / PDF / DOCX
-- **多后端 Embedding** — Ollama HTTP API（推荐）/ ONNX Runtime / OpenVINO（Intel NPU/iGPU）
-- **芯片级检测** — 自动识别 Intel Meteor/Lunar/Arrow Lake、AMD Phoenix/Hawk/Strix Point，精确匹配驱动
-- **知识管理 UI** — Side Panel（搜索 / 时间线 / 文件 / 状态）+ Popup 快速操作 + Options 设置
-- **系统托盘** — pystray 系统托盘常驻，uvicorn 后台线程，双击图标自动启动
-- **跨平台** — Linux + Windows，AppImage / EXE 一键安装
+> 各能力 × 实现模块 × 技术栈选型的完整映射见 [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型)（不在此重复版本号 / 模块清单）。
+
+- **首次运行向导** — 欢迎 · 主密码 · LLM 后端（cloud/BYOK / edge scheduler / demo）· 硬件与 scheduler 检测 · 首次绑定数据
+- **内置 Chat + RAG** — citation chip 引用 · session 历史 · Token Chip 成本估算（本地免费 / 云端 $ 实时）
+- **混合搜索** — usearch HNSW 向量 + tantivy BM25（jieba 中文分词 + LowerCaser/Stemmer 多语言）+ RRF 融合；本地未命中时浏览器自动化网搜（驱动系统 Chrome，零 API 费）
+- **多层记忆** — L0 原始 chunk / L1 摘要 / L2 情景 / L3 语义，tier-aware 上下文装配按最省 tier 答题
+- **Reader + 批注** — 全文阅读 + 用户批注（5 标签 × 4 色）+ AI 4 视角分析，批注影响 RAG 权重
+- **采集来源** — 本地文件夹 · WebDAV · Email IMAP · RSS/Atom · GitConnector（Git 仓库导入）
+- **Office Helper** — 结构化 OCR（document/receipt/table/card/id_card 等场景 + GB/Luhn 校验位）+ whisper.cpp 异步会议转写
+- **Agent / Skill / Workflow** — ACP agent 治理 + WASM 跨平台分发 + SkillClaw 风格自进化 + workflow DAG
+- **隐私优先** — 加密 vault（Argon2id + AES-256-GCM + Device Secret）+ OutboundGate 出网门 + L0 永不出网 + PII 脱敏 + DSAR/审计
+- **插件架构** — Ed25519 签名 YAML 插件（社区 + 商业双轨）+ 插件市场 + MCP 接入
+- **跨平台单二进制** — Linux + Windows（macOS 未来）；NAS 模式（rustls TLS + Bearer auth）；嵌入式 Preact Web UI
 
 ## 快速开始
 
-### 5 步上手（Rust 商用线，推荐）
+### 5 步上手（推荐）
 
 1. **下载** 二进制：从 [Releases](../../releases) 页拿对应平台的包，或源码 `cargo build --release`（见下文「源码编译」）
 2. **运行** Linux：`./attune-server-headless --host 127.0.0.1 --port 18900`；Windows：双击 `attune-server-headless.exe`。首次运行会创建 `~/.local/share/attune/`（或 `%LOCALAPPDATA%\attune\`）
@@ -195,40 +174,28 @@ Attune 走 **OpenAI 兼容 chat 协议**，任何暴露 `/v1/chat/completions` �
 | **智谱 GLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | ¥50/M tok | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys) |
 | **月之暗面 Kimi** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | ¥12/M tok | [platform.moonshot.cn](https://platform.moonshot.cn/console/api-keys) |
 | **百川** | `https://api.baichuan-ai.com/v1` | `Baichuan4-Turbo` | ¥15/M tok | [platform.baichuan-ai.com](https://platform.baichuan-ai.com/console/apikey) |
-| **Ollama 本地** | `http://localhost:11434/v1` | `qwen2.5:7b` | 免费 / 本地算力 | `curl -fsSL https://ollama.com/install.sh \| sh && ollama pull qwen2.5:7b` |
+| **Edge scheduler** | `http://127.0.0.1:8090` | scheduler contract | 本地设备成本 | 配置/探测 scheduler endpoint |
 | **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` | ~¥3/M tok | [platform.openai.com](https://platform.openai.com/api-keys) |
 
 *以上为各家输入 token 价格估算（写作时点）；具体以官方价格页为准（含输出 token 价、首充优惠等）。
 
-**推荐**：日常用 DeepSeek（性价比最高），有 16 GB+ GPU 选 Ollama 本地，重要场景上 OpenAI。
+**推荐**：日常用 DeepSeek 或 Attune Pro gateway，本地高性能知识库走 edge scheduler，重要场景上 OpenAI。
 
-### Python 原型线
-
-#### 1. 后端
+### Rust 后端
 
 ```bash
-git clone <repo-url> && cd attune/python
-python -m venv .venv && source .venv/bin/activate
-pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
-uvicorn attune_python.main:app --reload --port 18900
+cd rust
+cargo build --release
+./target/release/attune-server-headless --host 127.0.0.1 --port 18900
 ```
 
-验证：`curl http://localhost:18900/api/v1/status/health` → `{"status":"ok"}`
+验证：`curl http://localhost:18900/api/v1/status/health`
 
-#### 2. Embedding 模型
+#### Embedding / Rerank / OCR / ASR
 
-**Ollama（推荐）：**
+生产本地能力通过 edge scheduler endpoint 接入；Attune 本体不在安装阶段下载或启动具体 worker。未配置 scheduler 时，基础全文检索仍可用，Chat 需要 cloud/BYOK 或 scheduler。
 
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull bge-m3
-```
-
-后端默认 `device: auto`，自动连接 Ollama bge-m3（1024 维）。无 Ollama 时回退 ONNX，无模型时回退 FTS5 全文搜索。
-
-**ONNX（可选）：** 将 `model.onnx` + `tokenizer.json` 放到 `~/.local/share/attune/models/bge-m3/`。
-
-#### 3. Chrome 扩展
+#### Chrome 扩展
 
 ```bash
 cd extension
@@ -238,63 +205,31 @@ npm run build
 
 Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩展 → 选择 `extension/` 目录。
 
-#### 4. 部署检查
+#### 测试
 
 ```bash
-curl -s -X POST http://localhost:18900/api/v1/models/check | python3 -m json.tool
-```
-
-返回内核 / 芯片 / 驱动 / 模型 / 依赖完整报告和一键安装命令。
-
-#### 5. 测试
-
-```bash
-pytest tests/ -v    # 78 个测试（36 后端单元 + 42 扩展 E2E）
+cd rust && cargo test --workspace
+cd extension && npm run build
 ```
 
 ## 使用手册
 
-### 对话捕获
+> 产品形态已演进：早期向 AI 网站 DOM 注入前缀的浏览器扩展 injector 已于 cleanup-r15 移除，产品转向**内置 Chat + RAG**（Tauri 桌面应用）。Chrome 扩展现仅做对话捕获 / 文件上传等采集入口（共享 `/api/v1/*` 协议），不再注入。
 
-扩展在 ChatGPT / Claude / Gemini 页面自动注入 Content Script：
+### 内置 Chat + RAG（主交互）
 
-- **状态指示器**：右下角圆点（绿=在线、黄=处理中、红=离线、灰=禁用），点击打开 Side Panel
-- **自动捕获**：检测到新的 user+assistant 对话对时，2s debounce + 流式完成检测后自动入库
-- **去重**：djb2 hash 即时去重 + Worker 端 1h TTL 缓存（session storage 防 SW 被杀）
+- 桌面应用打开即进两栏 chat-first 界面（仿 ChatGPT），左侧栏可收起为 64px 图标条。
+- RAG 回答带可点击 citation chip → 在侧抽屉打开原文；session 持久化、跨时间检索。
+- 发送按钮旁常驻 Token Chip 成本估算（🟢 本地免费 / 🔵 云端 $ 实时）；chat 头部 model chip 一键换模型。
+- `⌘K` 全局命令面板在 Chat / Items / Reader / Sessions / Settings 间跳转；顶栏 🔒 随时锁定 vault。
 
-### 知识注入
+### Reader + 批注
 
-发送消息时自动触发：
+全文阅读 + 5 预设标签 × 4 颜色用户批注 + AI 4 视角分析（风险 / 过时 / 亮点 / 疑问）；批注影响 RAG 召回权重（亮点/风险 ×1.5、疑问 ×1.2、过时排除），批注内容 AES-256-GCM 加密。
 
-1. 拦截发送按钮点击（capture phase）
-2. 读取输入内容 → `/search/relevant` 搜索知识库
-3. 有结果时构建前缀并修改输入框：
-   ```
-   [以下是来自个人知识库的相关参考，请结合回答]
-   📝 个人笔记: ...
-   💬 历史对话: ...
-   📄 本地文件: ...
-   ---
-   {原始问题}
-   ```
-4. 释放点击完成发送
+### 采集来源
 
-注入模式可在 Options 设置：自动 / 手动 / 禁用。
-
-### Popup 面板
-
-- 连接状态指示（绿/红）+ 知识条目数 / 向量数
-- 注入开关 toggle
-- 「打开知识面板」→ Side Panel、「设置」→ Options
-
-### Side Panel
-
-| 标签 | 功能 |
-|------|------|
-| 搜索 | 输入关键词 + source_type 过滤，点击展开详情 |
-| 时间线 | 按日期分组，分页加载，支持删除 |
-| 文件 | 拖拽上传 PDF/DOCX/MD/TXT/代码，进度显示，会话内优先检索 |
-| 状态 | 8 项指标（连接/版本/设备/模型/条目/向量/待处理/监控目录） |
+本地文件夹监听 · WebDAV 远程目录（ETag 增量）· Email IMAP（正文 + 附件，UID 增量）· **GitConnector**（从 Git 仓库导入，v1.2.0）。
 
 ### 本地目录索引
 
@@ -306,6 +241,11 @@ curl -X POST http://localhost:18900/api/v1/index/bind \
 
 # 查看索引状态
 curl http://localhost:18900/api/v1/index/status
+
+# 手动快速重扫已绑定目录
+curl -X POST http://localhost:18900/api/v1/index/rescan \
+  -H "Content-Type: application/json" \
+  -d '{"dir_id": "<dir_id>", "background": true}'
 ```
 
 支持：`.md` `.txt` `.py` `.js` `.ts` `.go` `.rs` `.java` `.pdf` `.docx`
@@ -341,8 +281,8 @@ sudo apt-get install -y linux-firmware
 # AMD NPU (内核 < 6.14)
 sudo apt install amdxdna-dkms  # 需要 AMD 官方源
 
-# Ollama（通用，推荐）
-curl -fsSL https://ollama.com/install.sh | sh && ollama pull bge-m3
+# Edge scheduler（本地高性能，推荐）
+ATTUNE_EDGE_SCHEDULER_URL=http://127.0.0.1:8090 scripts/deploy-linux.sh
 ```
 
 ## 配置
@@ -351,8 +291,8 @@ curl -fsSL https://ollama.com/install.sh | sh && ollama pull bge-m3
 
 ```yaml
 embedding:
-  model: "bge-m3"            # bge-m3 / bge-small-zh-v1.5 / bge-large-zh-v1.5
-  device: "auto"             # auto / ollama / cpu / directml / rocm / openvino
+  provider: "local_scheduler" # edge scheduler-native KB task（兼容配置值）
+  endpoint: "http://127.0.0.1:8090"
 
 search:
   default_top_k: 10
@@ -365,7 +305,7 @@ ingest:
   excluded_domains: ["mail.google.com", "web.whatsapp.com"]
 ```
 
-`device: auto` 优先 Ollama，失败回退 ONNX。不存在配置文件时使用默认值。
+不存在 scheduler 配置时，Attune 保持可启动并提示用户配置 cloud/BYOK 或 edge scheduler。
 
 ## API
 
@@ -378,7 +318,7 @@ ingest:
 | GET | `/search?q=&top_k=` | 混合搜索 |
 | POST | `/search/relevant` | 相关知识搜索（注入用，层级检索 + 动态预算） |
 | GET/PATCH/DELETE | `/items[/{id}]` | 知识条目 CRUD |
-| POST/DELETE/GET | `/index/bind\|unbind\|status` | 目录索引管理 |
+| POST/DELETE/GET | `/index/bind\|rescan\|unbind\|status` | 目录索引管理 |
 | GET | `/status` | 系统状态 |
 | GET/PATCH | `/settings` | 配置管理 |
 | GET | `/models` | 模型列表 + 设备检测 |
@@ -433,11 +373,11 @@ chat_trigger:
 
 **5. 打开 Settings → Skills 标签**。新 skill 会列出，关键词高亮显示，toggle 启用 / 禁用即时生效，全程不再碰 YAML。
 
-**分发给别人**：把目录打包为 `<plugin-id>.attunepkg`，对方解压到同样的 plugins 目录即装即用。Pro 版的行业 skill 集（律师 / 售前 / 学术）走完全一样的路径，只是出厂预装。
+**分发给别人**：把目录打包为 `<plugin-id>-<version>.tar.gz`，通过 PluginHub 安装，或在本地测试时解压到同样的 plugins 目录。Pro 版的行业 skill 集（律师 / 售前 / 学术）走同一包格式；官方远端包必须带签名并通过完整性校验。
 
 ## 贡献
 
-- 见 [CONTRIBUTING.md](CONTRIBUTING.md)（待补）和 [NOTICE](NOTICE)
+- 贡献指南尚在起草。现阶段请参考 [DEVELOP.md](DEVELOP.md)（分支模型 + 构建命令）与 [NOTICE](NOTICE)（第三方署名）
 - 商业插件（attune-pro、医师 / 学者 / 律师 Pro 包）开发由 [attune-pro 仓](https://github.com/qiurui144/attune-pro) 独立处理（闭源）
 - bug 报告 / 特性请求：[GitHub Issues](https://github.com/qiurui144/attune/issues)
 
@@ -449,7 +389,7 @@ chat_trigger:
 - [数据基础设施](docs/superpowers/specs/2026-04-19-data-infrastructure-design.md)
 - [分发 & 合规](docs/superpowers/specs/2026-04-19-distribution-compliance-design.md)
 - [测试金字塔](docs/TESTING.md)
-- [OSS × Pro 战略](docs/oss-pro-strategy.zh.md)（双语）
+- [OSS × Pro 战略](docs/oss-pro-strategy.md)（双语）
 
 ## License
 

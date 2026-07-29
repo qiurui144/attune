@@ -17,6 +17,13 @@
 //! VaultError` 在 attune-core 侧定义(方向 core→leaf 单一,无环)。
 
 pub mod agent_main;
+pub mod evidence;
+
+pub use evidence::{
+    Artifact, CapabilityTag, Confidence, ConfidenceLevel, EvidenceEnvelope, EvidenceItem,
+    EvidenceKind, InputsSnapshot, Severity, StepKind, StepRecord, Warning, WarningKind,
+    ENVELOPE_VERSION,
+};
 
 use serde::{Deserialize, Serialize};
 

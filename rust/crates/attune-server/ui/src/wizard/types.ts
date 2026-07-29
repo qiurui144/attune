@@ -7,7 +7,7 @@ export type WizardContext = {
   /** 已完成的 steps（允许 stepper 回跳） */
   completedSteps: Set<WizardStep>;
   /** Step 3 选择的 LLM 后端类型 */
-  llmMode: 'ollama' | 'k3' | 'cloud' | 'skip' | null;
+  llmMode: 'local_scheduler' | 'cloud' | 'skip' | null;
   /** 硬件推荐的默认模型（Step 4 应用后） */
   chatModel: string | null;
   embeddingModel: string | null;

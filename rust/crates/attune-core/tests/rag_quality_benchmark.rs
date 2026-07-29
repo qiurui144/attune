@@ -65,10 +65,7 @@ fn reciprocal_rank(retrieved: &RetrievedIds, acceptable: &AcceptableHits) -> f64
 }
 
 /// 聚合多 query → QualityMetrics
-pub fn aggregate(
-    queries: &[(RetrievedIds, AcceptableHits)],
-    k: usize,
-) -> QualityMetrics {
+pub fn aggregate(queries: &[(RetrievedIds, AcceptableHits)], k: usize) -> QualityMetrics {
     let n = queries.len();
     if n == 0 {
         return QualityMetrics::default();
@@ -107,8 +104,7 @@ fn hit_at_k_zero_when_no_match_in_topk() {
 #[test]
 fn recall_at_k_partial_coverage() {
     let retrieved = vec!["a".into(), "x".into(), "b".into(), "y".into()];
-    let acceptable: AcceptableHits =
-        ["a".into(), "b".into(), "c".into()].into_iter().collect();
+    let acceptable: AcceptableHits = ["a".into(), "b".into(), "c".into()].into_iter().collect();
     let r = recall_at_k(&retrieved, &acceptable, 5);
     assert!((r - 2.0 / 3.0).abs() < 1e-9, "got {r}");
 }
@@ -159,13 +155,20 @@ fn hashset(ids: &[&str]) -> AcceptableHits {
 /// 验证 golden set JSON 文件存在且 schema 可读 — 让 J6 真跑数 worker 跑前先 sanity check。
 #[test]
 fn golden_queries_file_loads() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/golden/queries.json");
-    assert!(path.exists(), "golden queries file missing: {}", path.display());
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/queries.json");
+    assert!(
+        path.exists(),
+        "golden queries file missing: {}",
+        path.display()
+    );
 
     let raw = std::fs::read_to_string(&path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-    assert!(json.get("scenarios").is_some(), "queries.json missing scenarios");
+    assert!(
+        json.get("scenarios").is_some(),
+        "queries.json missing scenarios"
+    );
     let scenarios = json["scenarios"].as_array().unwrap();
     assert!(!scenarios.is_empty(), "expected at least one scenario");
 

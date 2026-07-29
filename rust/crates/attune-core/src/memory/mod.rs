@@ -15,6 +15,8 @@
 
 pub mod assembler;
 pub mod consolidation_agent;
+pub mod migration;
+pub mod portability;
 pub mod retrieval;
 pub mod semantic;
 
@@ -24,9 +26,9 @@ pub use assembler::{
 };
 pub use consolidation_agent::{
     access_count_for_chunks, compute_score, promoted_topic_key, rank_candidates,
-    run_promotion_cycle, Candidate, MemoryConsolidationAgent, PromotionAgentInput,
-    PromotionConfig, PromotionCycleResult, PromotionRecord, ACCESS_WEIGHT, DEFAULT_MIN_SCORE,
-    DENSITY_WEIGHT, MAX_PROMOTIONS_HARD_CAP, RECENCY_WEIGHT,
+    run_promotion_cycle, Candidate, MemoryConsolidationAgent, PromotionAgentInput, PromotionConfig,
+    PromotionCycleResult, PromotionRecord, ACCESS_WEIGHT, DEFAULT_MIN_SCORE, DENSITY_WEIGHT,
+    MAX_PROMOTIONS_HARD_CAP, RECENCY_WEIGHT,
 };
 pub use retrieval::{search_memories, MemoryHit, MemoryVectorIndex};
 pub use semantic::{

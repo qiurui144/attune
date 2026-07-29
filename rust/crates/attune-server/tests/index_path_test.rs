@@ -23,7 +23,10 @@ mod tests {
         // 也算"正确拒绝" — 关键是 result 必须是 Err. 用宽断言覆盖三平台.
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/home/test"));
         let result = validate_bind_path("/tmp", &home);
-        assert!(result.is_err(), "path outside home should be rejected: {result:?}");
+        assert!(
+            result.is_err(),
+            "path outside home should be rejected: {result:?}"
+        );
         let (status, body) = result.unwrap_err();
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         let body_str = serde_json::to_string(&body.0).unwrap();
@@ -54,7 +57,11 @@ mod tests {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         if home.exists() && home.is_dir() {
             let result = validate_bind_path(home.to_str().unwrap(), &home);
-            assert!(result.is_ok(), "home dir itself should be accepted: {:?}", result);
+            assert!(
+                result.is_ok(),
+                "home dir itself should be accepted: {:?}",
+                result
+            );
         }
     }
 }

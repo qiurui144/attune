@@ -8,8 +8,9 @@
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document, DocumentSink, FeedHttpResponse, IngestOutcome, RawDocument, RssConnector,
-    RssFeedFetch, SourceConnector,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    retryable_degraded_marker, DocumentSink, FeedHttpResponse, IngestOutcome, RawDocument,
+    RssConnector, RssFeedFetch, SourceConnector,
 };
 
 use crate::state::AppState;
@@ -77,6 +78,7 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
     let mut errors: Vec<String> = Vec::new();
     // 记每个成功入库 entry 的 guid，用来推进 last_entry_guid（取首条 = feed 中"最新"）。
     let mut newest_ingested_guid: Option<String> = None;
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(state, None);
 
     for doc in docs {
         total += 1;
@@ -95,32 +97,128 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
 
         // indexed_files 短路：同 source_ref 已记录 → 跳过 ingest（content_hash 短路是
         // ingest_document 内的第二层防护）。
-        if store.get_indexed_file(&source_ref).ok().flatten().is_some() {
+        let existing = store
+            .get_indexed_file_for_dir(feed_id, &source_ref)
+            .ok()
+            .flatten();
+        let existing_item_active = match existing.as_ref() {
+            Some(row) => match store.indexed_file_points_to_active_item(row) {
+                Ok(active) => active,
+                Err(e) => {
+                    errors.push(format!("{source_ref}: check active tracking item {e}"));
+                    continue;
+                }
+            },
+            None => false,
+        };
+        if !existing_item_active {
+            if let Some(stale_item_id) = existing.as_ref().and_then(|row| row.item_id.as_ref()) {
+                if let Err(e) = store.enqueue_reindex(stale_item_id, "purge") {
+                    errors.push(format!("{source_ref}: enqueue stale tracking purge {e}"));
+                    continue;
+                }
+            }
+        }
+        if existing
+            .as_ref()
+            .is_some_and(|row| row.file_hash == guid && !guid.is_empty() && existing_item_active)
+        {
             skipped += 1;
             continue;
+        } else if existing
+            .as_ref()
+            .is_some_and(|row| row.file_hash == guid && !guid.is_empty())
+        {
+            tracing::warn!(
+                "sync_rss_feed: tracking for {source_ref} matches guid but points to a missing/deleted item; re-ingesting"
+            );
         }
 
-        match ingest_document(store, &dek, &doc) {
-            Ok(IngestOutcome::Inserted { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
-                if newest_ingested_guid.is_none() {
-                    newest_ingested_guid = Some(guid.clone());
+        let mut old_item_id: Option<String> = None;
+        if let Some(old) = existing
+            .as_ref()
+            .filter(|_| existing_item_active)
+            .and_then(|row| row.item_id.as_ref())
+        {
+            match store.indexed_file_has_other_refs(old, feed_id, &source_ref) {
+                Ok(true) => {
+                    tracing::info!(
+                        "sync_rss_feed: source {source_ref} moved off shared item {old}; keeping old item"
+                    );
                 }
-                new_entries += 1;
+                Ok(false) => {
+                    if let Err(e) = store.delete_item(old) {
+                        errors.push(format!("{source_ref}: delete old item {e}"));
+                        continue;
+                    }
+                    if let Err(e) = store.enqueue_reindex(old, "purge") {
+                        errors.push(format!("{source_ref}: enqueue purge {e}"));
+                        continue;
+                    }
+                    if let Err(e) = store.record_signal_event("doc_update", old, None) {
+                        tracing::debug!("sync_rss_feed: record_signal_event failed for {old}: {e}");
+                    }
+                    old_item_id = Some(old.clone());
+                }
+                Err(e) => {
+                    errors.push(format!("{source_ref}: check shared item refs {e}"));
+                    continue;
+                }
+            }
+        }
+        let outcome = match old_item_id.as_deref() {
+            Some(old) => {
+                ingest_document_replacing_with_options(store, &dek, &doc, old, &ingest_options)
+            }
+            None => ingest_document_with_options(store, &dek, &doc, &ingest_options),
+        };
+        match outcome {
+            Ok(IngestOutcome::Inserted { item_id, .. }) => {
+                match store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id) {
+                    Ok(_) => {
+                        if newest_ingested_guid.is_none() {
+                            newest_ingested_guid = Some(guid.clone());
+                        }
+                        new_entries += 1;
+                    }
+                    Err(e) => errors.push(format!("{source_ref}: persist tracking {e}")),
+                }
             }
             Ok(IngestOutcome::Updated { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
-                if newest_ingested_guid.is_none() {
-                    newest_ingested_guid = Some(guid.clone());
+                match store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id) {
+                    Ok(_) => {
+                        if newest_ingested_guid.is_none() {
+                            newest_ingested_guid = Some(guid.clone());
+                        }
+                        new_entries += 1;
+                    }
+                    Err(e) => errors.push(format!("{source_ref}: persist tracking {e}")),
                 }
-                new_entries += 1;
             }
             Ok(IngestOutcome::Duplicate { item_id }) => {
-                let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
-                if newest_ingested_guid.is_none() {
-                    newest_ingested_guid = Some(guid.clone());
+                match store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id) {
+                    Ok(_) => {
+                        if newest_ingested_guid.is_none() {
+                            newest_ingested_guid = Some(guid.clone());
+                        }
+                        skipped += 1;
+                    }
+                    Err(e) => errors.push(format!("{source_ref}: persist duplicate tracking {e}")),
                 }
-                skipped += 1;
+            }
+            Ok(IngestOutcome::Degraded {
+                item_id, reason, ..
+            }) => {
+                let retry_marker = retryable_degraded_marker(&guid);
+                if let Err(e) =
+                    store.upsert_indexed_file(feed_id, &source_ref, &retry_marker, &item_id)
+                {
+                    errors.push(format!("{source_ref}: persist retry marker {e}"));
+                } else {
+                    errors.push(format!(
+                        "{source_ref}: retryable degraded extraction: {reason}"
+                    ));
+                }
             }
             Ok(IngestOutcome::Skipped { .. }) => {
                 skipped += 1;
@@ -138,10 +236,15 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
         let store = vault.store();
         match response {
             Some(FeedHttpResponse::Ok {
-                etag, last_modified, ..
+                etag,
+                last_modified,
+                ..
             }) => {
-                let _ =
-                    store.update_rss_etag_lastmod(feed_id, etag.as_deref(), last_modified.as_deref());
+                let _ = store.update_rss_etag_lastmod(
+                    feed_id,
+                    etag.as_deref(),
+                    last_modified.as_deref(),
+                );
             }
             _ => {
                 // 不可达 —— 304 已早 return；fetch Err 已早 return。

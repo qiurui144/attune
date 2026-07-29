@@ -1,9 +1,9 @@
+use attune_core::vault::VaultState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use attune_core::vault::VaultState;
 
 use crate::state::SharedState;
 
@@ -82,7 +82,11 @@ async fn handle_scan_progress(mut socket: WebSocket, state: SharedState) {
                 })
             }
         };
-        if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+        if socket
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .is_err()
+        {
             break;
         }
 

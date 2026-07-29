@@ -6,7 +6,10 @@ use crate::usage::guard::UsageRecorderGuard;
 use crate::usage::types::{CacheOutcome, CallOutcome, TokenUsage, UsageEvent, UsageKind};
 
 #[allow(clippy::type_complexity)]
-fn shared_sink() -> (Arc<Mutex<Vec<UsageEvent>>>, Box<dyn FnOnce(UsageEvent) + Send>) {
+fn shared_sink() -> (
+    Arc<Mutex<Vec<UsageEvent>>>,
+    Box<dyn FnOnce(UsageEvent) + Send>,
+) {
     let sink: Arc<Mutex<Vec<UsageEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let s = sink.clone();
     let recorder = Box::new(move |e: UsageEvent| {
@@ -19,12 +22,7 @@ fn shared_sink() -> (Arc<Mutex<Vec<UsageEvent>>>, Box<dyn FnOnce(UsageEvent) + S
 fn guard_records_on_complete() {
     let (sink, recorder) = shared_sink();
     {
-        let mut g = UsageRecorderGuard::new(
-            UsageKind::LlmChat,
-            "ollama",
-            "qwen2.5:3b",
-            recorder,
-        );
+        let mut g = UsageRecorderGuard::new(UsageKind::LlmChat, "ollama", "qwen2.5:3b", recorder);
         g.complete(
             TokenUsage::empty("ollama", "qwen2.5:3b"),
             CacheOutcome::Miss,
@@ -41,12 +39,7 @@ fn guard_records_on_complete() {
 #[test]
 fn guard_complete_is_idempotent() {
     let (sink, recorder) = shared_sink();
-    let mut g = UsageRecorderGuard::new(
-        UsageKind::LlmChat,
-        "ollama",
-        "qwen2.5:3b",
-        recorder,
-    );
+    let mut g = UsageRecorderGuard::new(UsageKind::LlmChat, "ollama", "qwen2.5:3b", recorder);
     g.complete(
         TokenUsage::empty("ollama", "qwen2.5:3b"),
         CacheOutcome::Miss,
@@ -65,12 +58,7 @@ fn guard_complete_is_idempotent() {
 #[test]
 fn guard_records_latency_and_cost() {
     let (sink, recorder) = shared_sink();
-    let mut g = UsageRecorderGuard::new(
-        UsageKind::LlmChat,
-        "ollama",
-        "qwen2.5:3b",
-        recorder,
-    );
+    let mut g = UsageRecorderGuard::new(UsageKind::LlmChat, "ollama", "qwen2.5:3b", recorder);
     std::thread::sleep(std::time::Duration::from_millis(5));
     let mut usage = TokenUsage::empty("ollama", "qwen2.5:3b");
     usage.tokens_in = 1000;
@@ -93,14 +81,10 @@ fn guard_records_latency_and_cost() {
 fn guard_builder_attaches_agent_and_query_hash() {
     let (sink, recorder) = shared_sink();
     {
-        let mut g = UsageRecorderGuard::new(
-            UsageKind::LlmExtract,
-            "ollama",
-            "qwen2.5:3b",
-            recorder,
-        )
-        .with_agent("defamation_extractor")
-        .with_query_hash("abcdef0123456789");
+        let mut g =
+            UsageRecorderGuard::new(UsageKind::LlmExtract, "ollama", "qwen2.5:3b", recorder)
+                .with_agent("defamation_extractor")
+                .with_query_hash("abcdef0123456789");
         g.complete(
             TokenUsage::empty("ollama", "qwen2.5:3b"),
             CacheOutcome::Miss,

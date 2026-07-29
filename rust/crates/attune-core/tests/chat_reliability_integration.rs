@@ -30,8 +30,7 @@ fn integration_store_roundtrip_then_evaluate() {
 
     let content_a = "所有权规则：每个值在 Rust 中都有一个所有者；同一时刻只能有一个所有者；\
         当所有者离开作用域时，这个值将被丢弃。";
-    let content_b =
-        "借用允许你引用某个值而不获取其所有权。借用必须在所有者的作用域内有效。";
+    let content_b = "借用允许你引用某个值而不获取其所有权。借用必须在所有者的作用域内有效。";
 
     let id_a = store
         .insert_item(&dek, "Rust 所有权章节", content_a, None, "test", None, None)
@@ -108,16 +107,18 @@ fn integration_persisted_chunk_with_hallucinated_date_flagged() {
     let id = store
         .insert_item(&dek, "Rust 简介", content, None, "test", None, None)
         .expect("insert item");
-    let row = store
-        .get_item(&dek, &id)
-        .expect("get ok")
-        .expect("present");
+    let row = store.get_item(&dek, &id).expect("get ok").expect("present");
     let chunks = vec![RetrievedChunk::new(row.id, row.content)];
 
     // Response asserts a specific date not anywhere in the persisted chunk.
     let response = "Rust 在 2099-12-31 发布了 1.0 版本。";
 
-    let report = evaluate_response(response, &chunks, "rust 发布", &ChatReliabilityConfig::default());
+    let report = evaluate_response(
+        response,
+        &chunks,
+        "rust 发布",
+        &ChatReliabilityConfig::default(),
+    );
 
     assert_eq!(
         report.hallucination_flags.len(),

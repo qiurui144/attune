@@ -6,17 +6,23 @@
 //! 各源不再各自复制 pipeline。
 
 mod connector;
-mod pipeline;
-pub mod local;
 pub mod email;
-pub mod rss;
 pub mod git;
+pub mod local;
+mod pipeline;
+pub mod rss;
 
 pub use connector::{DocumentSink, RawDocument, SourceConnector, SourceKind};
-pub use git::GitSourceConfig;
-pub use email::{EmailConfig, EmailConnector, FetchedMail, ImapFetcher, MailAttachment, MailMessage};
-pub use rss::{
-    parse_feed_bytes, FeedFetcher, FeedHttpResponse, ParsedRssEntry, RealFeedFetcher,
-    RssConnector, RssFeedFetch,
+pub use email::{
+    EmailConfig, EmailConnector, FetchedMail, ImapFetcher, MailAttachment, MailMessage,
 };
-pub use pipeline::{ingest_document, ingest_document_replacing, ingest_document_with_profile, IngestOutcome};
+pub use git::GitSourceConfig;
+pub use pipeline::{
+    enqueue_content_embeddings, ingest_document, ingest_document_replacing,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    ingest_document_with_profile, retryable_degraded_marker, IngestOptions, IngestOutcome,
+};
+pub use rss::{
+    parse_feed_bytes, FeedFetcher, FeedHttpResponse, ParsedRssEntry, RealFeedFetcher, RssConnector,
+    RssFeedFetch,
+};

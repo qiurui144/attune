@@ -1,0 +1,50 @@
+{
+  "models": [
+    {
+      "name": "llm-summary",
+      "state": "READY_FAST",
+      "lifecycle": "READY",
+      "dispatchable": "FREE",
+      "devices": {"cpu.vector": {"role": "primary", "status": "free", "in_flight": 0}},
+      "exclusive": true,
+      "queue_depth": 0,
+      "queue_capacity": 32,
+      "last_latency_ms": 1200.0,
+      "p50_latency_ms": 1000.0,
+      "p99_latency_ms": 1800.0,
+      "last_success_ts": "2026-04-21T12:34:56Z",
+      "state_revision": 4827
+    },
+    {
+      "name": "llm-chat",
+      "state": "READY_SLOW",
+      "lifecycle": "READY",
+      "dispatchable": "BUSY",
+      "devices": {"cpu.vector": {"role": "primary", "status": "busy", "in_flight": 1}},
+      "exclusive": true,
+      "queue_depth": 2,
+      "queue_capacity": 4,
+      "last_latency_ms": 980.0,
+      "p50_latency_ms": 1000.0,
+      "p99_latency_ms": 1800.0,
+      "last_success_ts": "2026-04-21T12:34:56Z",
+      "state_revision": 4827
+    },
+    {
+      "name": "vlm",
+      "state": "QUEUED",
+      "lifecycle": "READY",
+      "dispatchable": "BUSY",
+      "devices": {"cpu.vector": {"role": "primary", "status": "queued", "in_flight": 2}},
+      "exclusive": true,
+      "queue_depth": 2,
+      "queue_capacity": 4,
+      "last_latency_ms": 2400.0,
+      "p50_latency_ms": 2300.0,
+      "p99_latency_ms": 4200.0,
+      "last_success_ts": "2026-04-21T12:35:56Z",
+      "state_revision": 4827
+    }
+  ],
+  "revision": 4827
+}

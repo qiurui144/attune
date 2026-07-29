@@ -27,7 +27,13 @@ fn c1_cache_round_trip_through_real_sqlite_file() {
         published_date: None,
     }];
     store
-        .put_web_search_cached(&dek, "rust async", &results, DEFAULT_WEB_SEARCH_TTL_SECS, 1000)
+        .put_web_search_cached(
+            &dek,
+            "rust async",
+            &results,
+            DEFAULT_WEB_SEARCH_TTL_SECS,
+            1000,
+        )
         .unwrap();
     let hit = store
         .get_web_search_cached(&dek, "rust async", 2000)
@@ -60,7 +66,10 @@ fn f2_breadcrumb_pipeline_writes_then_chat_reads() {
     assert!(n >= 2);
 
     // ChatEngine 路径模拟：search 拿到 item，查 first_chunk_breadcrumb
-    let bc = store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap().unwrap();
+    let bc = store
+        .get_first_chunk_breadcrumb(&dek, &item_id)
+        .unwrap()
+        .unwrap();
     assert!(!bc.0.is_empty(), "breadcrumb 应非空");
     assert_eq!(bc.1, 0, "第一个 chunk 的 offset_start = 0");
     assert!(bc.2 > 0, "offset_end > 0");
@@ -71,8 +80,13 @@ fn f2_old_vault_without_sidecar_returns_none() {
     // 模拟老 vault 升级：表已建（schema 自动），但没数据
     let (store, _tmp) = temp_store();
     let dek = Key32::generate();
-    let bc = store.get_chunk_breadcrumb(&dek, "never-indexed", 0).unwrap();
-    assert!(bc.is_none(), "未 upsert 的 item 返回 None，让 Citation 优雅降级为空 Vec");
+    let bc = store
+        .get_chunk_breadcrumb(&dek, "never-indexed", 0)
+        .unwrap();
+    assert!(
+        bc.is_none(),
+        "未 upsert 的 item 返回 None，让 Citation 优雅降级为空 Vec"
+    );
 }
 
 #[test]
@@ -80,15 +94,27 @@ fn f2_reindex_overwrites_old_breadcrumbs() {
     let (store, _tmp) = temp_store();
     let dek = Key32::generate();
     let v1 = "# 旧标题\n\n旧内容";
-    let item_id = store.insert_item(&dek, "doc", v1, None, "file", None, None).unwrap();
-    store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v1).unwrap();
-    let bc1 = store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap().unwrap();
+    let item_id = store
+        .insert_item(&dek, "doc", v1, None, "file", None, None)
+        .unwrap();
+    store
+        .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v1)
+        .unwrap();
+    let bc1 = store
+        .get_first_chunk_breadcrumb(&dek, &item_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(bc1.0[0], "旧标题");
 
     // 文件被改后重扫
     let v2 = "# 新标题\n\n新内容";
-    store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v2).unwrap();
-    let bc2 = store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap().unwrap();
+    store
+        .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v2)
+        .unwrap();
+    let bc2 = store
+        .get_first_chunk_breadcrumb(&dek, &item_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(bc2.0[0], "新标题", "重扫应覆盖 path");
 }
 
@@ -98,15 +124,17 @@ fn f2_search_result_has_breadcrumb_field() {
     use attune_core::search::SearchResult;
     let sr = SearchResult {
         item_id: "x".into(),
+        chunk_idx: None,
         score: 0.5,
         title: "T".into(),
         content: "C".into(),
         source_type: "file".into(),
+        source_path: None,
         inject_content: None,
         breadcrumb: vec!["A".into(), "B".into()],
         chunk_offset_start: Some(0),
         chunk_offset_end: Some(100),
-        corpus_domain: String::new(),  // F-Pro Stage 1 新增字段
+        corpus_domain: String::new(), // F-Pro Stage 1 新增字段
     };
     assert_eq!(sr.breadcrumb.len(), 2);
     assert_eq!(sr.chunk_offset_start, Some(0));
@@ -125,10 +153,17 @@ fn citation_ends_to_end_with_breadcrumb_from_indexer() {
     let (store, _tmp) = temp_store();
     let dek = Key32::generate();
     let content = "# 文档\n\n## 章节 A\n\n正文";
-    let item_id = store.insert_item(&dek, "文档", content, None, "file", None, None).unwrap();
-    store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
+    let item_id = store
+        .insert_item(&dek, "文档", content, None, "file", None, None)
+        .unwrap();
+    store
+        .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content)
+        .unwrap();
 
-    let (path, start, end) = store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap().unwrap();
+    let (path, start, end) = store
+        .get_first_chunk_breadcrumb(&dek, &item_id)
+        .unwrap()
+        .unwrap();
     let citation = Citation {
         item_id: item_id.clone(),
         title: "文档".into(),

@@ -53,7 +53,10 @@ fn call_outcome_fail_carries_error_kind() {
         error_kind: ErrorKind::Timeout,
     };
     let j = serde_json::to_string(&f).unwrap();
-    assert!(j.contains("timeout"), "Fail must serialize error_kind, got: {j}");
+    assert!(
+        j.contains("timeout"),
+        "Fail must serialize error_kind, got: {j}"
+    );
 }
 
 #[test]

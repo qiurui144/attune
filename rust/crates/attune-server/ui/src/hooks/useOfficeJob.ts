@@ -90,7 +90,7 @@ export async function runOcr(
 
   // We can't use the JSON api helper here — multipart needs raw fetch.
   // Authentication via token header (matches api.ts logic).
-  const token = localStorage.getItem('attune_token');
+  const token = sessionStorage.getItem('attune_token');
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
 

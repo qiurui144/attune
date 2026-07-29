@@ -54,7 +54,10 @@ pub struct Clusterer {
 
 impl Clusterer {
     pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
-        Self { llm, min_items: DEFAULT_MIN_ITEMS }
+        Self {
+            llm,
+            min_items: DEFAULT_MIN_ITEMS,
+        }
     }
 
     pub fn with_min_items(mut self, min: usize) -> Self {
@@ -69,7 +72,8 @@ impl Clusterer {
 
         let labels = self.run_hdbscan(&inputs)?;
 
-        let mut groups: std::collections::BTreeMap<i32, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<i32, Vec<usize>> =
+            std::collections::BTreeMap::new();
         for (i, label) in labels.iter().enumerate() {
             groups.entry(*label).or_default().push(i);
         }
@@ -84,10 +88,12 @@ impl Clusterer {
             }
 
             let reps: Vec<&ClusterInput> = indices.iter().take(3).map(|&i| &inputs[i]).collect();
-            let (name, summary) = self.name_cluster(&reps)
+            let (name, summary) = self
+                .name_cluster(&reps)
                 .unwrap_or_else(|_| (format!("聚类 {label}"), "未命名".into()));
 
-            let item_ids: Vec<String> = indices.iter().map(|&i| inputs[i].item_id.clone()).collect();
+            let item_ids: Vec<String> =
+                indices.iter().map(|&i| inputs[i].item_id.clone()).collect();
             let rep_id = item_ids.first().cloned();
 
             clusters.push(Cluster {
@@ -110,10 +116,33 @@ impl Clusterer {
         })
     }
 
+    /// 仅做 HDBSCAN 分组,返回 (cluster_id, item_ids)。**不调 LLM 命名**(命名交 organizer strategy)。
+    /// cluster_id = -1 表噪声。输入不足 min_items 返回单一 (-1, 全部)。
+    pub fn group_only(&self, inputs: &[ClusterInput]) -> Result<Vec<(i32, Vec<String>)>> {
+        if inputs.len() < self.min_items {
+            return Ok(vec![(
+                -1,
+                inputs.iter().map(|i| i.item_id.clone()).collect(),
+            )]);
+        }
+        let labels = self.run_hdbscan(inputs)?;
+        let mut groups: std::collections::BTreeMap<i32, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (i, label) in labels.iter().enumerate() {
+            groups
+                .entry(*label)
+                .or_default()
+                .push(inputs[i].item_id.clone());
+        }
+        Ok(groups.into_iter().collect())
+    }
+
     fn run_hdbscan(&self, inputs: &[ClusterInput]) -> Result<Vec<i32>> {
         // 验证所有向量维度一致，防止新旧模型混入时 hdbscan panic
         if let Some(first_dim) = inputs.first().map(|i| i.embedding.len()) {
-            let mismatch = inputs.iter().enumerate()
+            let mismatch = inputs
+                .iter()
+                .enumerate()
                 .find(|(_, i)| i.embedding.len() != first_dim);
             if let Some((idx, bad)) = mismatch {
                 return Err(VaultError::Classification(format!(
@@ -131,11 +160,15 @@ impl Clusterer {
     }
 
     fn name_cluster(&self, reps: &[&ClusterInput]) -> Result<(String, String)> {
-        let system = "你是一个知识库聚类命名助手。给定一组相关的知识片段，生成简洁的主题名和一句话摘要。";
-        let rep_texts: Vec<String> = reps.iter().map(|r| {
-            let snippet: String = r.content_snippet.chars().take(300).collect();
-            format!("- {}: {}", r.title, snippet)
-        }).collect();
+        let system =
+            "你是一个知识库聚类命名助手。给定一组相关的知识片段，生成简洁的主题名和一句话摘要。";
+        let rep_texts: Vec<String> = reps
+            .iter()
+            .map(|r| {
+                let snippet: String = r.content_snippet.chars().take(300).collect();
+                format!("- {}: {}", r.title, snippet)
+            })
+            .collect();
         let user = format!(
             "以下是一个聚类中的 {} 个代表样本:\n\n{}\n\n请输出 JSON:\n{{\"name\": \"主题名 (8-15 字)\", \"summary\": \"一句话摘要 (20-40 字)\"}}",
             reps.len(),
@@ -154,8 +187,16 @@ impl Clusterer {
         };
         let parsed: serde_json::Value = serde_json::from_str(json_str)
             .map_err(|e| VaultError::Classification(format!("cluster name json: {e}")))?;
-        let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("未命名").to_string();
-        let summary = parsed.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = parsed
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("未命名")
+            .to_string();
+        let summary = parsed
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         Ok((name, summary))
     }
 }
@@ -165,13 +206,34 @@ mod tests {
     use super::*;
     use crate::llm::MockLlmProvider;
 
+    /// A mock LlmProvider whose chat() aborts the test if reached — proves
+    /// group_only never invokes the LLM (naming is deferred to organizer strategy).
+    struct PanicOnCallLlm;
+    impl LlmProvider for PanicOnCallLlm {
+        fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+            unreachable!("group_only must not call LLM")
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "panic-on-call"
+        }
+    }
+
+    fn panic_on_call_llm() -> Arc<dyn LlmProvider> {
+        Arc::new(PanicOnCallLlm)
+    }
+
     fn make_inputs(n: usize) -> Vec<ClusterInput> {
-        (0..n).map(|i| ClusterInput {
-            item_id: format!("id{i}"),
-            title: format!("Title {i}"),
-            content_snippet: format!("content {i}"),
-            embedding: vec![(i as f32) * 0.1, (i as f32) * 0.2, 0.3, 0.4],
-        }).collect()
+        (0..n)
+            .map(|i| ClusterInput {
+                item_id: format!("id{i}"),
+                title: format!("Title {i}"),
+                content_snippet: format!("content {i}"),
+                embedding: vec![(i as f32) * 0.1, (i as f32) * 0.2, 0.3, 0.4],
+            })
+            .collect()
     }
 
     #[test]
@@ -204,6 +266,19 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let parsed: Cluster = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "test");
+    }
+
+    #[test]
+    fn group_only_returns_labels_without_llm() {
+        // MockLlm 若被调用会 panic;group_only 必须不触发 LLM。
+        // hdbscan default_hyper_params 的 min_samples 默认为 5(k-NN core distance
+        // 取 dist[k-1]),输入点数须 >= 5 否则库内部越界;故 fixture 用 8 点。
+        let clusterer = Clusterer::new(panic_on_call_llm()).with_min_items(2);
+        let inputs = make_inputs(8);
+        let groups = clusterer.group_only(&inputs).unwrap();
+        // 返回 (cluster_id, item_ids);全部 input 覆盖(含噪声 -1)
+        let total: usize = groups.iter().map(|(_, ids)| ids.len()).sum();
+        assert_eq!(total, 8);
     }
 
     #[test]

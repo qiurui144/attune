@@ -1,6 +1,6 @@
 [package]
 name = "attune-core"
-version = "1.2.0"
+version = "1.5.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,13 +17,15 @@ attune-agent-sdk = { workspace = true }
 #   async-trait: CacheBackend trait (async get/put/clear/count for future Redis/disk backends)
 blake3 = "1.5"
 async-trait = "0.1"
-# lru 0.13 — pinned to match attune-server (RUSTSEC-2026-0002 fix; 0.12 had unsound IterMut)
-lru = "0.13"
+# lru 0.18 — RUSTSEC-2026-0002 (IterMut Stacked-Borrows) patched in >=0.16.3.
+# Must match attune-server. NOTE: tantivy 0.22 still pins lru 0.12 transitively;
+# that path stays advisory-listed until tantivy upgrades (see deny.toml ignore).
+lru = "0.18"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = { workspace = true }
 argon2 = "0.5"
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.8.6"  # >=0.8.6 fixes RUSTSEC-2026-0097 (custom-logger UB) within the 0.8 line
 zeroize = { version = "1", features = ["derive"] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -48,6 +50,11 @@ feed-rs = "2.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 webpki-roots = "0.26"
+rustls-pemfile = "2"  # 解析 ATTUNE_CLOUD_CA_PEM(自托管/LAN CA)→ CertificateDer
+# X.509 leaf-cert parsing for SPKI cert-pinning (cloud slice8 §3.2). Pure-Rust
+# RustCrypto stack (der/spki/const-oid already resolved in the tree via
+# ed25519-dalek), WASM-safe; avoids the heavier x509-parser (asn1-rs/nom) tree.
+x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
 tokio = { workspace = true }
 tantivy = "0.22"
 tantivy-jieba = "0.11"
@@ -58,19 +65,45 @@ hdbscan = "0.11"
 serde_yaml = "0.9"
 toml = "0.8"
 tempfile = "3"
+fs4 = "0.8"
 pdf-extract = "0.8"
 zip = "2"
-# .attunepkg (tar.gz) 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
+# ── Artifact export engine (export/) — pure-Rust renderers, no system deps ──
+# rust_xlsxwriter: write .xlsx (Excel 2007+). Pure Rust, cross-platform.
+rust_xlsxwriter = { version = "0.95", optional = true }
+# csv: RFC 4180 CSV writer/reader for csv export (xlsx round-trip re-uses calamine, already a dep).
+csv = "1"
+# docx-rs: write .docx. Pure Rust (also targets WASM). Round-trip verified by unzipping document.xml.
+docx-rs = { version = "0.4", optional = true }
+# typst-as-lib + typst: pure-Rust typesetting → PDF. CJK font embedded via include_bytes!
+# (assets/fonts/AttuneCJK-subset.ttf) so Chinese renders with no system font (spec R1 top risk).
+# typst-as-lib 0.15.5 pins typst 0.14 — the typst stack must stay on 0.14 to share
+# the same `Document` trait (mismatch → trait-bound errors). Bump all four together.
+typst-as-lib = { version = "0.15", optional = true }
+typst = { version = "0.14", optional = true }  # re-exports typst::layout::PagedDocument (typst_library); compile target for typst-pdf
+typst-pdf = { version = "0.14", optional = true }
+# plugin .tar.gz 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
 tar = "0.4"
 flate2 = "1"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-rustls", "copy-dylibs", "api-24", "download-binaries"] }
+# onnxruntime 链接模型由互斥 feature 决定(见 [features] ort-bundled / ort-dynamic):
+# 默认 ort-bundled = download-binaries(build 期下载 + copy 自包含 onnxruntime,现状);
+# ort-dynamic = load-dynamic(运行时经 ORT_DYLIB_PATH dlopen 含 provider 的 onnxruntime,
+# 用于 OpenVINO/ROCm 等 pyke 预编译不含的 EP)。download-binaries/copy-dylibs 不再常开。
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-rustls", "api-24"], optional = true }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 # PP-OCR (P2-P4): 用 kreuzberg-paddle-ocr 替代自实现 DBNet+CRNN+CTC。
 # MIT 兼容 Apache-2.0；ort 2.0.0-rc.12 与本 crate 已对齐
-kreuzberg-paddle-ocr = "4.9"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-imageproc = { version = "0.26", default-features = false }
-hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }  # 0.5 起加 rustls-tls 路径; 这里用 ureq (默认 rustls), 不引入 native-tls/openssl-sys
+kreuzberg-paddle-ocr = { version = "4.9", optional = true }
+# Image input canonicalization is part of the Scheduler wire contract, not a
+# local inference/model feature. Keep its pure-Rust codecs on the Rust-1.75-
+# compatible 0.24 line so `scheduler-runtime` does not inherit image 0.25's
+# Rust 1.88 floor. Local inference retains the existing 0.25 API separately.
+image-wire = { package = "image", version = "0.24.9", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif"] }
+image = { version = "0.25", default-features = false, optional = true, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif"] }
+imageproc = { version = "0.26", default-features = false, optional = true }
+# hf-hub 已移除(C1): 其 0.5 ureq agent 不暴露超时配置, repo.get() 对连上后传输中途 stall
+# 的死源会永久 hang(9936dca gdb 实证)。模型下载改走 model_store::download_hf_file —— 带
+# connect_timeout + total timeout 的流式 reqwest, HF-resolve URL 兼容(含 ModelScope /models)。
 scraper = "0.21"
 calamine = { version = "0.26", features = ["dates"] }
 urlencoding = "2"
@@ -90,7 +123,9 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # 与 rusqlite/usearch 同 C 负担）；vendored-openssl 关掉 —— 走 libgit2 内置
 # http(s) transport（schannel on Win / SecureTransport on macOS / openssl on Linux
 # 仅运行时动态链接，clone https 公开仓不强依赖 openssl-sys 编译）。
-git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# 0.20.4+ fixes RUSTSEC-2026-0008 (Buf deref UB); 0.21 is the current line — our
+# API surface (FetchOptions / RepoBuilder / ErrorClass / ErrorCode) is unchanged.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 # glob 过滤（include/exclude 多模式）—— globset 编译多 glob 成单一 matcher。
 globset = "0.4"
 # URL 解析（SSRF url_guard）—— 已在依赖树（reqwest 传递）, 纯 Rust。
@@ -100,25 +135,120 @@ url = "2"
 # feature-gated(默认开,极小镜像可 --no-default-features 关)。
 wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
 wasmtime-wasi = { version = "45", optional = true }
+# SenseVoice ASR (sherpa-onnx in-process) — replaces the platform-specific whisper-cli
+# binary, killing the "Linux ELF shipped in a Windows package" bug class by construction.
+#
+# Linkage = `download-binaries` (DYNAMIC), NOT `static` — for sherpa here, matching ort.
+# Accurate rationale (corrected per adversarial review I1): attune-core's `ort` crate is ALSO
+# `download-binaries` (see the `ort = …` line above) — it links onnxruntime *dynamically* (a
+# libonnxruntime.so/.dll loaded at runtime); it does NOT statically archive onnxruntime. So
+# the conflict is NOT "static ort vs static sherpa". It is: sherpa-rs's `static` feature would
+# bundle its OWN onnxruntime `.a` and statically link it, whose `onnxruntime::*` symbols then
+# collide with the onnxruntime ort's build pulls in → rust-lld "duplicate symbol" at link of
+# the test binary (observed). Keeping sherpa on `download-binaries` makes BOTH link their
+# onnxruntime dynamically → no static-archive symbol collision. The remaining concern — TWO
+# dynamic libonnxruntime in ONE process at runtime (ort's + sherpa's, possible ABI/version
+# skew, shared global Ort* state) — is explicitly verified safe by
+# `tests/onnxruntime_coexistence.rs`: a real ort Session inference and a real sherpa SenseVoice
+# transcription run in the SAME process (both load orders + interleaved), all pass, no crash /
+# symbol clash. This is what the feasibility spike used (CER 7.69% on the CPU provider,
+# re-verified by tests/sensevoice_quality_gate.rs). Packaging cost: 3 shared libs (~20 MB)
+# shipped beside the binary per platform (libonnxruntime / libsherpa-onnx-c-api / -cxx-api),
+# copied by build.rs; the desktop/server release workflow must place them next to the binary
+# (or set rpath $ORIGIN) — tracked as an rc.5 packaging HARD GATE (spec §9, risk #2). On
+# Windows this is a .dll set — still per-target-correct, never a Linux ELF, so the original
+# "wrong-OS binary in package" bug class is gone.
+#
+# `tts` default feature dropped (attune is ASR-only, smaller build). feature-gated behind
+# `asr-sensevoice` (default-on): keeps the C-linked sherpa-onnx libs out of any non-ASR /
+# size-constrained build path. WASM is unaffected — attune-core is never compiled to wasm32
+# (the wasm leaf crate is attune-agent-sdk; runtime: wasm agents run via the wasmtime host).
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"], optional = true }
+
+# Pure-Rust audio pre-decode → 16 kHz mono i16 WAV, so the in-process SenseVoice path no
+# longer depends on whisper-cli for non-WAV containers (mp3 / m4a / flac / ogg) or for
+# resampling non-16kHz WAV. symphonia decodes the containers; hound writes the canonical
+# WAV that sherpa's `read_audio_file` accepts. Both are pure Rust → no cross-compile / no
+# C toolchain, unlike a whisper-cli subprocess. Tied to the ASR provider (asr-sensevoice).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "isomp4", "aac", "flac", "ogg", "vorbis", "wav", "pcm"], optional = true }
+hound = { version = "3.5", optional = true }
 
 [features]
 # wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
 # `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
-default = ["wasm-runtime"]
+# asr-sensevoice 默认开(desktop/server in-process SenseVoice ASR);极小镜像 / 纯 native
+# cap 路径可 `--no-default-features` 剔除 sherpa-onnx C 链接(ASR 自动降级到 whisper-cli 兜底)。
+default = [
+    "wasm-runtime",
+    "asr-sensevoice",
+    "ort-bundled",
+    "artifact-export-rich",
+]
+# X100 / appliance / scheduler-owned local runtime build. This keeps Attune's
+# policy, storage, retrieval, and scheduler contract code, but excludes in-process
+# ONNX/OCR runtime dependencies.
+scheduler-runtime = []
+local-inference = ["dep:ort", "dep:kreuzberg-paddle-ocr", "dep:image", "dep:imageproc"]
+artifact-export-rich = ["dep:rust_xlsxwriter", "dep:docx-rs", "dep:typst-as-lib", "dep:typst", "dep:typst-pdf"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
-cuda = ["ort/cuda"]
-directml = ["ort/directml"]
-coreml = ["ort/coreml"]
+asr-sensevoice = ["dep:sherpa-rs", "dep:symphonia", "dep:hound"]
+# ── ORT 链接模型(互斥;恰开一个,lib.rs compile_error 守卫)──
+# ort-bundled(默认):download-binaries —— build 期下载 + copy 自包含 onnxruntime(现状,
+#   DirectML/CUDA/CPU/sherpa-ASR 全靠它,零回归)。
+# ort-dynamic:load-dynamic —— ort 不 bundle onnxruntime,运行时经 ORT_DYLIB_PATH 加载
+#   ep-stacks/<stack>/libonnxruntime(含 OpenVINO/ROCm provider)。openvino 变体专用。
+#   该变体不开 asr-sensevoice(避免 sherpa 第二份 onnxruntime ABI 冲突 R1,ASR 回退 whisper-cli)。
+ort-bundled = ["local-inference", "ort/download-binaries", "ort/copy-dylibs"]
+ort-dynamic = ["local-inference", "ort/load-dynamic"]
+# anthropic-cache: opt-in helper building Anthropic-native message JSON with a
+# `cache_control:{type:"ephemeral"}` breakpoint on the stable prefix (§4.5-G2).
+# OFF by default — production speaks OpenAI-compat (auto prefix-cache, no marker
+# needed); this is only for a future native-Anthropic path. Pure builder, no deps.
+anthropic-cache = []
+# ── ONNX Runtime Execution Provider feature passthrough(全矩阵,默认全 OFF) ──
+# 每个 EP = 一个 ort cargo feature(+ 多数需对应 ORT 二进制变体 / 系统 userspace
+# runtime;runtime 栈由 infer::stack_installer 按需拉取,非全量打包,护 thin-deb)。
+# **默认 build 不开任何 GPU/NPU EP** → 行为 == 纯 CPU(向后兼容,CI 绿)。release
+# workflow 按 target 选 `--features`(Win:directml;NVIDIA Linux GPU 增强包:cuda 等)。
+# 编不过 / 需特殊 ORT 二进制的 EP 留 default-off + PENDING-VERIFY,绝不进默认 build。
+cuda = ["local-inference", "ort/cuda"]
+directml = ["local-inference", "ort/directml"]
+coreml = ["local-inference", "ort/coreml"]
+openvino = ["local-inference", "ort/openvino"]
+rocm = ["local-inference", "ort/rocm"]
+tensorrt = ["local-inference", "ort/tensorrt"]
+vitis = ["local-inference", "ort/vitis"]
 # 集成测试用：暴露 __test_seed_* 等内部 fixture helper。生产构建不开。
 test-utils = []
+
+
+# Non-text content recognition (layout/table/chart/formula/handwriting/stamp/checkbox
+# region recognizers + OCR cross-validation). Pulls native ort/imageproc model paths;
+# default-OFF so size-constrained / riscv-minimal images can drop it. When off,
+# OcrProvider::recognize_regions() returns empty and the pipeline degrades to plain OCR.
+nontext = ["local-inference"]
+
+# I2 vision eval gate (spec 2026-06-16 §I2 / §9.2): N=3 real-VLM eval harness — golden fixtures
+# (per non-text kind) × multi-seed micro-F1 + grounding precision. OFFLINE only (ship / develop→main
+# gate, never the user request path); default-OFF so it never compiles into a production binary
+# (mirrors the eval-mode safety boundary, spec §7). Pulls in `nontext` (it grades the recognition
+# pipeline's output).
+vision-eval = ["nontext"]
 
 # Self-dev-dependency：让 `cargo test -p attune-core` 自动启用 test-utils feature，
 # 集成测试无需 --features 显式开启。生产 `cargo build` 不受影响（仅 dev profile）。
 [dev-dependencies]
-attune-core = { path = ".", features = ["test-utils"] }
+attune-core = { path = ".", default-features = false, features = ["test-utils"] }
 # memory_consolidation_agent (L2 → L3 deterministic promotion) — 属性测试需要 proptest.
 # 与 attune-server 同版本（workspace 内统一），dev profile only.
 proptest = "1"
+# export round-trip accuracy gate (tests/export_roundtrip.rs) — independent
+# re-parsers to verify rendered files (incl. CJK PDF un-garbled). Same versions
+# as the library deps so no second copy is pulled.
+calamine = { version = "0.26", features = ["dates"] }
+csv = "1"
+zip = "2"
+pdf-extract = "0.8"
 
 [lints]
 workspace = true

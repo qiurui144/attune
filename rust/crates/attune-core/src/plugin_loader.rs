@@ -90,6 +90,17 @@ pub struct PluginManifest {
     #[serde(default)]
     pub pii_patterns: Vec<PiiPatternSpec>,
 
+    /// doc_privacy 行业机密词（INT-2 pro 写入端）。vertical plugin 声明本行业的
+    /// 保密标记字符串（如 律所「案卷密」/ 医院「病历」/ 专利「未公开申请」）。
+    /// 由 `PluginRegistry::all_confidential_keywords` 聚合，注入 attune doc_privacy
+    /// classifier 的机密词集——含任一标记的文档导出 fail-closed 拦截。
+    ///
+    /// **OSS 边界**（CLAUDE.md / classifier.rs）：OSS classifier 只内置**通用**机密词
+    /// （绝密/机密/confidential/…）；行业机密词由 pro 插件经此字段注入，**永不**硬编码
+    /// 进 OSS。OSS 裸装 → 列表空 → classifier 仅通用集。
+    #[serde(default)]
+    pub confidential_keywords: Vec<String>,
+
     /// 定价层级. free → yaml 明文; paid/trial → yaml 加密.
     #[serde(default)]
     pub pricing: Option<PluginPricing>,
@@ -101,6 +112,20 @@ pub struct PluginManifest {
     /// 案件类型注册 (kind → agent 映射, UI 选择源). OSS 不内置 case kinds.
     #[serde(default)]
     pub registers_case_kinds: Vec<CaseKindRegistration>,
+
+    /// 声明式 skill-runtime skill — 相对本 plugin 目录的 skill yaml 路径列表
+    /// (如 `skills/thesis-chapter-draft.yaml`). 这些是 `skill_runtime` 编排式交付物
+    /// (rag→agent→render→export), 区别于上面原子能力 `skills:` (SkillSpec).
+    /// server 启动时把列出的 yaml 注册进 SkillRegistry, 令 pro 交付物出现在
+    /// `/skill-runtime/skills` 且可 run。路径仅允许 plugin 目录内的相对路径 (防穿越)。
+    #[serde(default)]
+    pub registers_skills: Vec<String>,
+
+    /// Declarative knowledge-base chat profiles. These describe retrieval,
+    /// answer-task, and grounding policy for generic RAG flows without adding
+    /// route-level hard-coded intent branches.
+    #[serde(default)]
+    pub rag_profiles: Vec<RagProfileSpec>,
 
     /// Skills — 原子能力 (纯函数, 可缓存).
     #[serde(default)]
@@ -141,6 +166,63 @@ pub struct PluginResources {
     /// 外部 API 列表 (仅 hint, 数量不限制)
     #[serde(default)]
     pub external_apis: Vec<String>,
+}
+
+/// Declarative RAG profile contributed by an OSS or third-party plugin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagProfileSpec {
+    pub id: String,
+    #[serde(default)]
+    pub intents: Vec<String>,
+    #[serde(default)]
+    pub retrieval: RagRetrievalSpec,
+    #[serde(default)]
+    pub answer: RagAnswerSpec,
+    #[serde(default)]
+    pub grounding: RagGroundingSpec,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagRetrievalSpec {
+    #[serde(default)]
+    pub strategy: String,
+    #[serde(default)]
+    pub fallback_when_empty: Option<String>,
+    #[serde(default)]
+    pub top_k: Option<RagTopKSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RagTopKSpec {
+    Fixed(u32),
+    Policy(String),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagAnswerSpec {
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub model_class: String,
+    #[serde(default)]
+    pub preferred_size: Option<String>,
+    #[serde(default)]
+    pub fallback_sizes: Vec<String>,
+    #[serde(default)]
+    pub sync_sla_ms: Option<u64>,
+    #[serde(default)]
+    pub realtime_poll: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RagGroundingSpec {
+    #[serde(default)]
+    pub min_citations: Option<usize>,
+    #[serde(default)]
+    pub refuse_without_evidence: Option<bool>,
+    #[serde(default)]
+    pub allow_extractive_repair: Option<bool>,
 }
 
 /// 案件类型注册 (付费插件 → 案件类型 → agent 映射)
@@ -196,12 +278,67 @@ pub struct SkillCost {
     pub external_calls_per_invocation: Option<u32>,
 }
 
+/// agent 输出模式声明。plugin.yaml 两种历史写法都需兼容(spec §10 向后兼容)：
+///   - map 形态(law/patent): `output_modes: { default: structured, supports: [structured] }`
+///   - 裸 list 形态(tech-pro): `output_modes: [structured]`
+///
+/// 任何无法识别的形态 → 默认空(永不让 plugin 加载失败,见 deserialize_output_modes)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentOutputModes {
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub supports: Vec<String>,
+}
+
+/// 宽松解析 `output_modes`：接受 map / 裸 list / 缺省,绝不因形态不符让加载失败。
+/// 严格 struct 解析会把 tech-pro 的 `[structured]` 当 invalid type 拒绝整个 plugin
+/// (这是引入该字段时的 regression);本函数把 list 归一为 `{default:None, supports:[...]}`。
+fn deserialize_output_modes<'de, D>(
+    de: D,
+) -> std::result::Result<Option<AgentOutputModes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(de)?;
+    Ok(match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(arr) => {
+            let supports = arr
+                .into_iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            Some(AgentOutputModes {
+                default: None,
+                supports,
+            })
+        }
+        serde_json::Value::Object(_) => serde_json::from_value(v).ok(),
+        // 其他标量形态 → 忽略(不阻塞加载)。
+        _ => None,
+    })
+}
+
 /// Agent 声明 (场景专家)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSpec {
     pub id: String,
     #[serde(default)]
     pub description: String,
+    /// 工作台卡片显示名（行业术语，language-neutral 例外）。缺省时派生层回退
+    /// 到 scenario → description → id（见 plugin_registry::all_scenarios）。
+    #[serde(default)]
+    pub label: Option<String>,
+    /// 意图分类（如 "核算 compute" / "抽取 extract"）。仅 hint，供工作台卡片副标。
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// 场景描述（卡片主标）。law/patent 已声明；其余插件缺则回退（见上）。
+    #[serde(default)]
+    pub scenario: Option<String>,
+    /// 输出模式声明（default + supports）。结果面板据此渲染 structured/marked/...
+    /// 宽松解析(map / 裸 list / 缺省都接受),不因形态不符让 plugin 加载失败。
+    #[serde(default, deserialize_with = "deserialize_output_modes")]
+    pub output_modes: Option<AgentOutputModes>,
     /// 处理哪些案件类型 (与 registers_case_kinds 配套)
     #[serde(default)]
     pub case_kinds: Vec<String>,
@@ -278,9 +415,15 @@ pub struct UiComponentSpec {
     pub description: String,
 }
 
-fn default_eager() -> String { "eager".into() }
-fn default_heartbeat_seconds() -> u64 { 30 }
-fn default_restart_on_failure() -> u32 { 3 }
+fn default_eager() -> String {
+    "eager".into()
+}
+fn default_heartbeat_seconds() -> u64 {
+    30
+}
+fn default_restart_on_failure() -> u32 {
+    3
+}
 
 /// vertical plugin 在 plugin.yaml 中声明的 PII 正则。
 ///
@@ -361,8 +504,12 @@ impl Default for ChatTrigger {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_one() -> usize { 1 }
+fn default_true() -> bool {
+    true
+}
+fn default_one() -> usize {
+    1
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginConstraints {
@@ -391,6 +538,12 @@ pub struct PluginOutputSpec {
 pub struct LoadedPlugin {
     pub manifest: PluginManifest,
     pub prompt: String,
+    /// The raw YAML content of every `registers_skills` entry, loaded from the plugin dir at
+    /// scan time (so the server can register skills without re-resolving the dir or handling
+    /// decryption again). Empty unless the manifest declared `registers_skills`. Entries whose
+    /// file failed to load (missing / not-utf8 / path-traversal) are simply absent — the scan
+    /// records those as best-effort `errors`.
+    pub registered_skill_yamls: Vec<String>,
 }
 
 /// 校验一个 wasi_cap 字符串是否在白名单内。
@@ -450,7 +603,13 @@ impl LoadedPlugin {
         let manifest: PluginManifest = serde_yaml::from_str(yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
         validate_capabilities(&manifest)?;
-        Ok(Self { manifest, prompt: prompt.to_string() })
+        // from_strings has no on-disk dir → cannot load registers_skills yaml files; that path is
+        // only for built-in (string-embedded) plugins, which don't declare registers_skills.
+        Ok(Self {
+            manifest,
+            prompt: prompt.to_string(),
+            registered_skill_yamls: Vec::new(),
+        })
     }
 
     /// 从文件系统路径加载（外部插件走这条路径）。
@@ -469,12 +628,15 @@ impl LoadedPlugin {
     /// 2. 否则读明文 `plugin.yaml`
     /// 3. 解析 manifest + 校验 verified_trust↔pricing 联动 (paid/trial 必须 Trusted/Official)
     ///
-    /// `verified_trust` 必须是调用方在 sig 验证 (plugin_sig::verify_*) 后得到的字符串
-    /// "Official" / "Trusted" / "Unsigned". 不传则按 "Unsigned" 处理.
+    /// `verified_trust` 必须是调用方在 sig 验证 (plugin_sig::verify_*) 后得到的
+    /// [`crate::plugin_sig::Trust`] 变体. 不传则按 `Trust::Unsigned` 处理.
+    ///
+    /// T2 (G2): 类型从 `Option<&str>` 改为 `Option<Trust>` —— 类型级杜绝调用方传
+    /// 任意魔法串("Official"/"Trusted")绕过签名验证 (spec §10 / §4).
     pub fn from_dir_with_key(
         plugin_dir: &std::path::Path,
         decrypt_key: Option<&[u8]>,
-        verified_trust: Option<&str>,
+        verified_trust: Option<crate::plugin_sig::Trust>,
     ) -> Result<Self> {
         let enc_path = plugin_dir.join("plugin.yaml.enc");
         let plain_path = plugin_dir.join("plugin.yaml");
@@ -503,7 +665,7 @@ impl LoadedPlugin {
 
         // trust↔pricing 联动 — 调用方传入实际验证后的 trust 级别
         if let Some(pricing) = &manifest.pricing {
-            let trust = verified_trust.unwrap_or("Unsigned");
+            let trust = verified_trust.unwrap_or(crate::plugin_sig::Trust::Unsigned);
             crate::plugin_encryption::validate_trust_for_pricing(trust, &pricing.tier)?;
         }
 
@@ -512,8 +674,53 @@ impl LoadedPlugin {
         } else {
             String::new()
         };
-        Ok(Self { manifest, prompt })
+
+        // Load every declared skill-runtime skill yaml from the plugin dir (best-effort: a missing
+        // or unreadable entry is warned + skipped, never fails the whole plugin). Path-traversal
+        // guarded — the resolved file must stay inside `plugin_dir`.
+        let registered_skill_yamls =
+            load_registered_skill_yamls(plugin_dir, &manifest.registers_skills);
+
+        Ok(Self {
+            manifest,
+            prompt,
+            registered_skill_yamls,
+        })
     }
+}
+
+/// Resolve + read each `registers_skills` relative path under `plugin_dir`. Skips (with a warn)
+/// any entry that is absolute, escapes the plugin dir (`..`), or fails to read / is not utf-8.
+fn load_registered_skill_yamls(plugin_dir: &std::path::Path, rel_paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    // Canonicalize the plugin dir once for the containment check; fall back to the raw path if
+    // canonicalize fails (e.g. on a test tmpfs the dir always exists, so this rarely fails).
+    let base = std::fs::canonicalize(plugin_dir).unwrap_or_else(|_| plugin_dir.to_path_buf());
+    for rel in rel_paths {
+        let candidate = plugin_dir.join(rel);
+        // Reject absolute paths and obvious traversal before touching the fs.
+        if std::path::Path::new(rel).is_absolute() || rel.split(['/', '\\']).any(|c| c == "..") {
+            log::warn!("plugin registers_skills: rejecting unsafe path '{rel}'");
+            continue;
+        }
+        // Resolve and confirm the real file is inside the plugin dir (defense in depth vs symlink).
+        let resolved = match std::fs::canonicalize(&candidate) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("plugin registers_skills: cannot read '{rel}': {e}");
+                continue;
+            }
+        };
+        if !resolved.starts_with(&base) {
+            log::warn!("plugin registers_skills: '{rel}' escapes plugin dir, skipping");
+            continue;
+        }
+        match std::fs::read_to_string(&resolved) {
+            Ok(yaml) => out.push(yaml),
+            Err(e) => log::warn!("plugin registers_skills: read '{rel}' failed: {e}"),
+        }
+    }
+    out
 }
 
 /// AI 批注角度专属配置（从 manifest 的 annotation_angle 字段组装）
@@ -540,14 +747,17 @@ impl AnnotationAngleConfig {
         }
         if p.manifest.label_prefix.is_empty() {
             return Err(VaultError::InvalidInput(
-                "annotation_angle plugin requires non-empty label_prefix".into()
+                "annotation_angle plugin requires non-empty label_prefix".into(),
             ));
         }
         Ok(Self {
             id: p.manifest.id.clone(),
             label_prefix: p.manifest.label_prefix.clone(),
-            default_color: if p.manifest.default_color.is_empty() { "yellow".into() }
-                           else { p.manifest.default_color.clone() },
+            default_color: if p.manifest.default_color.is_empty() {
+                "yellow".into()
+            } else {
+                p.manifest.default_color.clone()
+            },
             max_findings: p.manifest.constraints.max_findings.unwrap_or(5),
             max_snippet_chars: p.manifest.constraints.max_snippet_chars.unwrap_or(150),
             min_snippet_chars: p.manifest.constraints.min_snippet_chars.unwrap_or(4),
@@ -655,9 +865,9 @@ label_prefix: "X"
 "#;
         let p = LoadedPlugin::from_strings(yaml, "").unwrap();
         let c = AnnotationAngleConfig::from_loaded(&p).unwrap();
-        assert_eq!(c.max_findings, 5);        // 默认
+        assert_eq!(c.max_findings, 5); // 默认
         assert_eq!(c.max_snippet_chars, 150); // 默认
-        assert_eq!(c.min_snippet_chars, 4);   // 默认
+        assert_eq!(c.min_snippet_chars, 4); // 默认
     }
 
     #[test]
@@ -822,5 +1032,79 @@ version: "1.0.0"
 "#;
         let m: PluginManifest = serde_yaml::from_str(yaml).expect("parse");
         assert!(m.chat_trigger.is_none());
+    }
+
+    // output_modes 双形态兼容 (spec §10): map (law/patent) + 裸 list (tech-pro)。
+    // 严格 struct 会把 list 当 invalid type 拒绝整个 plugin — 这是 regression 守卫。
+    #[test]
+    fn output_modes_accepts_both_map_and_list() {
+        // map 形态
+        let map_yaml = r#"
+id: p
+name: P
+type: industry
+version: "1.0.0"
+agents:
+  - id: a_map
+    runtime: rust_binary
+    output_modes: { default: structured, supports: [structured, marked] }
+  - id: a_list
+    runtime: subprocess
+    output_modes: [structured]
+  - id: a_none
+    runtime: subprocess
+"#;
+        let m: PluginManifest =
+            serde_yaml::from_str(map_yaml).expect("parse must not fail on list form");
+        let map_agent = m.agents.iter().find(|a| a.id == "a_map").unwrap();
+        let om = map_agent.output_modes.as_ref().unwrap();
+        assert_eq!(om.default.as_deref(), Some("structured"));
+        assert_eq!(om.supports, vec!["structured", "marked"]);
+
+        let list_agent = m.agents.iter().find(|a| a.id == "a_list").unwrap();
+        let om = list_agent.output_modes.as_ref().unwrap();
+        assert_eq!(om.default, None, "bare list → no default");
+        assert_eq!(om.supports, vec!["structured"]);
+
+        let none_agent = m.agents.iter().find(|a| a.id == "a_none").unwrap();
+        assert!(none_agent.output_modes.is_none());
+    }
+
+    #[test]
+    fn registers_skills_yaml_loaded_from_dir() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("skills")).expect("mkdir");
+        std::fs::write(dir.join("skills/draft.yaml"), "id: draft\nfoo: bar\n").expect("skill");
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: academic-pro\nname: x\ntype: industry\nversion: \"1.0.0\"\nregisters_skills:\n  - skills/draft.yaml\n",
+        )
+        .expect("manifest");
+        let p = LoadedPlugin::from_dir(dir).expect("load");
+        assert_eq!(p.manifest.registers_skills, vec!["skills/draft.yaml"]);
+        assert_eq!(p.registered_skill_yamls.len(), 1);
+        assert!(p.registered_skill_yamls[0].contains("id: draft"));
+    }
+
+    #[test]
+    fn registers_skills_rejects_traversal_and_missing() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let dir = tmp.path();
+        // a secret file one level above the plugin dir — must never be slurped.
+        std::fs::write(tmp.path().join("secret.yaml"), "id: secret\n").ok();
+        let pdir = dir.join("academic-pro");
+        std::fs::create_dir_all(&pdir).expect("mkdir");
+        std::fs::write(
+            pdir.join("plugin.yaml"),
+            "id: academic-pro\nname: x\ntype: industry\nversion: \"1.0.0\"\nregisters_skills:\n  - ../secret.yaml\n  - skills/nope.yaml\n",
+        )
+        .expect("manifest");
+        let p = LoadedPlugin::from_dir(&pdir).expect("load");
+        // traversal rejected + missing file skipped → nothing loaded, plugin still loads.
+        assert!(
+            p.registered_skill_yamls.is_empty(),
+            "traversal + missing both skipped"
+        );
     }
 }

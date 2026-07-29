@@ -12,7 +12,11 @@ pub struct Classifier {
 
 impl Classifier {
     pub fn new(taxonomy: Arc<Taxonomy>, llm: Arc<dyn LlmProvider>) -> Self {
-        Self { taxonomy, llm, batch_size: 5 }
+        Self {
+            taxonomy,
+            llm,
+            batch_size: 5,
+        }
     }
 
     pub fn with_batch_size(mut self, size: usize) -> Self {
@@ -20,11 +24,19 @@ impl Classifier {
         self
     }
 
+    /// Whether classification stays on the device. Server-side background
+    /// workers use this to decide whether cloud consent/L0/redaction gates are
+    /// required before dequeuing any vault content.
+    pub fn is_local(&self) -> bool {
+        self.llm.is_local()
+    }
+
     /// 分类单条
     pub fn classify_one(&self, title: &str, content: &str) -> Result<ClassificationResult> {
         let items = vec![(title.to_string(), content.to_string())];
         let mut results = self.classify_batch(&items)?;
-        results.pop()
+        results
+            .pop()
             .ok_or_else(|| VaultError::Classification("empty result".into()))
     }
 
@@ -42,19 +54,30 @@ impl Classifier {
         Ok(all_results)
     }
 
-    fn classify_one_llm_call(&self, items: &[(String, String)]) -> Result<Vec<ClassificationResult>> {
+    fn classify_one_llm_call(
+        &self,
+        items: &[(String, String)],
+    ) -> Result<Vec<ClassificationResult>> {
         let system = self.taxonomy.build_system_prompt();
         let user = self.taxonomy.build_user_prompt(items);
         let (raw, _usage) = self.llm.chat(&system, &user)?;
         self.parse_response(&raw, items.len())
     }
 
-    fn parse_response(&self, raw: &str, expected_count: usize) -> Result<Vec<ClassificationResult>> {
+    fn parse_response(
+        &self,
+        raw: &str,
+        expected_count: usize,
+    ) -> Result<Vec<ClassificationResult>> {
         let trimmed = raw.trim();
         let json_str = extract_json_block(trimmed).unwrap_or_else(|| trimmed.to_string());
 
-        let parsed: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|e| VaultError::Classification(format!("invalid JSON: {e}. raw: {}", &json_str.chars().take(200).collect::<String>())))?;
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+            VaultError::Classification(format!(
+                "invalid JSON: {e}. raw: {}",
+                &json_str.chars().take(200).collect::<String>()
+            ))
+        })?;
 
         let items_array: Vec<serde_json::Value> = if expected_count == 1 && parsed.is_object() {
             vec![parsed]
@@ -63,7 +86,9 @@ impl Classifier {
         } else if parsed.is_object() {
             vec![parsed]
         } else {
-            return Err(VaultError::Classification("expected object or array".into()));
+            return Err(VaultError::Classification(
+                "expected object or array".into(),
+            ));
         };
 
         let mut results = Vec::with_capacity(items_array.len());
@@ -117,7 +142,9 @@ impl Classifier {
 
 fn json_to_string_vec(v: &serde_json::Value) -> Vec<String> {
     if let Some(arr) = v.as_array() {
-        arr.iter().filter_map(|e| e.as_str().map(String::from)).collect()
+        arr.iter()
+            .filter_map(|e| e.as_str().map(String::from))
+            .collect()
     } else if let Some(s) = v.as_str() {
         vec![s.to_string()]
     } else {

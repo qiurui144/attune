@@ -1,0 +1,62 @@
+{
+  "schema_version": "attune.eval.corpus.v1",
+  "corpus_id": "networking_tcpip_smoke",
+  "domain": "networking",
+  "license": "generated-test-fixture",
+  "source": {
+    "type": "generated",
+    "generator": "scripts/eval/generate-scale-corpus.py",
+    "seed": "attune-networking-tcpip-smoke-20260723"
+  },
+  "scale": {
+    "tier": "T0",
+    "documents": 3,
+    "bytes": 12000,
+    "expected_chunks": 12,
+    "ocr_ratio": 0.0,
+    "languages": ["zh", "en"]
+  },
+  "profiles": {
+    "pr_smoke": {
+      "documents": [
+        "tcpip_origin",
+        "tcpip_troubleshooting",
+        "tcpip_support_workflow"
+      ],
+      "purpose": "hardware-free networking RAG smoke for PR CI"
+    },
+    "k3_release_smoke": {
+      "documents": [
+        "tcpip_origin",
+        "tcpip_troubleshooting",
+        "tcpip_support_workflow"
+      ],
+      "purpose": "K3 web-demo and scheduler Chat RAG networking smoke"
+    }
+  },
+  "indexing": {
+    "parser_modes": ["text", "markdown"],
+    "max_pending_seconds": 60,
+    "delete_rescan_required": true
+  },
+  "generated_documents": [
+    {
+      "id": "tcpip_origin",
+      "title": "TCP/IP Origin",
+      "filename": "tcpip_origin.md",
+      "content": "TCP/IP originated from ARPANET and DARPA packet-switching research. TCP and IP were separated into layers so different networks could interconnect."
+    },
+    {
+      "id": "tcpip_troubleshooting",
+      "title": "TCP/IP Troubleshooting",
+      "filename": "tcpip_troubleshooting.md",
+      "content": "TCP/IP troubleshooting starts with physical link and NIC status, then IP address, subnet mask, gateway, route table, DNS resolution, port listening, firewall rules, packet capture, and application timeout evidence."
+    },
+    {
+      "id": "tcpip_support_workflow",
+      "title": "TCP/IP Support Workflow",
+      "filename": "tcpip_support_workflow.md",
+      "content": "If evidence is insufficient, support should ask for topology, ip route, DNS result, service port status, firewall policy, tcpdump or packet capture, and relevant application logs."
+    }
+  ]
+}

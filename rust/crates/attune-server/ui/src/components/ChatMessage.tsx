@@ -9,9 +9,16 @@
 
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import type { Message, AcpFlow, AcpFlowStatus } from '../store/signals';
-import { drawerContent } from '../store/signals';
+import type {
+  Message,
+  AcpFlow,
+  AcpFlowStatus,
+  LocalSchedulerInfo,
+} from '../store/signals';
+import { drawerContent, settings } from '../store/signals';
 import { t } from '../i18n';
+import { ttsRequestText } from '../ttsText';
+import { TtsPlayer } from './TtsPlayer';
 
 export type ChatMessageProps = {
   message: Message;
@@ -88,6 +95,8 @@ function AssistantBubble({
 
   const displayed = m.content.slice(0, revealedLen);
   const streaming = revealedLen < m.content.length;
+  const ttsEnabled = (settings.value?.tts as { enabled?: boolean } | undefined)?.enabled !== false;
+  const ttsText = ttsRequestText(m.content);
 
   return (
     <div
@@ -132,6 +141,8 @@ function AssistantBubble({
           {displayed}
           {streaming && <TypingCaret />}
         </div>
+        {!streaming && ttsEnabled && ttsText !== null && <TtsPlayer text={ttsText} />}
+        {m.local_scheduler && !streaming && <LocalSchedulerPanel info={m.local_scheduler} />}
         {m.citations && m.citations.length > 0 && !streaming && (
           <CitationRow citations={m.citations} />
         )}
@@ -139,6 +150,118 @@ function AssistantBubble({
       </div>
     </div>
   );
+}
+
+// ── local scheduler 状态条 ─────────────────────────────────────
+function LocalSchedulerPanel({ info }: { info: LocalSchedulerInfo }): JSX.Element {
+  const status = info.status ?? info.scheduled_as ?? 'local';
+  const style = localSchedulerStatusStyle(status);
+
+  return (
+    <div
+      title={info.reason ?? undefined}
+      style={{
+        marginTop: 'var(--space-2)',
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 'var(--space-2)',
+        alignItems: 'center',
+        fontSize: 'var(--text-xs)',
+        color: 'var(--color-text-secondary)',
+      }}
+    >
+      <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>
+        {t('chat.local_scheduler.label')}
+      </span>
+      <span
+        style={{
+          padding: '2px var(--space-2)',
+          background: style.bg,
+          border: `1px solid ${style.border}`,
+          borderRadius: 'var(--radius-sm)',
+          fontWeight: 600,
+          color: style.fg,
+        }}
+      >
+        {localSchedulerStatusLabel(status)}
+      </span>
+      {info.job_id && <LocalSchedulerMetaPill label={shortLocalSchedulerJobId(info.job_id)} />}
+      {info.model && <LocalSchedulerMetaPill label={info.model} />}
+      {info.service_class && <LocalSchedulerMetaPill label={info.service_class} />}
+      {typeof info.admission?.context_tokens === 'number' && (
+        <LocalSchedulerMetaPill
+          label={t('chat.local_scheduler.ctx_tokens', {
+            tokens: String(info.admission.context_tokens),
+          })}
+        />
+      )}
+      {typeof info.eta_ms === 'number' && !isLocalSchedulerDone(status) && (
+        <LocalSchedulerMetaPill label={t('chat.local_scheduler.eta', { ms: String(info.eta_ms) })} />
+      )}
+    </div>
+  );
+}
+
+function LocalSchedulerMetaPill({ label }: { label: string }): JSX.Element {
+  return (
+    <span
+      style={{
+        padding: '2px var(--space-2)',
+        background: 'var(--color-bg)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 'var(--radius-sm)',
+        color: 'var(--color-text-secondary)',
+        maxWidth: 240,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function localSchedulerStatusLabel(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  const key = `chat.local_scheduler.status.${normalized}`;
+  const label = t(key);
+  return label === key ? status : label;
+}
+
+function localSchedulerStatusStyle(status: string): { bg: string; fg: string; border: string } {
+  const normalized = status.trim().toLowerCase();
+  if (isLocalSchedulerDone(normalized)) {
+    return { bg: 'rgba(34,197,94,0.12)', fg: '#16a34a', border: 'rgba(34,197,94,0.4)' };
+  }
+  if (
+    normalized === 'error' ||
+    normalized === 'failed' ||
+    normalized === 'failure' ||
+    normalized === 'canceled' ||
+    normalized === 'cancelled' ||
+    normalized === 'expired' ||
+    normalized === 'poll_error' ||
+    normalized === 'poll_timeout'
+  ) {
+    return { bg: 'rgba(239,68,68,0.12)', fg: '#dc2626', border: 'rgba(239,68,68,0.4)' };
+  }
+  return { bg: 'rgba(234,179,8,0.12)', fg: '#ca8a04', border: 'rgba(234,179,8,0.4)' };
+}
+
+function isLocalSchedulerDone(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return (
+    normalized === 'done' ||
+    normalized === 'completed' ||
+    normalized === 'complete' ||
+    normalized === 'success' ||
+    normalized === 'succeeded'
+  );
+}
+
+function shortLocalSchedulerJobId(jobId: string): string {
+  return jobId.length > 14 ? `${jobId.slice(0, 6)}…${jobId.slice(-6)}` : jobId;
 }
 
 // ── ACP-5 自主流转块 ─────────────────────────────────────────

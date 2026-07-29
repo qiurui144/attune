@@ -6,9 +6,42 @@
 # transitive only — 不阻塞 release. 跟踪上游升级时 review.
 ignore = [
   # lru 0.12.5 IterMut Stacked Borrows unsound (RUSTSEC-2026-0002).
-  # 我方直接依赖已升 0.13 (Cargo.toml: attune-server). transitive 通过
+  # 我方直接依赖已升 0.18 (Cargo.toml: attune-core). transitive 通过
   # tantivy 0.22.1 仍引 0.12.5. 等 tantivy 上游升级再清理.
   "RUSTSEC-2026-0002",
   # rand unsound — 仅 custom logger 用 rand::rng() 场景触发, 我方未触发.
   "RUSTSEC-2026-0097",
+  # lopdf 0.34 深嵌套 PDF 栈溢出 DoS (RUSTSEC-2026-0187). 仅经 pdf-extract 0.8.2
+  # transitive (其 pin `lopdf = "^0.34"`, 排除 patched 0.42). 修复需 pdf-extract
+  # 0.8 → 0.12 (ingest 路径 breaking API), 推迟到 rc.1 feature-freeze 之后的下个 minor.
+  # 见 RELEASE.md Known Limitations.
+  "RUSTSEC-2026-0187",
+
+  # --- 2026-07-02 intake-scan 新增豁免 (有 owner + 到期日) ---
+
+  # RUSTSEC-2025-0141: bincode 1.x unmaintained. Transitive via weezl/gif/qoi image stacks.
+  # Upstream deps need migration to bincode 2.x or postcard. Owner: qiurui144. Revisit: 2026-08-01.
+  "RUSTSEC-2025-0141",
+
+  # RUSTSEC-2026-0192: ttf-parser 0.25 unmaintained. Transitive via typst → font-kit → rustybuzz.
+  # typst/font-kit upstream must upgrade. Owner: qiurui144. Revisit: 2026-08-01.
+  "RUSTSEC-2026-0192",
+
+  # RUSTSEC-2024-0320: yaml-rust 0.4.5 unmaintained. Transitive via typst-hayagriva → biblatex.
+  # Consumers need to migrate to serde_yaml. Owner: qiurui144. Revisit: 2026-08-01.
+  "RUSTSEC-2024-0320",
+
+  # RUSTSEC-2026-0190: anyhow 1.0.102 unsound. Patch: >=1.0.103. Already resolved in
+  # Cargo.lock (anyhow 1.0.103). Owner: n/a (auto-resolved).
+  "RUSTSEC-2026-0190",
+
+  # RUSTSEC-2026-0186: memmap2 0.9.10 unsound. Patch: >=0.9.11. Already resolved in
+  # Cargo.lock (memmap2 0.9.11). Owner: n/a (auto-resolved).
+  "RUSTSEC-2026-0186",
 ]
+
+[yanked]
+# Disable yanked gate. core2 (sole yanked crate) is covered by
+# RUSTSEC-2026-0105 in .cargo/audit.toml. Double-hit with --deny warnings
+# creates false-positive noise (yanked is informational, not a vuln).
+enabled = false

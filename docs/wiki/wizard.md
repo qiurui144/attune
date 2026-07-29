@@ -16,17 +16,17 @@ Vault 是 Attune 的本地加密数据库，所有知识、配置和凭据都保
 
 > 图示占位：`![Step 1 - 设置 Vault 密码](../../static/img/wizard-step1-vault.png)`
 
-## Step 2 — 选择 Embedding 模型
+## Step 2 — 配置知识库执行路径
 
-Attune 根据当前机器的 RAM 和 GPU 自动推荐 Embedding 模型：
+Attune 不再在 wizard 内要求用户选择具体 embedding worker。知识库向量化和重排默认走以下路径：
 
-| 硬件 | 推荐模型 | 说明 |
-|------|---------|------|
-| ≥16 GB RAM + 独显/NPU | `bge-m3`（Ollama） | 最高精度，中英双语 |
-| 8-16 GB RAM | `bge-base-zh`（ORT 本地） | 平衡速度与精度 |
-| <8 GB RAM | `bge-small-zh`（ORT 本地） | 轻量，适合笔记本 |
+| 场景 | 推荐 |
+|------|------|
+| 普通桌面 / 笔电 | 先使用全文检索 + 云端/BYOK LLM，按需配置远端 embedding provider |
+| 高性能本机 / 边缘设备 | 填入 edge scheduler endpoint，由 scheduler 管理 embedding/rerank/OCR/ASR/LLM |
+| 企业或团队 | 使用统一部署的 scheduler 或云网关 |
 
-点击"测试连接"会验证模型是否就绪。若使用 Ollama，Attune 会提示你先运行 `ollama pull bge-m3`。
+点击"测试连接"会验证 cloud/BYOK 或 scheduler endpoint 是否就绪。
 
 ## Step 3 — 配置 LLM
 
@@ -43,41 +43,33 @@ Endpoint：https://gateway.engi-stack.com/v1
 
 ### BYOK（用你自己的 API Key）
 
-如果你已有以下付费账号，对应 Plan 通常附带 API 额度：
+填写开发者 API 账号签发的 API Key；网页会员订阅不等同于 API 额度。BYOK endpoint 必须兼容 OpenAI chat 协议。
 
 | 账号类型 | API 地址 |
 |---------|---------|
-| OpenAI（ChatGPT Plus / Team） | `https://api.openai.com/v1` |
-| Anthropic（Claude Pro） | `https://api.anthropic.com` |
-| Google（Gemini Advanced） | `https://generativelanguage.googleapis.com` |
+| OpenAI API（独立 API Key 与计费） | `https://api.openai.com/v1` |
+| Google AI Studio（Gemini OpenAI compatibility） | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | DeepSeek / Qwen / 兼容 OpenAI | 服务商提供的 Base URL |
 
-### 本地 Ollama（高级）
+Attune 当前不把 Anthropic 原生 Messages API 当作 OpenAI-compatible endpoint；需要 Anthropic 时使用 Attune Pro gateway 或自有兼容网关。
 
-K3 一体机用户或配备独显的笔电用户，可选择 Ollama 本地 LLM：
+### Edge scheduler（本地/边缘高性能）
 
-```bash
-# 先安装并启动 Ollama
-ollama pull qwen2.5:3b   # 适合 8-16 GB RAM
-ollama serve
-```
-
-然后在 Wizard Step 3 选择"本地 Ollama"，地址填 `http://localhost:11434`。
+本地高性能平台或边缘设备用户选择 edge scheduler，地址填 `http://127.0.0.1:8090` 或局域网 scheduler 地址。Attune 只调用 scheduler 统一接口，不直连具体本地模型 worker。
 
 > 图示占位：`![Step 3 - LLM 配置](../../static/img/wizard-step3-llm.png)`
 
-## Step 4 — 硬件感知底座
+## Step 4 — 硬件与 Scheduler 状态
 
-Attune 显示检测到的硬件信息，并告知哪些本地底座已就绪：
+Attune 显示检测到的硬件信息，并告知当前 AI 执行路径：
 
-| 底座 | 用途 | 说明 |
-|------|------|------|
-| Embedding（bge） | 文档向量化 | 安装包已捆绑 ORT 模型 |
-| Rerank（bge-reranker） | 搜索精排 | 安装包已捆绑 ORT 模型 |
-| ASR（whisper.cpp） | 音频转写 | 安装包已捆绑，首次使用下载模型 |
-| OCR（PP-OCRv5） | 图片 / 扫描 PDF 文字识别 | 安装包已捆绑 |
+| 状态 | 说明 |
+|------|------|
+| Cloud / BYOK 已配置 | Chat 使用云端或用户自己的 OpenAI-compatible endpoint |
+| Edge scheduler 已配置 | Embedding/rerank/OCR/ASR/LLM 由 scheduler 统一提供 |
+| 未配置 | 基础本地全文检索可用；Chat 需要补充 cloud/BYOK 或 scheduler |
 
-本步骤只需确认，无需手动操作。如需更换模型版本，后续在 **Settings → Models** 中调整。
+本步骤只需确认，无需手动操作。如需更换 endpoint，后续在 **Settings → AI** 中调整。
 
 > 图示占位：`![Step 4 - 硬件底座确认](../../static/img/wizard-step4-hardware.png)`
 

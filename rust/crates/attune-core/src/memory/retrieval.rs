@@ -207,7 +207,16 @@ mod tests {
 
     fn seed_episodic(store: &Store, dek: &Key32, hash: &str, summary: &str, win: i64) -> String {
         store
-            .insert_memory(dek, "episodic", win, win + 86400, &[hash.into()], summary, "m", win)
+            .insert_memory(
+                dek,
+                "episodic",
+                win,
+                win + 86400,
+                &[hash.into()],
+                summary,
+                "m",
+                win,
+            )
             .unwrap();
         store
             .list_recent_memories(dek, 100)
@@ -247,7 +256,8 @@ mod tests {
             idx.upsert(id, &v).unwrap();
         }
 
-        let hits = search_memories(&store, &dek, &idx, &emb, "Rust 研究", "episodic", None, 3).unwrap();
+        let hits =
+            search_memories(&store, &dek, &idx, &emb, "Rust 研究", "episodic", None, 3).unwrap();
         assert!(!hits.is_empty());
         // 烹饪记忆不该排第一
         assert_ne!(hits[0].memory.id, id_cook);
@@ -264,8 +274,12 @@ mod tests {
         idx.upsert(&id, &v).unwrap();
 
         // 窗口完全在 episodic window (1000..87400) 之外
-        let tf = TimeFilter { start_unix: 500_000, end_unix: 600_000 };
-        let hits = search_memories(&store, &dek, &idx, &emb, "Rust", "episodic", Some(tf), 5).unwrap();
+        let tf = TimeFilter {
+            start_unix: 500_000,
+            end_unix: 600_000,
+        };
+        let hits =
+            search_memories(&store, &dek, &idx, &emb, "Rust", "episodic", Some(tf), 5).unwrap();
         assert!(hits.is_empty(), "out-of-window memory must be excluded");
     }
 
@@ -286,7 +300,10 @@ mod tests {
         store.demote_cold_memories(400 * day, 180 * day).unwrap();
 
         let hits = search_memories(&store, &dek, &idx, &emb, "Rust", "episodic", None, 5).unwrap();
-        assert!(hits.is_empty(), "cold memory must be excluded from default retrieval");
+        assert!(
+            hits.is_empty(),
+            "cold memory must be excluded from default retrieval"
+        );
     }
 
     #[test]

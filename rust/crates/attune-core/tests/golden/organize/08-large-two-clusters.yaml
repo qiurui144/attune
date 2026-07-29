@@ -1,0 +1,30 @@
+id: 08-large-two-clusters
+description: 较大规模 (各 10 点) 两簇 → ≥2 组稳定, 全覆盖, 命名非空 (规模回归)
+min_cluster_size: 5
+items:
+  - { id: a01, lobe: 0, title: filing a01 }
+  - { id: a02, lobe: 0, title: filing a02 }
+  - { id: a03, lobe: 0, title: filing a03 }
+  - { id: a04, lobe: 0, title: filing a04 }
+  - { id: a05, lobe: 0, title: filing a05 }
+  - { id: a06, lobe: 0, title: filing a06 }
+  - { id: a07, lobe: 0, title: filing a07 }
+  - { id: a08, lobe: 0, title: filing a08 }
+  - { id: a09, lobe: 0, title: filing a09 }
+  - { id: a10, lobe: 0, title: filing a10 }
+  - { id: b01, lobe: 4, title: ticket b01 }
+  - { id: b02, lobe: 4, title: ticket b02 }
+  - { id: b03, lobe: 4, title: ticket b03 }
+  - { id: b04, lobe: 4, title: ticket b04 }
+  - { id: b05, lobe: 4, title: ticket b05 }
+  - { id: b06, lobe: 4, title: ticket b06 }
+  - { id: b07, lobe: 4, title: ticket b07 }
+  - { id: b08, lobe: 4, title: ticket b08 }
+  - { id: b09, lobe: 4, title: ticket b09 }
+  - { id: b10, lobe: 4, title: ticket b10 }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

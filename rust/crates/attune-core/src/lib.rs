@@ -26,7 +26,7 @@
 //!
 //! - L0 🔒 chunk 永不出网 (强制本地 LLM)
 //! - L1 默认 12 PII 类脱敏 → 云端 LLM
-//! - L3 LLM 语义脱敏 (v0.7, K3 一体机)
+//! - L3 LLM 语义脱敏 (v0.7, local-scheduler appliance)
 //!
 //! ## Stable public API for routing consumers (Plan A2 dependency anchor)
 //!
@@ -46,14 +46,35 @@
 //! let _scope = CacheScope::Llm;
 //! ```
 
+// ── ORT 链接模型守卫:启用本地推理时恰开 ort-bundled 或 ort-dynamic 之一──
+#[cfg(all(feature = "ort-bundled", feature = "ort-dynamic"))]
+compile_error!(
+    "features `ort-bundled` and `ort-dynamic` are mutually exclusive — pick one onnxruntime linkage model"
+);
+#[cfg(all(
+    feature = "local-inference",
+    not(any(feature = "ort-bundled", feature = "ort-dynamic"))
+))]
+compile_error!(
+    "local-inference requires one of `ort-bundled` (download-binaries) or `ort-dynamic` (load-dynamic)"
+);
+
 pub mod ai_annotator;
 pub mod annotation_weight;
+// INT-1: browser login-assist sidecar (community-browser-automation subprocess).
+// SidecarController (JSON-over-CLI contract G1-G6) + recipe + L-7 entry_url guard.
+pub mod browser_login;
 // v1.0.6 Privacy Logic Strategy — single outbound enforcement entry-point.
 // Every network egress (LLM / Cloud SaaS / WebDAV / Web Search / Telemetry)
 // MUST be wrapped by OutboundGate::enforce so settings + PII redactor are
 // consulted in one place. See docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md.
 pub mod outbound_gate;
 pub use outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
+// edge_cloud: 端云协同调度 Model 1 — attune governor 接 local-scheduler /capacity，
+// 按 capability/load/cost/privacy 四维路由（显式启用 local-scheduler；个人版 0 回退）。
+// 隐私门（L0 永不出网 + 脱敏）仍在 OutboundGate；本模块只决定「在哪跑」。
+// spec: docs/superpowers/specs/2026-06-22-edge-cloud-model1.md
+pub mod edge_cloud;
 // v1.0.6 Privacy Logic Strategy — default-off telemetry queue.
 // Stub for v1.0.6: ships queue + default-false persistence, no HTTP send yet.
 // Actual send gated behind future v1.1 toggle AND privacy.telemetry == true.
@@ -65,6 +86,7 @@ pub mod async_fs;
 // spec: docs/superpowers/specs/2026-05-28-cache-context-token-standard-api.md
 // Public surface frozen at Task M for Plan A2 routing consumers.
 pub mod cache;
+pub mod capability;
 pub mod usage;
 // agent_quality: ACP-2 unified quality gate orchestration (workspace manifest SSOT).
 // spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §3 ACP-2
@@ -81,103 +103,143 @@ pub mod agent_quality;
 //
 // Spec anchor: docs/superpowers/specs/2026-05-28-cache-context-token-
 // standard-api.md §8 ("Stable public API"). Plan A2 blockedBy = this commit.
+pub use cache::{cache_key, CacheBackend, CacheScope, CachedValue};
 pub use usage::{
-    CacheOutcome, CallOutcome, ErrorKind, TokenUsage, UsageEvent, UsageKind,
-    UsageRecorderGuard, UsageAggregator,
+    CacheOutcome, CallOutcome, ErrorKind, TokenUsage, UsageAggregator, UsageEvent, UsageKind,
+    UsageRecorderGuard,
 };
-pub use cache::{CacheBackend, CacheScope, CachedValue, cache_key};
 // chat 模块整体 pub(crate) — ChatEngine 只能内部构造（依赖 Vault/Store internal types）。
 // 外部消费者（attune-server route）通过本 crate re-export 拿到 Citation / ChatResponse /
 // parse_confidence / strip_confidence_marker 这些公开 API。
 pub(crate) mod chat;
-pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
+pub use chat::{parse_confidence, strip_confidence_marker, ChatEngine, ChatResponse, Citation};
 // chat_reliability — post-hoc deterministic evaluation agent for LLM chat
 // responses (citation grounding + factual consistency + hallucination flag).
 // Zero LLM cost, designed to run from a background tokio task after each
 // chat turn. See module-level docs for cost contract + verification doctrine.
+pub mod capability_dispatch;
 pub mod chat_reliability;
 pub mod chunker;
-pub mod context_compress;
+pub mod context_admission;
 pub mod context_budget;
+pub mod context_compress;
+pub mod document_intelligence;
+pub mod document_model;
+pub mod document_transform;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
-pub mod capability_dispatch;
 // wasm_runtime: 跨平台 agent 分发 — wasmtime + WASI preview1 执行 wasm32-wasip1 模块.
 // feature-gated(默认开,极小镜像可 --no-default-features 关)。spec §4 模块边界.
-#[cfg(feature = "wasm-runtime")]
-pub mod wasm_runtime;
-pub mod skills;
-pub mod agents;
 pub mod agent_telemetry;
+pub mod agents;
 pub mod feedback;
 pub mod mcp_client;
+pub mod skills;
+#[cfg(feature = "wasm-runtime")]
+pub mod wasm_runtime;
 // S4b: case_metadata removed from OSS attune-core — migrated to attune-pro/plugins/law-pro/
+pub mod agent_runner;
 pub mod plugin_encryption;
 pub mod ui_runtime;
-pub mod agent_runner;
 // 2026-05-20: license / license_cache / accounts_client / device_binding 模块
 // 被移到 attune-accounts (OSS reference SaaS) — live cloud-Bearer-token path
 // 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
 // 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
-pub mod member_session;
 pub mod cloud_client;
-pub mod plugin_sync;
+pub mod cloud_session;
+pub mod member_session;
+pub mod member_verifier;
+// Cloud device fingerprint — 授权码激活时绑定本机到 license。指纹字段顺序逐字节
+// 对齐 cloud accounts `_compute_fingerprint_sig`(device_id|hostname|os|cpu_brand|
+// hardware_uuid)。区别于 quarantine 的 attune-accounts::device_binding(不同契约)。
+pub mod device_fingerprint;
+// SPKI cert-pinning for cloud accounts connections (slice8 §3.2). Layers a leaf
+// SubjectPublicKeyInfo pin on top of standard webpki chain validation; defends
+// against DNS-hijack / network MITM. See cert_pin.rs.
+pub mod cert_pin;
 pub mod plugin_sig;
+pub mod plugin_sync;
+// W1 plugin trust-anchor allowlist (cloud slice8 §5.6.1). The immutable trust
+// root for auto-installed plugins; defends against a compromised accounts server
+// substituting an attacker signing key. See plugin_anchor.rs.
+pub mod asr;
+pub mod asr_decode; // pure-Rust audio pre-decode → 16 kHz mono WAV (feature: asr-sensevoice)
+pub mod asr_sensevoice; // SenseVoice (sherpa-onnx) in-process ASR provider (feature: asr-sensevoice)
+pub mod backup;
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;
+pub mod doc_privacy; // 文档文件级隐私: 检测/分级/可逆脱敏/机密 fail-closed (spec 2026-06-20, INT-2 借鉴 kvm)
 pub mod embed;
 pub mod entities;
-pub mod infer;
+pub mod entitlement; // trust-chain T5: EntitlementCache + grace state machine + clock-rollback
+pub mod entitlement_anchor; // trust-chain SEC-1: entitlement signing-key anchor + verify
+pub mod entitlement_reverify; // trust-chain T8: re-verify orchestration (SEC-1/2 worker integration)
 pub mod error;
+pub mod export; // artifact export engine: IR → xlsx/csv/md/docx/pdf (零成本,无 LLM)
+pub mod governor;
 pub mod index;
+pub mod infer;
 pub mod ingest;
 pub mod intent_router;
-pub mod net;
-pub mod governor;
+pub mod job_handler; // G5: per-kind durable job dispatch (JobHandler + run_one_job)
 pub mod llm;
 pub mod llm_settings;
-pub mod ollama_setup;
-pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
-pub mod asr;
+pub mod local_resource;
+pub mod memory;
+pub mod memory_consolidation;
+pub mod monitoring; // 信息监控闭环: watch / digest / triage / dedup / deep-research (spec 2026-06-19)
+pub mod net;
+pub mod ocr; // v0.6.0-rc.3: pub for ai_stack status API
+pub(crate) mod ocr_image_codec; // bounded, model-independent raster → Scheduler PNG adapter
 pub mod office_job_queue;
+pub mod ollama_setup;
+pub mod organizer;
 pub mod parser;
 pub mod pii;
 pub mod platform;
-pub mod memory_consolidation;
-pub mod memory;
+pub mod plugin_anchor;
+pub mod process;
 pub mod project_recommender;
 pub mod queue;
-pub mod backup;
+pub mod redacting_llm;
 pub mod reindex;
 pub mod resource_governor;
+pub mod retrieval_plan;
 pub mod scanner;
 pub mod scanner_webdav;
 pub mod search;
+pub mod skill_evolution;
+pub mod skill_runtime; // skills 编排运行时: retrieve→agent→render→export (💰多步,用户触发,成本上限)
+pub mod staging; // G3① locked-mode ingest staging (encrypted-at-rest, drains on unlock)
 pub mod store;
+pub mod suggestions;
 pub mod tag_index;
 pub mod taxonomy;
+pub(crate) mod text_norm;
 pub mod vault;
 pub mod vectors;
-pub mod skill_evolution;
+pub mod writing; // 零成本主动建议引擎(确定性信号→规则→卡;编译期 no-LLM 守卫)
 
+pub mod batch;
+pub mod capture;
 pub mod cost;
-pub mod tools;
 pub mod demo;
-pub mod query_rewrite;
 pub mod entity_graph;
 pub mod linker;
-pub mod skill_eval;
-pub mod report;
+pub mod query_rewrite;
 pub mod reader;
+pub mod report;
+pub mod skill_eval;
+pub mod sync;
+pub mod terminology;
+pub mod tools;
+pub mod vlm;
 pub mod web_search;
 pub mod web_search_browser;
 pub(crate) mod web_search_engines;
 pub mod workflow;
-pub mod capture;
-pub mod sync;
-pub mod vlm;
 
 // version: ATTUNE_VERSION + is_compatible — plugin min_attune_version 加载期 gate.
 // spec: docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md §5.3

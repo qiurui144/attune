@@ -53,11 +53,9 @@ async fn raw_blob_is_ciphertext_not_plaintext() {
     let g = store.lock().unwrap();
     let raw: Vec<u8> = g
         .raw_connection_for_test()
-        .query_row(
-            "SELECT response FROM llm_cache WHERE key='k'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT response FROM llm_cache WHERE key='k'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     drop(g);
 

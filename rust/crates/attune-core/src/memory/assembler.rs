@@ -47,8 +47,18 @@ impl Default for MemoryConfig {
 
 /// Overview-intent markers — broad "what do I know / summarize my" verbs.
 const OVERVIEW_MARKERS: &[&str] = &[
-    "总结", "回顾", "学了什么", "了解多少", "了解什么", "知道什么", "掌握了什么",
-    "overview", "summarize my", "what do i know", "what have i", "recap",
+    "总结",
+    "回顾",
+    "学了什么",
+    "了解多少",
+    "了解什么",
+    "知道什么",
+    "掌握了什么",
+    "overview",
+    "summarize my",
+    "what do i know",
+    "what have i",
+    "recap",
 ];
 
 /// One assembled context block destined for the RAG system prompt.
@@ -343,13 +353,19 @@ mod tests {
     #[test]
     fn classify_recall_on_time_words() {
         assert_eq!(shape("上周学习的 rust 笔记内容是什么"), QueryShape::Recall);
-        assert_eq!(shape("what did i read 3 days ago about tokio"), QueryShape::Recall);
+        assert_eq!(
+            shape("what did i read 3 days ago about tokio"),
+            QueryShape::Recall
+        );
     }
 
     #[test]
     fn classify_overview_on_broad_markers() {
         assert_eq!(shape("总结一下我对 rust 的理解"), QueryShape::Overview);
-        assert_eq!(shape("what do i know about distributed systems"), QueryShape::Overview);
+        assert_eq!(
+            shape("what do i know about distributed systems"),
+            QueryShape::Overview
+        );
     }
 
     #[test]
@@ -359,9 +375,18 @@ mod tests {
 
     #[test]
     fn classify_precise_on_code_and_specifics() {
-        assert_eq!(shape("the signature of `compress_chunk`"), QueryShape::Precise);
-        assert_eq!(shape("MemoryVectorIndex::upsert 返回值类型"), QueryShape::Precise);
-        assert_eq!(shape("HTTP 错误码 404 的含义和处理方式详解"), QueryShape::Precise);
+        assert_eq!(
+            shape("the signature of `compress_chunk`"),
+            QueryShape::Precise
+        );
+        assert_eq!(
+            shape("MemoryVectorIndex::upsert 返回值类型"),
+            QueryShape::Precise
+        );
+        assert_eq!(
+            shape("HTTP 错误码 404 的含义和处理方式详解"),
+            QueryShape::Precise
+        );
     }
 
     #[test]
@@ -386,7 +411,16 @@ mod tests {
     #[allow(dead_code)]
     fn seed_episodic(store: &Store, dek: &Key32, hash: &str, summary: &str, win: i64) -> String {
         store
-            .insert_memory(dek, "episodic", win, win + 86400, &[hash.into()], summary, "m", win)
+            .insert_memory(
+                dek,
+                "episodic",
+                win,
+                win + 86400,
+                &[hash.into()],
+                summary,
+                "m",
+                win,
+            )
             .unwrap();
         store
             .list_recent_memories(dek, 1000)
@@ -404,7 +438,10 @@ mod tests {
         let idx = MemoryVectorIndex::new(64).unwrap();
         let emb = MockEmbeddingProvider::new(64);
         let l0 = make_l0(3);
-        let cfg = MemoryConfig { tiered_assembler_enabled: false, memory_confidence: 0.70 };
+        let cfg = MemoryConfig {
+            tiered_assembler_enabled: false,
+            memory_confidence: 0.70,
+        };
         let out = assemble_context(&store, &dek, &idx, &emb, "总结一下", &l0, cfg).unwrap();
         assert_eq!(out.tier_used, "L0");
         assert_eq!(out.blocks.len(), 3);
@@ -419,8 +456,13 @@ mod tests {
         let emb = MockEmbeddingProvider::new(64);
         let l0 = make_l0(5);
         let out = assemble_context(
-            &store, &dek, &idx, &emb,
-            "`compress_chunk` 的函数签名是什么", &l0, MemoryConfig::default(),
+            &store,
+            &dek,
+            &idx,
+            &emb,
+            "`compress_chunk` 的函数签名是什么",
+            &l0,
+            MemoryConfig::default(),
         )
         .unwrap();
         assert_eq!(out.tier_used, "L0");
@@ -436,10 +478,19 @@ mod tests {
         let emb = MockEmbeddingProvider::new(128);
         let l0 = make_l0(4);
         let out = assemble_context(
-            &store, &dek, &idx, &emb, "总结我学了什么", &l0, MemoryConfig::default(),
+            &store,
+            &dek,
+            &idx,
+            &emb,
+            "总结我学了什么",
+            &l0,
+            MemoryConfig::default(),
         )
         .unwrap();
-        assert_eq!(out.tier_used, "L0", "no memory coverage must fall back to L0");
+        assert_eq!(
+            out.tier_used, "L0",
+            "no memory coverage must fall back to L0"
+        );
         assert_eq!(out.blocks.len(), 4);
     }
 
@@ -455,8 +506,14 @@ mod tests {
         let topic_text = "用户对 Rust 所有权 借用 生命周期 形成了系统理解";
         let (id, _) = store
             .insert_semantic_memory(
-                &dek, "topic-rust", &["m1".into(), "m2".into(), "m3".into(), "m4".into()],
-                topic_text, "m", 0, 1000, 1000,
+                &dek,
+                "topic-rust",
+                &["m1".into(), "m2".into(), "m3".into(), "m4".into()],
+                topic_text,
+                "m",
+                0,
+                1000,
+                1000,
             )
             .unwrap();
         let v = emb.embed(&[topic_text]).unwrap().0.pop().unwrap();
@@ -465,21 +522,31 @@ mod tests {
         let l0 = make_l0(5);
         // Overview-marker query ("总结") → Overview shape → L3 semantic lookup.
         let out = assemble_context(
-            &store, &dek, &idx, &emb,
+            &store,
+            &dek,
+            &idx,
+            &emb,
             "总结 用户对 Rust 所有权 借用 生命周期 形成了系统理解",
-            &l0, MemoryConfig::default(),
+            &l0,
+            MemoryConfig::default(),
         )
         .unwrap();
         assert_eq!(out.shape, QueryShape::Overview);
         assert_eq!(out.tier_used, "L3");
         assert!(out.blocks.iter().any(|b| b.tier == "L3"));
-        assert!(out.blocks.iter().any(|b| b.tier == "L0"), "must keep an L0 anchor");
+        assert!(
+            out.blocks.iter().any(|b| b.tier == "L0"),
+            "must keep an L0 anchor"
+        );
         // token count strictly smaller than dumping all 5 raw chunks
         let l0_only: usize = l0
             .iter()
             .map(|r| estimate_tokens(&r.title) + estimate_tokens(&r.content))
             .sum();
-        assert!(out.est_tokens < l0_only, "memory tier must inject fewer tokens");
+        assert!(
+            out.est_tokens < l0_only,
+            "memory tier must inject fewer tokens"
+        );
     }
 
     #[test]
@@ -495,7 +562,16 @@ mod tests {
         let win_start = (now / day) * day;
         let summary = "用户研究了 tokio async runtime 与 future 调度";
         store
-            .insert_memory(&dek, "episodic", win_start, win_start + day, &["e1".into()], summary, "m", now)
+            .insert_memory(
+                &dek,
+                "episodic",
+                win_start,
+                win_start + day,
+                &["e1".into()],
+                summary,
+                "m",
+                now,
+            )
             .unwrap();
         let id = store
             .list_recent_memories(&dek, 10)
@@ -509,9 +585,13 @@ mod tests {
 
         let l0 = make_l0(5);
         let out = assemble_context(
-            &store, &dek, &idx, &emb,
+            &store,
+            &dek,
+            &idx,
+            &emb,
             "今天研究的 tokio async runtime 与 future 调度内容",
-            &l0, MemoryConfig::default(),
+            &l0,
+            MemoryConfig::default(),
         )
         .unwrap();
         assert_eq!(out.shape, QueryShape::Recall);
@@ -531,7 +611,10 @@ mod tests {
 
         let dropped = vec![
             ("user".to_string(), "Rust 的所有权是什么".to_string()),
-            ("assistant".to_string(), "所有权是 Rust 的核心内存模型……".to_string()),
+            (
+                "assistant".to_string(),
+                "所有权是 Rust 的核心内存模型……".to_string(),
+            ),
             ("user".to_string(), "那借用规则呢".to_string()),
         ];
         let s1 = compact_history(&store, &dek, &llm, "sess-1", &dropped).unwrap();

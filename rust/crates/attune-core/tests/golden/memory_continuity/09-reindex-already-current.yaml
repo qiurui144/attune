@@ -1,0 +1,11 @@
+id: 09-reindex-already-current
+description: 记忆向量已是当前模型 → reindex 无操作, stale 始终 0 (幂等边界)
+reindex:
+  from_dim: 8
+  to_dim: 8
+  memories:
+    - { hash: rc1, summary: b-tree page split balancing, model: embed-dim8 }
+  recall_query: b-tree page split
+  recall_min_hits: 1
+expected:
+  stale_after_reindex: 0

@@ -1,10 +1,11 @@
 //! WebDAV 增量同步 —— bind-remote route 与周期 worker 共用的入库逻辑。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document, ingest_document_replacing, DocumentSink, IngestOutcome, RawDocument,
-    SourceConnector,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    retryable_degraded_marker, DocumentSink, IngestOutcome, RawDocument, SourceConnector,
 };
 use attune_core::scanner_webdav::{WebDavConfig, WebDavConnector};
 
@@ -23,7 +24,30 @@ pub fn sync_webdav_dir(
     config: WebDavConfig,
     corpus_domain: &str,
 ) -> Result<serde_json::Value, String> {
-    let connector = WebDavConnector::new(config);
+    // F-17 G1: REAL OutboundGate enforcement for the WebDAV egress. Read the
+    // live `settings.privacy.webdav` toggle + current vault unlock state and
+    // hand them to the connector so OutboundGate refuses BEFORE any PROPFIND/GET
+    // when the user disabled webdav or the vault is locked. Fail-closed: missing
+    // privacy block ⇒ disabled (matches the 5-egress default-off contract).
+    let (webdav_enabled, vault_unlocked) = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let unlocked = matches!(vault.state(), attune_core::vault::VaultState::Unlocked);
+        let enabled = vault
+            .store()
+            .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+            .and_then(|s| {
+                s.get("privacy")
+                    .and_then(|p| p.get("webdav"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        (enabled, unlocked)
+    };
+    let connector =
+        WebDavConnector::new(config).with_outbound_policy(webdav_enabled, vault_unlocked);
 
     // 阶段 1：锁外做全部网络 I/O（list + 逐文件 fetch），物化到 Vec。
     let mut docs: Vec<RawDocument> = Vec::new();
@@ -39,15 +63,23 @@ pub fn sync_webdav_dir(
     let mut new_files = 0usize;
     let mut updated_files = 0usize;
     let mut skipped_files = 0usize;
+    let mut deleted_files = 0usize;
     let mut errors: Vec<String> = Vec::new();
+    let mut seen_refs: HashSet<String> = HashSet::new();
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(state, None);
 
     for mut doc in docs {
         total += 1;
         doc.corpus_domain = Some(corpus_domain.to_string());
 
         let source_ref = doc.source_ref.clone();
+        seen_refs.insert(source_ref.clone());
         let etag = doc.modified_marker.clone().unwrap_or_default();
-        let filename = source_ref.rsplit('/').next().unwrap_or(&source_ref).to_string();
+        let filename = source_ref
+            .rsplit('/')
+            .next()
+            .unwrap_or(&source_ref)
+            .to_string();
 
         // 每个文档单独拿锁：增量判断 + ingest + upsert_indexed_file，完成即 drop。
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -61,55 +93,159 @@ pub fn sync_webdav_dir(
         let store = vault.store();
 
         // ETag 增量判断：ETag 未变则跳过。
-        let existing = store.get_indexed_file(&source_ref).ok().flatten();
+        let existing = store
+            .get_indexed_file_for_dir(dir_id, &source_ref)
+            .ok()
+            .flatten();
+        let had_existing_tracking = existing.is_some();
+        let existing_item_active = match existing.as_ref() {
+            Some(row) => match store.indexed_file_points_to_active_item(row) {
+                Ok(active) => active,
+                Err(e) => {
+                    errors.push(format!("{filename}: check active tracking item {e}"));
+                    continue;
+                }
+            },
+            None => false,
+        };
+        if !existing_item_active {
+            if let Some(stale_item_id) = existing.as_ref().and_then(|row| row.item_id.as_ref()) {
+                if let Err(e) = store.enqueue_reindex(stale_item_id, "purge") {
+                    errors.push(format!("{filename}: enqueue stale tracking purge {e}"));
+                    continue;
+                }
+            }
+        }
         if let Some(ref ex) = existing {
-            if ex.file_hash == etag && !etag.is_empty() {
+            if ex.file_hash == etag && !etag.is_empty() && existing_item_active {
                 skipped_files += 1;
                 continue;
+            } else if ex.file_hash == etag && !etag.is_empty() {
+                tracing::warn!(
+                    "sync_webdav_dir: tracking for {source_ref} matches ETag but points to a missing/deleted item; re-ingesting"
+                );
             }
         }
 
-        // 内容已变（或首次入库）：删旧 item + 入队 purge + 记 doc_update 信号。
-        let old_item_id: Option<String> = existing.as_ref().and_then(|ex| {
-            ex.item_id.as_ref().map(|id| {
-                let _ = store.delete_item(id);
-                if let Err(e) = store.enqueue_reindex(id, "purge") {
-                    tracing::warn!("sync_webdav_dir: enqueue_reindex(purge) failed for {id}: {e}");
+        // 内容已变（或首次入库）：只有旧 item 没有其它 source ref 时才 purge。
+        let mut old_item_id: Option<String> = None;
+        if let Some(id) = existing
+            .as_ref()
+            .filter(|_| existing_item_active)
+            .and_then(|ex| ex.item_id.as_ref())
+        {
+            match store.indexed_file_has_other_refs(id, dir_id, &source_ref) {
+                Ok(true) => {
+                    tracing::info!(
+                        "sync_webdav_dir: source {source_ref} moved off shared item {id}; keeping old item"
+                    );
                 }
-                if let Err(e) = store.record_signal_event("doc_update", id, None) {
-                    tracing::debug!("sync_webdav_dir: record_signal_event failed for {id}: {e}");
+                Ok(false) => {
+                    let _ = store.delete_item(id);
+                    if let Err(e) = store.enqueue_reindex(id, "purge") {
+                        tracing::warn!(
+                            "sync_webdav_dir: enqueue_reindex(purge) failed for {id}: {e}"
+                        );
+                    }
+                    if let Err(e) = store.record_signal_event("doc_update", id, None) {
+                        tracing::debug!(
+                            "sync_webdav_dir: record_signal_event failed for {id}: {e}"
+                        );
+                    }
+                    old_item_id = Some(id.clone());
                 }
-                id.clone()
-            })
-        });
+                Err(e) => {
+                    errors.push(format!("{filename}: check shared item refs {e}"));
+                    continue;
+                }
+            }
+        }
 
         let outcome = if let Some(ref old_id) = old_item_id {
-            ingest_document_replacing(store, &dek, &doc, old_id)
+            ingest_document_replacing_with_options(store, &dek, &doc, old_id, &ingest_options)
         } else {
-            ingest_document(store, &dek, &doc)
+            ingest_document_with_options(store, &dek, &doc, &ingest_options)
         };
 
         match outcome {
             Ok(IngestOutcome::Inserted { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id);
-                if old_item_id.is_some() {
-                    updated_files += 1;
-                } else {
-                    new_files += 1;
+                match store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id) {
+                    Ok(_) if had_existing_tracking => updated_files += 1,
+                    Ok(_) => new_files += 1,
+                    Err(e) => errors.push(format!("{filename}: persist tracking {e}")),
                 }
             }
             Ok(IngestOutcome::Updated { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id);
-                updated_files += 1;
+                match store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id) {
+                    Ok(_) => updated_files += 1,
+                    Err(e) => errors.push(format!("{filename}: persist tracking {e}")),
+                }
             }
-            Ok(IngestOutcome::Duplicate { .. }) | Ok(IngestOutcome::Skipped { .. }) => {
-                skipped_files += 1;
+            Ok(IngestOutcome::Degraded {
+                item_id, reason, ..
+            }) => {
+                let retry_marker = retryable_degraded_marker(&etag);
+                if let Err(e) =
+                    store.upsert_indexed_file(dir_id, &source_ref, &retry_marker, &item_id)
+                {
+                    errors.push(format!("{filename}: persist retry marker {e}"));
+                } else {
+                    errors.push(format!(
+                        "{filename}: retryable degraded extraction: {reason}"
+                    ));
+                }
             }
+            Ok(IngestOutcome::Duplicate { item_id }) => {
+                match store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id) {
+                    Ok(_) => skipped_files += 1,
+                    Err(e) => errors.push(format!("{filename}: persist duplicate tracking {e}")),
+                }
+            }
+            Ok(IngestOutcome::Skipped { .. }) => skipped_files += 1,
             Err(e) => {
                 errors.push(format!("{filename}: ingest {e}"));
             }
         }
         // vault guard 在此隐式 drop，下一个文档前释放锁。
+    }
+
+    // 删除检测：WebDAV list 是当前远端视图；本次未出现的旧 source_ref 视为远端已删。
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let store = vault.store();
+        if let Ok(prev) = store.list_indexed_files_for_dir(dir_id) {
+            for row in prev {
+                if seen_refs.contains(&row.path) {
+                    continue;
+                }
+                if let Some(item_id) = &row.item_id {
+                    match store.indexed_file_has_other_refs(item_id, dir_id, &row.path) {
+                        Ok(true) => {
+                            tracing::info!(
+                                "sync_webdav_dir: deleted source {} detached from shared item {item_id}",
+                                row.path
+                            );
+                        }
+                        Ok(false) => {
+                            let _ = store.delete_item(item_id);
+                            if let Err(e) = store.enqueue_reindex(item_id, "purge") {
+                                tracing::warn!("sync_webdav_dir: purge deleted {item_id}: {e}");
+                            }
+                            let _ = store.record_signal_event("doc_delete", item_id, None);
+                        }
+                        Err(e) => {
+                            errors.push(format!("{}: check shared item refs {e}", row.path));
+                            continue;
+                        }
+                    }
+                }
+                if let Err(e) = store.delete_indexed_file_for_dir(dir_id, &row.path) {
+                    errors.push(format!("{}: delete tracking {e}", row.path));
+                    continue;
+                }
+                deleted_files += 1;
+            }
+        }
     }
 
     // 所有文档处理完毕后更新 last_etag_sync（best-effort，失败忽略）。
@@ -123,6 +259,7 @@ pub fn sync_webdav_dir(
         "new_files": new_files,
         "updated_files": updated_files,
         "skipped_files": skipped_files,
+        "deleted_files": deleted_files,
         "errors": errors,
     }))
 }

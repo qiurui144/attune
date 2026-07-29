@@ -23,7 +23,56 @@
 
 use std::sync::Arc;
 
-use attune_core::llm::{DeterminismLevel, MockLlmProvider};
+use attune_core::llm::{DeterminismLevel, MockLlmProvider, RecordingMockLlm};
+use attune_core::member_verifier::WhitelistMemberVerifier;
+
+/// Process-global lock serializing unit tests that mutate `HOME` / `XDG_DATA_HOME`
+/// (e.g. routes::plugins / routes::scenarios drive `default_plugins_dir` off these).
+/// `set_var` is process-wide, so concurrent env-mutating tests leak each other's
+/// plugin dirs / settings. Acquire this before touching those vars in any test.
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Integration tests in one test binary run concurrently by default. Each eval
+/// server temporarily points HOME/XDG at its own temp directory, so keep that
+/// process-global environment stable for the server's entire lifetime. An
+/// owned Tokio guard is Send and can safely live across the async health probe.
+static EVAL_SERVER_ENV_LOCK: std::sync::OnceLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    std::sync::OnceLock::new();
+
+/// Acquire [`ENV_LOCK`], tolerating a poisoned mutex (a prior test panic must not
+/// cascade into unrelated test failures).
+pub fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// RAII guard restoring the prior data-dir override on drop. See [`override_data_dir`].
+#[doc(hidden)]
+pub struct DataDirGuard(Option<std::path::PathBuf>);
+impl Drop for DataDirGuard {
+    fn drop(&mut self) {
+        attune_core::platform::set_dir_override_for_test(self.0.take());
+    }
+}
+
+/// Test-only: redirect attune's resolved data dir (and thus `default_plugins_dir`)
+/// to `app_dir` via the thread-local override seam. Unlike setting `XDG_DATA_HOME`,
+/// this works on Windows too (`dirs` reads `%LOCALAPPDATA%` via the Known-Folder API
+/// there, ignoring env vars). `app_dir` is the FINAL app dir — pass
+/// `tmp.path().join("attune")`. The prior override is restored when the returned
+/// guard drops, so no process-global `ENV_LOCK` serialization is needed.
+#[doc(hidden)]
+#[must_use]
+pub fn override_data_dir(app_dir: std::path::PathBuf) -> DataDirGuard {
+    DataDirGuard(attune_core::platform::set_dir_override_for_test(Some(
+        app_dir,
+    )))
+}
+
+/// The ONE license id the eval harness's member verifier approves. A `login-token` "paid" claim
+/// reaches `MemberState::Paid` only when its `license_id` equals this — i.e. it must pass a real
+/// verification step (a match), NOT the old blanket non-empty check. Any other license id is
+/// rejected exactly like production (C1 paywall-bypass fix).
+pub const EVAL_PAID_LICENSE: &str = "lic-test";
 
 /// Spawned in-process server. Listens on a random ephemeral port. Server is
 /// stopped when this struct is dropped (handle is aborted).
@@ -31,6 +80,7 @@ pub struct EvalServer {
     addr: std::net::SocketAddr,
     handle: tokio::task::JoinHandle<()>,
     _tmp: tempfile::TempDir,
+    _env_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl EvalServer {
@@ -56,32 +106,60 @@ impl Drop for EvalServer {
 /// determinism level is `Exact` by default. The `with_provider("anthropic")`
 /// client variant flips it to `Temp0` per-request via the label header.
 pub async fn spawn_eval_server() -> EvalServer {
-    // Per ai_stack_web_search_test.rs pattern: isolate vault to a tempdir.
+    spawn_eval_server_inner(false).await
+}
+
+/// Eval server with an unlocked vault and cloud-LLM consent enabled through the
+/// product privacy endpoint. The mock provider is installed after vault setup,
+/// so setup-time provider reload cannot replace it.
+pub async fn spawn_eval_server_with_cloud_llm() -> EvalServer {
+    spawn_eval_server_inner(true).await
+}
+
+async fn isolated_eval_environment() -> (tempfile::TempDir, tokio::sync::OwnedMutexGuard<()>) {
+    let env_guard = EVAL_SERVER_ENV_LOCK
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await;
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    // SAFETY: integration tests share a process — std::env::set_var is unsound
-    // when called concurrently with another thread reading env vars. We accept
-    // the residual race because:
-    //   (1) test setup happens before any tokio worker is spawned for this test;
-    //   (2) integration tests run with --test-threads=1 by default for this binary
-    //       (eval_determinism_test has 4 small tests, no concurrency benefit);
-    //   (3) the production server boots from the same env path under same constraint.
-    // Mirrors the precedent in attune-core/src/backup.rs::with_temp_home.
+    // SAFETY: every test in an eval integration binary enters through this
+    // harness. `EVAL_SERVER_ENV_LOCK` serializes those callers for the entire
+    // server lifetime, and the variables are set before that server spawns any
+    // worker. Separate integration-test files are separate OS processes.
     #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
         std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
     }
+    (tmp, env_guard)
+}
 
-    let vault =
-        attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
-    let state = Arc::new(crate::state::AppState::new(vault, false /* require_auth */));
+async fn spawn_eval_server_inner(enable_llm: bool) -> EvalServer {
+    // Per ai_stack_web_search_test.rs pattern: isolate vault to a tempdir.
+    let (tmp, env_guard) = isolated_eval_environment().await;
+
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    if enable_llm {
+        vault
+            .setup("P@ss-eval-cloud-llm-not-real")
+            .expect("set up eval vault before installing mock provider");
+    }
+    let state = Arc::new(crate::state::AppState::new(
+        vault, false, /* require_auth */
+    ));
 
     // Install a shared MockLlmProvider. Tests adjust its determinism via the
     // X-Attune-Test-Provider-Label header (see chat route).
     let mock = Arc::new(MockLlmProvider::new("eval-mock"));
     mock.set_determinism_level(DeterminismLevel::Exact);
     state.set_llm(Some(mock.clone()));
+
+    // C1: install a verifier that approves ONLY `EVAL_PAID_LICENSE`. A "paid" login-token must
+    // present that exact license to reach Paid — a real verification step. A forged/other license
+    // is rejected, so the member-gate test exercises the production reject path (not a bypass).
+    state.set_member_verifier(Arc::new(WhitelistMemberVerifier::new(EVAL_PAID_LICENSE)));
 
     let router = crate::build_router(Arc::clone(&state));
 
@@ -105,11 +183,101 @@ pub async fn spawn_eval_server() -> EvalServer {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    EvalServer {
+    let server = EvalServer {
         addr,
         handle,
         _tmp: tmp,
+        _env_guard: env_guard,
+    };
+    if enable_llm {
+        enable_cloud_llm(&server.url()).await;
     }
+    server
+}
+
+/// Like [`spawn_eval_server`] but installs a [`RecordingMockLlm`] as the LLM provider and returns
+/// a handle to it, so a test can inspect EXACTLY what reached the wire-facing provider — used to
+/// prove I1 (doc-intel cloud egress is PII-redacted) at the route level. The recording mock echoes
+/// a fixed response, so doc-intel ops complete fast (no retry storm).
+pub async fn spawn_eval_server_with_recording_llm() -> (EvalServer, Arc<RecordingMockLlm>) {
+    let (tmp, env_guard) = isolated_eval_environment().await;
+
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    // Set up + unlock the vault now so the later `enable_cloud_llm` PATCH (behind vault_guard) is
+    // not blocked. Doing it here means the test's `enable_cloud_llm` vault-setup call 409s early
+    // (AlreadyInitialized) BEFORE `reload_llm` — so the recording provider installed below is NOT
+    // clobbered by a settings-driven reload.
+    vault
+        .setup("P@ss-eval-cloud-llm-not-real")
+        .expect("vault setup");
+    let state = Arc::new(crate::state::AppState::new(vault, false));
+
+    // Recording provider: returns a benign JSON-ish verdict/summary so every doc-intel agent's
+    // parser succeeds in one call; every call's system+user is recorded for inspection. Installed
+    // AFTER vault setup so no reload_llm path replaces it.
+    let rec = Arc::new(RecordingMockLlm::new("eval-rec").with_response(
+        r#"{"verdict":"rewrite","reason":"ok","overview":"摘要","summary":"摘要","answer":"答案"}"#,
+    ));
+    state.set_llm(Some(rec.clone()));
+    state.set_member_verifier(Arc::new(WhitelistMemberVerifier::new(EVAL_PAID_LICENSE)));
+
+    let router = crate::build_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service()).await;
+    });
+
+    let client = reqwest::Client::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let url = format!("http://{}/health", addr);
+    while std::time::Instant::now() < deadline {
+        if let Ok(r) = client.get(&url).send().await {
+            if r.status().is_success() {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    (
+        EvalServer {
+            addr,
+            handle,
+            _tmp: tmp,
+            _env_guard: env_guard,
+        },
+        rec,
+    )
+}
+
+/// Enable cloud-LLM egress via the PRODUCT entry (`PATCH /api/v1/privacy/settings {llm:true}`),
+/// the same path the Privacy dashboard uses. doc-intel's tier-3 cloud ops refuse with
+/// `cloud-llm-disabled` until this opt-in is set (I2), so any test that needs a real cloud-LLM op
+/// must call this first — exercising the toggle the way a user would, not by writing meta directly.
+///
+/// `PATCH /privacy/settings` is behind `vault_guard`, so the in-memory vault (sealed by default)
+/// is set up first. Setup is best-effort idempotent — already-initialized returns 409, which we
+/// tolerate.
+pub async fn enable_cloud_llm(base: &str) {
+    let client = reqwest::Client::new();
+    // Unlock the vault so the privacy PATCH is not blocked by vault_guard.
+    let _ = client
+        .post(format!("{base}/api/v1/vault/setup"))
+        .json(&serde_json::json!({ "password": "P@ss-eval-cloud-llm-not-real" }))
+        .send()
+        .await;
+    let r = client
+        .patch(format!("{base}/api/v1/privacy/settings"))
+        .json(&serde_json::json!({ "llm": true }))
+        .send()
+        .await
+        .expect("PATCH privacy/settings");
+    assert!(
+        r.status().is_success(),
+        "enabling cloud LLM egress must succeed, got {}",
+        r.status()
+    );
 }
 
 /// HTTP client for the eval-mode test server. Owns a reusable reqwest client +
@@ -147,7 +315,8 @@ impl EvalTestClient {
         seed: Option<u64>,
         force_temp_zero: bool,
     ) -> ChatTestResponse {
-        let mut req = self.client
+        let mut req = self
+            .client
             .post(format!("{}/api/v1/chat", self.base_url))
             .json(&serde_json::json!({"message": msg, "history": []}));
         if let Some(s) = seed {
@@ -192,4 +361,21 @@ pub struct EvalBlock {
     pub abstained: bool,
     #[serde(default)]
     pub abstention_reason: Option<String>,
+}
+
+/// Test-only: build an in-memory, **unlocked** [`AppState`] with no LLM wired.
+///
+/// Used by the MCP gate/protocol unit tests (mcp::*): they need a vault that is
+/// unlocked (so scoped-token HMAC + audit writes work) but do NOT need any real
+/// LLM / index. The vault lives in a leaked tempdir for the test's lifetime.
+/// `require_auth=false`. No process-global env mutation (uses `Vault::open_memory`
+/// with a tempdir config dir).
+#[doc(hidden)]
+pub fn unlocked_state() -> Arc<crate::state::AppState> {
+    let tmp = Box::leak(Box::new(tempfile::TempDir::new().expect("tempdir")));
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    vault
+        .setup("test-pass-not-real")
+        .expect("vault setup unlocks");
+    Arc::new(crate::state::AppState::new(vault, false))
 }

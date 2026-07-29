@@ -21,9 +21,9 @@
 
 use rusqlite::params;
 
+use super::Store;
 use crate::crypto::{self, Key32};
 use crate::error::Result;
-use super::Store;
 
 /// 出站行（解密后给前端 / G3 worker 用）
 #[derive(Debug, Clone)]
@@ -131,8 +131,19 @@ impl Store {
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, url_enc, title_enc, domain_hash, dwell, scroll, copy, visit, created, promoted, pid) =
-                row?;
+            let (
+                id,
+                url_enc,
+                title_enc,
+                domain_hash,
+                dwell,
+                scroll,
+                copy,
+                visit,
+                created,
+                promoted,
+                pid,
+            ) = row?;
             let url_bytes = match crypto::decrypt(dek, &url_enc) {
                 Ok(b) => b,
                 Err(e) => {
@@ -236,7 +247,9 @@ mod tests {
             .unwrap();
         let url_blob: Vec<u8> = store
             .conn
-            .query_row("SELECT url_enc FROM auto_bookmarks LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT url_enc FROM auto_bookmarks LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let s = String::from_utf8_lossy(&url_blob);
         assert!(!s.contains("secret"), "url 必须加密: {s}");
@@ -244,7 +257,9 @@ mod tests {
 
         let title_blob: Vec<u8> = store
             .conn
-            .query_row("SELECT title_enc FROM auto_bookmarks LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT title_enc FROM auto_bookmarks LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let s = String::from_utf8_lossy(&title_blob);
         assert!(!s.contains("敏感"), "title 必须加密: {s}");
@@ -255,13 +270,35 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         let id = store
-            .record_auto_bookmark(&dek, "https://a.com/", "A", "h1", 200_000, 60, 1, 1, 1700000000)
+            .record_auto_bookmark(
+                &dek,
+                "https://a.com/",
+                "A",
+                "h1",
+                200_000,
+                60,
+                1,
+                1,
+                1700000000,
+            )
             .unwrap();
         let id2 = store
-            .record_auto_bookmark(&dek, "https://b.com/", "B", "h2", 250_000, 70, 2, 1, 1700000001)
+            .record_auto_bookmark(
+                &dek,
+                "https://b.com/",
+                "B",
+                "h2",
+                250_000,
+                70,
+                2,
+                1,
+                1700000001,
+            )
             .unwrap();
 
-        store.mark_auto_bookmark_promoted(id, "item-uuid-1").unwrap();
+        store
+            .mark_auto_bookmark_promoted(id, "item-uuid-1")
+            .unwrap();
         assert_eq!(store.pending_auto_bookmarks_count().unwrap(), 1);
         assert_eq!(store.auto_bookmarks_count().unwrap(), 2, "总数不变");
 
@@ -273,7 +310,10 @@ mod tests {
         assert_eq!(all.len(), 2);
         let promoted_row = all.iter().find(|r| r.id == id).unwrap();
         assert!(promoted_row.promoted);
-        assert_eq!(promoted_row.promoted_item_id.as_deref(), Some("item-uuid-1"));
+        assert_eq!(
+            promoted_row.promoted_item_id.as_deref(),
+            Some("item-uuid-1")
+        );
     }
 
     #[test]
@@ -281,11 +321,23 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         let id = store
-            .record_auto_bookmark(&dek, "https://x.com/", "X", "h", 200_000, 60, 1, 1, 1700000000)
+            .record_auto_bookmark(
+                &dek,
+                "https://x.com/",
+                "X",
+                "h",
+                200_000,
+                60,
+                1,
+                1,
+                1700000000,
+            )
             .unwrap();
         store.mark_auto_bookmark_promoted(id, "item-1").unwrap();
         // 重复 mark 不应改变 promoted_item_id（WHERE promoted = 0 拒）
-        store.mark_auto_bookmark_promoted(id, "item-2-WRONG").unwrap();
+        store
+            .mark_auto_bookmark_promoted(id, "item-2-WRONG")
+            .unwrap();
         let row = store
             .list_recent_auto_bookmarks(&dek, 10, false)
             .unwrap()
@@ -300,7 +352,17 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         store
-            .record_auto_bookmark(&dek, "https://a.com/", "A", "h", 200_000, 60, 1, 1, 1700000000)
+            .record_auto_bookmark(
+                &dek,
+                "https://a.com/",
+                "A",
+                "h",
+                200_000,
+                60,
+                1,
+                1,
+                1700000000,
+            )
             .unwrap();
         let wrong = Key32::generate();
         let rows = store.list_recent_auto_bookmarks(&wrong, 10, true).unwrap();
@@ -312,10 +374,30 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         store
-            .record_auto_bookmark(&dek, "https://a.com/", "A", "h", 200_000, 60, 1, 1, 1700000000)
+            .record_auto_bookmark(
+                &dek,
+                "https://a.com/",
+                "A",
+                "h",
+                200_000,
+                60,
+                1,
+                1,
+                1700000000,
+            )
             .unwrap();
         store
-            .record_auto_bookmark(&dek, "https://b.com/", "B", "h", 200_000, 60, 1, 1, 1700000001)
+            .record_auto_bookmark(
+                &dek,
+                "https://b.com/",
+                "B",
+                "h",
+                200_000,
+                60,
+                1,
+                1,
+                1700000001,
+            )
             .unwrap();
         let n = store.clear_all_auto_bookmarks().unwrap();
         assert_eq!(n, 2);

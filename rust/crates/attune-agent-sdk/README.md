@@ -4,7 +4,7 @@ WASM-safe leaf crate carrying the `Agent` trait + `AgentOutput<T>` + a wasm-safe
 error type (`AgentError` / `AgentResult`) so attune deterministic agents (pure
 computation — interest / limitation periods / evidence chains / patent claim
 extraction, etc.) can compile to `wasm32-wasip1` and ship as a single `.wasm` that
-runs on every platform (Windows / Linux / riscv64 K3) via the embedded wasmtime
+runs on every platform (Windows / Linux / riscv64 local scheduler) via the embedded wasmtime
 runtime.
 
 > 中文:这是 attune 的 wasm-safe agent leaf crate。承载 `Agent` trait +

@@ -4,6 +4,7 @@
 //! 提交后端点 (POST /api/v1/forms/<plugin_id>/<form_id>/submit) 接受 form data,
 //! 校验后转 capability_dispatch 调对应 agent, 返 audit_trail.
 
+use crate::error::AppError;
 use crate::state::SharedState;
 use attune_core::ui_runtime::{render_html, FormSchema};
 use axum::extract::{Path, State};
@@ -11,13 +12,71 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 
+fn app_error_response(e: AppError) -> (StatusCode, Json<serde_json::Value>) {
+    if let AppError::Detailed { status, body } = e {
+        return (status, Json(body));
+    }
+    let (status, message) = e.status_and_message();
+    (
+        status,
+        Json(serde_json::json!({
+            "error": message,
+        })),
+    )
+}
+
+fn form_asset_missing(
+    plugin_id: &str,
+    form_id: &str,
+    path: &std::path::Path,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "error": format!("form asset missing for plugin '{plugin_id}' form '{form_id}': {}", path.display()),
+            "code": "form-asset-missing",
+            "plugin_id": plugin_id,
+            "form_id": form_id,
+        })),
+    )
+}
+
+fn form_schema_required(plugin_id: &str, form_id: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "error": format!("form '{form_id}' in plugin '{plugin_id}' does not provide a YAML schema"),
+            "code": "form-schema-required",
+            "plugin_id": plugin_id,
+            "form_id": form_id,
+        })),
+    )
+}
+
+fn value_present(body: &serde_json::Value, field_name: &str) -> bool {
+    let mut cur = body;
+    for segment in field_name.split('.') {
+        cur = match cur.get(segment) {
+            Some(v) => v,
+            None => return false,
+        };
+    }
+    match cur {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(s) => !s.trim().is_empty(),
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+        _ => true,
+    }
+}
+
 /// GET /api/v1/forms/<plugin_id>/<form_id>
 /// 返渲染好的 HTML
 pub async fn get_form(
     State(state): State<SharedState>,
     Path((plugin_id, form_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let registry = state.plugin_registry.clone();
+    let registry = crate::routes::plugins::current_plugin_registry(&state);
     let plugin = registry.get_plugin(&plugin_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -44,53 +103,47 @@ pub async fn get_form(
     //   - "forms/<form_id>.yaml" — 标准 FormSchema yaml (优先)
     //   - "ui/civil_loan_stage3.html" — 静态 HTML 文件
     let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
-        ))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
+            )
+        })?;
     let component_path = plugins_root.join(&plugin_id).join(&component.html);
 
     // OPT-7: 避免 std::Path::exists 在 async 内阻塞 stat 调用
     let exists = attune_core::async_fs::try_exists(&component_path)
         .await
         .unwrap_or(false);
-    let html = if exists
-        && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
-    {
+    let html = if exists && component_path.extension().and_then(|s| s.to_str()) == Some("yaml") {
         // 真读 yaml 渲染 (async_fs 包装 spawn_blocking, 防 Axum worker 阻塞)
         let yaml_str = attune_core::async_fs::read_to_string(&component_path)
             .await
-            .map_err(|e| (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
-            ))?;
-        let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
-        ))?;
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
+                )
+            })?;
+        let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
+            )
+        })?;
         render_html(&schema)
     } else if exists {
         // HTML 文件直接返
         attune_core::async_fs::read_to_string(&component_path)
             .await
-            .map_err(|e| (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("read html: {e}")})),
-            ))?
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("read html: {e}")})),
+                )
+            })?
     } else {
-        // Fallback: 返 stub schema (开发期 plugin 还没提供 form 文件)
-        let schema = FormSchema {
-            id: component.id.clone(),
-            title: format!("Form: {}", component.id),
-            description: format!(
-                "{} (stub — plugin dir 未提供 {})",
-                component.description,
-                component.html
-            ),
-            submit_target: component.target.clone(),
-            fields: vec![],
-        };
-        render_html(&schema)
+        return Err(form_asset_missing(&plugin_id, &form_id, &component_path));
     };
 
     Ok((
@@ -107,7 +160,7 @@ pub async fn submit_form(
     Path((plugin_id, form_id)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let registry = state.plugin_registry.clone();
+    let registry = crate::routes::plugins::current_plugin_registry(&state);
     let plugin = registry.get_plugin(&plugin_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -127,13 +180,89 @@ pub async fn submit_form(
             )
         })?;
 
+    let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
+            )
+        })?;
+    let component_path = plugins_root.join(&plugin_id).join(&component.html);
+    let exists = attune_core::async_fs::try_exists(&component_path)
+        .await
+        .unwrap_or(false);
+    if !exists {
+        return Err(form_asset_missing(&plugin_id, &form_id, &component_path));
+    }
+    if component_path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+        return Err(form_schema_required(&plugin_id, &form_id));
+    }
+    let yaml_str = attune_core::async_fs::read_to_string(&component_path)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
+            )
+        })?;
+    let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
+        )
+    })?;
+    let missing: Vec<String> = schema
+        .fields
+        .iter()
+        .filter(|f| f.required && !value_present(&body, &f.name))
+        .map(|f| f.name.clone())
+        .collect();
+    if !missing.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing required form fields",
+                "code": "form-required-fields",
+                "fields": missing,
+                "plugin_id": plugin_id,
+                "form_id": form_id,
+            })),
+        ));
+    }
+
+    let target = component.target.clone();
+    let agent_id = target
+        .strip_prefix("agent:")
+        .unwrap_or(target.as_str())
+        .trim()
+        .to_string();
+    if agent_id.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": format!("form '{form_id}' has empty target"),
+                "code": "form-target-invalid",
+                "plugin_id": plugin_id,
+                "form_id": form_id,
+            })),
+        ));
+    }
+
+    let result = crate::routes::agents::run_agent(
+        State(state),
+        Path(agent_id.clone()),
+        Json(crate::routes::agents::RunAgentRequest { input: body }),
+    )
+    .await
+    .map_err(app_error_response)?;
+
     Ok(Json(serde_json::json!({
         "form_id": form_id,
         "plugin_id": plugin_id,
-        "target": component.target,
-        "received_fields": body,
-        "status": "ack",
-        "next_step": "调用方按 component.target 走 agent_runner::run_agent_subprocess",
+        "target": target,
+        "agent_id": agent_id,
+        "status": "ok",
+        "result": result.0,
     })))
 }
 
@@ -144,7 +273,7 @@ pub async fn get_form_schema(
     State(state): State<SharedState>,
     Path((plugin_id, form_id)): Path<(String, String)>,
 ) -> Result<Json<FormSchema>, (StatusCode, Json<serde_json::Value>)> {
-    let registry = state.plugin_registry.clone();
+    let registry = crate::routes::plugins::current_plugin_registry(&state);
     let plugin = registry.get_plugin(&plugin_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -177,9 +306,7 @@ pub async fn get_form_schema(
         .await
         .unwrap_or(false);
 
-    let schema = if exists
-        && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
-    {
+    let schema = if exists && component_path.extension().and_then(|s| s.to_str()) == Some("yaml") {
         let yaml_str = attune_core::async_fs::read_to_string(&component_path)
             .await
             .map_err(|e| {
@@ -194,15 +321,10 @@ pub async fn get_form_schema(
                 Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
             )
         })?
+    } else if exists {
+        return Err(form_schema_required(&plugin_id, &form_id));
     } else {
-        // plugin dir 未提供 yaml schema → 空字段 stub（前端显示"该表单暂无字段"）
-        FormSchema {
-            id: component.id.clone(),
-            title: component.id.clone(),
-            description: component.description.clone(),
-            submit_target: component.target.clone(),
-            fields: vec![],
-        }
+        return Err(form_asset_missing(&plugin_id, &form_id, &component_path));
     };
 
     Ok(Json(schema))

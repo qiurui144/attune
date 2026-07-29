@@ -1,0 +1,10 @@
+id: 11-wrong-passphrase-error
+description: "错误口令导入 → 整包拒绝, 零写入 (错误用例: 加密认证守卫)"
+passphrase: right-pass-0001
+wrong_passphrase: wrong-pass-9999
+memories:
+  - { hash: w1, summary: secret memory must not leak, model: embed-dim4 }
+  - { hash: w2, summary: another protected memory, model: embed-dim4 }
+expected:
+  import_errors: true
+  rows_after_failed_import: 0

@@ -111,7 +111,7 @@ UI Settings → About → 点击 "Check for updates" 按钮。
 
 - Linux 服务器 headless 部署(无 GUI)
 - 自动化升级管道 / docker / k8s
-- K3 一体机(走镜像 reflash,非 .deb,详 §3.4)
+- 本地调度器设备(走镜像 reflash,非 .deb,详 §3.4)
 
 ### 3.2 标准升级
 
@@ -144,22 +144,22 @@ systemctl --user start attune-server
 `~/.config/systemd/user/attune-server.service` 不需要改 — 二进制路径一致。
 `systemctl --user daemon-reload` 不必跑(unit 文件未改)。
 
-### 3.4 K3 一体机镜像化路径(RVA23)
+### 3.4 本地调度器设备镜像化路径(RVA23)
 
-K3 一体机**不走** .deb / tarball,走镜像化部署:
+本地调度器设备**不走** .deb / tarball,走镜像化部署:
 
 ```bash
 # 1. user 把 vault.db 主动 export 到 USB / SD card
 attune vault-export /mnt/usb/vault-export.bin
 
-# 2. K3 reflash 新镜像(rv-baseos + attune v1.0.1 预装)
-# 走 K3 厂商提供的 reflash 工具(参 docs/k3-ai-service/)
+# 2. local scheduler reflash 新镜像(rv-baseos + attune v1.0.1 预装)
+# 走 local scheduler 厂商提供的 reflash 工具(参 docs/local-scheduler-ai-service/)
 
 # 3. 启动新镜像,import vault.db
 attune vault-import /mnt/usb/vault-export.bin
 ```
 
-**K3 user 注意**:K3 form factor 不参与 Tauri auto-updater(详见 §8 Known Limitations)。
+**local scheduler user 注意**:local scheduler form factor 不参与 Tauri auto-updater(详见 §8 Known Limitations)。
 
 ---
 
@@ -321,12 +321,12 @@ attune status  # verify migration 完成
 
 ## 8. 已知风险 + Known Limitations
 
-### 8.1 K3 一体机不走 Tauri auto-updater
+### 8.1 本地调度器设备不走 Tauri auto-updater
 
-K3 form factor 用 RVA23 riscv64 + 镜像化部署,不参与 .deb / .AppImage 流水线。
-K3 升级走厂商提供的 reflash 工具(详 §3.4)。
+local scheduler form factor 用 RVA23 riscv64 + 镜像化部署,不参与 .deb / .AppImage 流水线。
+local scheduler 升级走厂商提供的 reflash 工具(详 §3.4)。
 
-**推 v1.0.7**:K3 镜像 OTA workflow(基于 mtd 分区切换)。
+**推 v1.0.7**:本地调度器镜像 OTA workflow(基于 mtd 分区切换)。
 
 ### 8.2 macOS / aarch64 暂不支持
 

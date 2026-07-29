@@ -1,0 +1,714 @@
+use axum::http::StatusCode;
+use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+pub(crate) const SUBMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const DEFAULT_KB_ASK_SUBMIT_TIMEOUT_MS: u32 = 120_000;
+const MIN_KB_ASK_SUBMIT_TIMEOUT_MS: u64 = 2_000;
+const MAX_KB_ASK_SUBMIT_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_PROFILE_CACHE_TTL_MS: u32 = 60_000;
+const DEFAULT_PROFILE_PROBE_TIMEOUT_MS: u32 = 500;
+static RUNTIME_PROFILE_CACHE: OnceLock<Mutex<attune_core::edge_cloud::RuntimeProfileCache>> =
+    OnceLock::new();
+
+const SCHEDULER_NATIVE_PROVIDERS: &[&str] =
+    &["local_scheduler", "edge_scheduler", "scheduler_native"];
+
+pub(crate) fn provider_is_scheduler_native(provider: &str) -> bool {
+    let normalized = provider.trim().to_ascii_lowercase();
+    SCHEDULER_NATIVE_PROVIDERS
+        .iter()
+        .any(|known| normalized == *known)
+}
+
+pub(crate) fn settings_provider_is_scheduler_native(settings: &Value, section: &str) -> bool {
+    settings
+        .get(section)
+        .and_then(|v| v.get("provider"))
+        .and_then(|v| v.as_str())
+        .map(provider_is_scheduler_native)
+        .unwrap_or(false)
+}
+
+/// Returns true for the legacy/default scheduler endpoint. Provider metadata is
+/// authoritative for custom ports; the port check only keeps existing `:8090`
+/// OpenAI-compatible settings working during migration.
+pub(crate) fn endpoint_is_scheduler(endpoint: &str) -> bool {
+    attune_core::net::destination::is_safe_local_scheduler_url(endpoint)
+        && url::Url::parse(endpoint)
+            .ok()
+            .and_then(|url| url.port_or_known_default())
+            .is_some_and(|port| port == 8090)
+}
+
+pub(crate) fn native_kb_enabled(
+    settings: &Value,
+    hardware: &attune_core::platform::HardwareProfile,
+) -> bool {
+    hardware.form_factor.prefers_local_llm()
+        || settings_provider_is_scheduler_native(settings, "embedding")
+        || settings_provider_is_scheduler_native(settings, "llm")
+        || env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_NATIVE_KB",
+                "ATTUNE_LOCAL_SCHEDULER_NATIVE_KB",
+            ],
+            false,
+        )
+}
+
+fn settings_enable_native_kb_ask(settings: &Value) -> bool {
+    if settings_provider_is_scheduler_native(settings, "llm") {
+        return true;
+    }
+    if attune_core::llm_settings::membership_gateway_is_managed(settings) {
+        return false;
+    }
+    settings
+        .pointer("/llm/endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .is_some_and(endpoint_is_scheduler)
+}
+
+/// Whether chat answer generation itself may use scheduler-native
+/// `kb.query.ask`.
+///
+/// This is deliberately narrower than [`native_kb_enabled`]: a local embedding
+/// provider may select the scheduler retrieval profile, but it must not override
+/// an explicitly configured cloud/member LLM. Local answer generation requires
+/// the LLM section itself to name the scheduler (or the existing operator env
+/// override).
+pub(crate) fn native_kb_ask_enabled(settings: &Value) -> bool {
+    settings_enable_native_kb_ask(settings)
+        || env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_NATIVE_KB",
+                "ATTUNE_LOCAL_SCHEDULER_NATIVE_KB",
+            ],
+            false,
+        )
+}
+
+pub(crate) fn base_from_settings(settings: &Value) -> String {
+    let configured = ["llm", "embedding"].into_iter().find_map(|section| {
+        let block = settings.get(section)?;
+        let endpoint = block.get("endpoint")?.as_str()?.trim();
+        if endpoint.is_empty() {
+            return None;
+        }
+        let provider = block
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let membership_gateway =
+            section == "llm" && attune_core::llm_settings::membership_gateway_is_managed(settings);
+        ((provider_is_scheduler_native(provider)
+            || (!membership_gateway && endpoint_is_scheduler(endpoint)))
+            && attune_core::net::destination::is_safe_local_scheduler_url(endpoint))
+        .then_some(endpoint)
+    });
+    let base = configured.unwrap_or(attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE);
+    attune_core::edge_cloud::capacity::normalize_scheduler_base(base)
+}
+
+pub(crate) fn base_from_optional_settings(settings: &Option<Value>) -> String {
+    settings
+        .as_ref()
+        .map(base_from_settings)
+        .unwrap_or_else(|| attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE.to_string())
+}
+
+pub(crate) fn base_from_state(state: &crate::state::SharedState) -> String {
+    let settings = state
+        .vault
+        .lock()
+        .ok()
+        .and_then(|vault| vault.store().get_meta("app_settings").ok().flatten())
+        .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    base_from_settings(&settings)
+}
+
+pub(crate) fn ingest_options_from_state(
+    state: &crate::state::SharedState,
+    profile: Option<&str>,
+) -> attune_core::ingest::IngestOptions {
+    let base = base_from_state(state);
+    attune_core::ingest::IngestOptions::with_profile(profile)
+        .with_scheduler_base(Some(&base))
+        .with_scheduler_timeout_ms(env_u32_any(
+            &[
+                "ATTUNE_SCHEDULER_PARSE_TIMEOUT_MS",
+                "ATTUNE_LOCAL_SCHEDULER_PARSE_TIMEOUT_MS",
+            ],
+            120_000,
+        ) as u64)
+        .with_chunking(attune_core::chunker::ChunkingOptions::scheduler_from_env())
+}
+
+pub(crate) fn kb_ask_submit_timeout() -> Duration {
+    let ms = env_u32_any(
+        &[
+            "ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS",
+            "ATTUNE_SCHEDULER_KB_ASK_SUBMIT_TIMEOUT_MS",
+            "ATTUNE_LOCAL_SCHEDULER_KB_ASK_SUBMIT_TIMEOUT_MS",
+        ],
+        DEFAULT_KB_ASK_SUBMIT_TIMEOUT_MS,
+    ) as u64;
+    Duration::from_millis(ms.clamp(MIN_KB_ASK_SUBMIT_TIMEOUT_MS, MAX_KB_ASK_SUBMIT_TIMEOUT_MS))
+}
+
+pub(crate) fn runtime_profiles_for_base(base: &str) -> attune_core::edge_cloud::RuntimeProfileSet {
+    let ttl = Duration::from_millis(env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_PROFILE_CACHE_TTL_MS",
+            "ATTUNE_LOCAL_SCHEDULER_PROFILE_CACHE_TTL_MS",
+        ],
+        DEFAULT_PROFILE_CACHE_TTL_MS,
+    ) as u64);
+    let timeout = Duration::from_millis(env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_PROFILE_PROBE_TIMEOUT_MS",
+            "ATTUNE_LOCAL_SCHEDULER_PROFILE_PROBE_TIMEOUT_MS",
+        ],
+        DEFAULT_PROFILE_PROBE_TIMEOUT_MS,
+    ) as u64);
+    let cache = RUNTIME_PROFILE_CACHE
+        .get_or_init(|| Mutex::new(attune_core::edge_cloud::RuntimeProfileCache::new(ttl)));
+    let client = attune_core::edge_cloud::LocalSchedulerClient::with_base(base, timeout);
+    cache
+        .lock()
+        .map(|mut guard| {
+            guard.set_ttl(ttl);
+            guard.get_or_refresh(&client, base, Instant::now())
+        })
+        .unwrap_or_else(|_| {
+            attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(base)
+        })
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SchedulerRuntimeProbe {
+    pub status: String,
+    pub tasks: Vec<String>,
+    pub runtime_tasks: Vec<attune_core::edge_cloud::SchedulerRuntimeTaskSpec>,
+    pub models: Vec<attune_core::edge_cloud::SchedulerModelStatus>,
+    pub error: Option<String>,
+}
+
+/// Probe the scheduler contract and model inventory once for all server status
+/// surfaces. Keeping one implementation prevents the readiness panel and
+/// `/ai_stack` from reporting contradictory daemon state.
+pub(crate) async fn probe_scheduler_runtime(base_url: String) -> SchedulerRuntimeProbe {
+    let probe = tokio::task::spawn_blocking(move || {
+        let client = attune_core::edge_cloud::LocalSchedulerClient::with_base(
+            &base_url,
+            attune_core::edge_cloud::capacity::DEFAULT_PROBE_TIMEOUT,
+        );
+        match client.benchmark_contract() {
+            Ok(contract) => {
+                let runtime_tasks = contract.runtime_tasks;
+                let tasks = runtime_tasks.iter().map(|task| task.name.clone()).collect();
+                match client.models() {
+                    Ok(snapshot) => SchedulerRuntimeProbe {
+                        status: "ready".to_string(),
+                        tasks,
+                        runtime_tasks,
+                        models: snapshot.models,
+                        error: None,
+                    },
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Scheduler model inventory probe failed"
+                        );
+                        SchedulerRuntimeProbe {
+                            status: "ready".to_string(),
+                            tasks,
+                            runtime_tasks,
+                            models: Vec::new(),
+                            error: Some("local scheduler model inventory unavailable".to_string()),
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Scheduler runtime contract probe failed");
+                SchedulerRuntimeProbe {
+                    status: "missing".to_string(),
+                    tasks: Vec::new(),
+                    runtime_tasks: Vec::new(),
+                    models: Vec::new(),
+                    error: Some("local scheduler runtime unavailable".to_string()),
+                }
+            }
+        }
+    })
+    .await;
+    match probe {
+        Ok(probe) => probe,
+        Err(error) => {
+            tracing::error!(error = %error, "Scheduler runtime probe task failed");
+            SchedulerRuntimeProbe {
+                status: "missing".to_string(),
+                tasks: Vec::new(),
+                runtime_tasks: Vec::new(),
+                models: Vec::new(),
+                error: Some("local scheduler runtime unavailable".to_string()),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchedulerDegradationPolicy {
+    /// The caller cannot fabricate a useful partial result. Return a structured
+    /// delay/failure response instead of pretending the task succeeded.
+    HonestFailure,
+    /// The caller may return a reduced result, but only with explicit degraded
+    /// metadata and warnings in the payload.
+    ExplicitDegradedResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SchedulerFailureView {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub scheduler_error: &'static str,
+    pub retryable: bool,
+    pub may_degrade: bool,
+}
+
+pub(crate) fn classify_scheduler_failure(
+    error: &attune_core::error::VaultError,
+    policy: SchedulerDegradationPolicy,
+) -> SchedulerFailureView {
+    use attune_core::edge_cloud::SchedulerErrorKind;
+
+    let kind = attune_core::edge_cloud::classify_scheduler_error(error);
+    let mut view = match kind {
+        Some(SchedulerErrorKind::Busy) => SchedulerFailureView {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "local-scheduler-busy",
+            scheduler_error: "busy",
+            retryable: true,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::Oversize) => SchedulerFailureView {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "local-scheduler-oversize",
+            scheduler_error: "oversize",
+            retryable: false,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::RateLimited) => SchedulerFailureView {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "local-scheduler-rate-limited",
+            scheduler_error: "rate-limited",
+            retryable: true,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::Unavailable | SchedulerErrorKind::Transport) => {
+            SchedulerFailureView {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "local-scheduler-unavailable",
+                scheduler_error: kind.map(|k| k.as_str()).unwrap_or("unavailable"),
+                retryable: true,
+                may_degrade: false,
+            }
+        }
+        Some(SchedulerErrorKind::Delayed) => SchedulerFailureView {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "local-scheduler-delayed",
+            scheduler_error: "delayed",
+            retryable: true,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::Cancelled) => SchedulerFailureView {
+            status: StatusCode::CONFLICT,
+            code: "local-scheduler-cancelled",
+            scheduler_error: "cancelled",
+            retryable: false,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::Expired) => SchedulerFailureView {
+            status: StatusCode::GONE,
+            code: "local-scheduler-expired",
+            scheduler_error: "expired",
+            retryable: false,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::JobFailed) => SchedulerFailureView {
+            status: StatusCode::BAD_GATEWAY,
+            code: "local-scheduler-job-failed",
+            scheduler_error: "job-failed",
+            retryable: false,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::InvalidJson) => SchedulerFailureView {
+            status: StatusCode::BAD_GATEWAY,
+            code: "local-scheduler-invalid-response",
+            scheduler_error: "invalid-json",
+            retryable: false,
+            may_degrade: false,
+        },
+        Some(SchedulerErrorKind::Http(status)) if (500..600).contains(&status) => {
+            SchedulerFailureView {
+                status: StatusCode::BAD_GATEWAY,
+                code: "local-scheduler-upstream-error",
+                scheduler_error: "http-error",
+                retryable: true,
+                may_degrade: false,
+            }
+        }
+        Some(SchedulerErrorKind::Http(_)) => SchedulerFailureView {
+            status: StatusCode::BAD_REQUEST,
+            code: "local-scheduler-request-rejected",
+            scheduler_error: "http-error",
+            retryable: false,
+            may_degrade: false,
+        },
+        None => SchedulerFailureView {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "local-scheduler-submit-failed",
+            scheduler_error: "unknown",
+            retryable: true,
+            may_degrade: false,
+        },
+    };
+
+    if policy == SchedulerDegradationPolicy::ExplicitDegradedResult {
+        view.may_degrade = matches!(
+            kind,
+            Some(SchedulerErrorKind::InvalidJson | SchedulerErrorKind::JobFailed)
+        );
+    }
+    view
+}
+
+pub(crate) fn scheduler_failure_body(
+    error: &attune_core::error::VaultError,
+    policy: SchedulerDegradationPolicy,
+    human_error: &'static str,
+) -> (StatusCode, serde_json::Value) {
+    scheduler_failure_body_with_context(error, policy, human_error, None, None, None)
+}
+
+pub(crate) fn scheduler_failure_body_with_context(
+    error: &attune_core::error::VaultError,
+    policy: SchedulerDegradationPolicy,
+    human_error: &'static str,
+    task: Option<&str>,
+    operation: Option<&str>,
+    component: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let view = classify_scheduler_failure(error, policy);
+    let mut body = serde_json::json!({
+        "error": human_error,
+        "code": view.code,
+        "scheduler_error": view.scheduler_error,
+        "retryable": view.retryable,
+        "may_degrade": view.may_degrade,
+        "degradation_allowed": view.may_degrade,
+        "degradation_policy": match policy {
+            SchedulerDegradationPolicy::HonestFailure => "honest_failure",
+            SchedulerDegradationPolicy::ExplicitDegradedResult => "explicit_degraded_result",
+        },
+        "detail": error.to_string(),
+    });
+    if let Some(task) = task.filter(|s| !s.trim().is_empty()) {
+        body["task"] = serde_json::Value::String(task.to_string());
+    }
+    if let Some(operation) = operation.filter(|s| !s.trim().is_empty()) {
+        body["operation"] = serde_json::Value::String(operation.to_string());
+    }
+    if let Some(component) = component.filter(|s| !s.trim().is_empty()) {
+        body["component"] = serde_json::Value::String(component.to_string());
+    }
+    (view.status, body)
+}
+
+pub(crate) fn env_u32_any(keys: &[&str], default: u32) -> u32 {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+pub(crate) fn env_bool_any(keys: &[&str], default: bool) -> bool {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key).ok().map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+        })
+        .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK.lock().expect("test env lock")
+    }
+
+    #[test]
+    fn scheduler_native_provider_names_are_generic() {
+        assert!(provider_is_scheduler_native("local_scheduler"));
+        assert!(provider_is_scheduler_native("edge_scheduler"));
+        assert!(provider_is_scheduler_native("scheduler_native"));
+        assert!(!provider_is_scheduler_native("openai_compat"));
+    }
+
+    #[test]
+    fn base_from_settings_uses_only_scheduler_endpoints_and_strips_v1() {
+        let settings = serde_json::json!({
+            "llm": { "provider": "local_scheduler", "endpoint": "http://127.0.0.1:8090/v1/" },
+            "embedding": { "provider": "local_scheduler", "endpoint": "http://127.0.0.1:8091" }
+        });
+        assert_eq!(base_from_settings(&settings), "http://127.0.0.1:8090");
+
+        let settings = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://api.openai.com/v1"
+            },
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8091/v1"
+            }
+        });
+        assert_eq!(base_from_settings(&settings), "http://127.0.0.1:8091");
+    }
+
+    #[test]
+    fn base_from_settings_never_treats_membership_openai_as_scheduler() {
+        let settings = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://member.example.test/v1"
+            }
+        });
+        assert_eq!(
+            base_from_settings(&settings),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE
+        );
+
+        let public_legacy_port = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://member.example.test:8090/v1"
+            }
+        });
+        assert_eq!(
+            base_from_settings(&public_legacy_port),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE
+        );
+
+        let private_legacy_port = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "http://10.0.0.8:8090/v1",
+                "managed_by": attune_core::llm_settings::MEMBER_GATEWAY_OWNER
+            }
+        });
+        assert_eq!(
+            base_from_settings(&private_legacy_port),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE,
+            "a membership gateway is OpenAI-compatible even when it happens to use the legacy scheduler port"
+        );
+        assert!(!settings_enable_native_kb_ask(&private_legacy_port));
+
+        let public_native_provider = serde_json::json!({
+            "llm": {
+                "provider": "local_scheduler",
+                "endpoint": "https://scheduler.example.test:8090/v1"
+            }
+        });
+        assert_eq!(
+            base_from_settings(&public_native_provider),
+            attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE,
+            "scheduler-native routing must never select a public destination"
+        );
+
+        for unsafe_endpoint in [
+            "http://user@127.0.0.1:8090",
+            "http://127.0.0.1:8090/admin?target=/models",
+            "http://169.254.169.254/latest",
+            "http://0.0.0.0:8090",
+        ] {
+            let settings = serde_json::json!({
+                "llm": {
+                    "provider": "local_scheduler",
+                    "endpoint": unsafe_endpoint
+                }
+            });
+            assert_eq!(
+                base_from_settings(&settings),
+                attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE,
+                "unsafe scheduler endpoint must fall back to loopback: {unsafe_endpoint}"
+            );
+            assert!(!endpoint_is_scheduler(unsafe_endpoint));
+        }
+    }
+
+    #[test]
+    fn native_kb_ask_gate_uses_llm_routing_not_embedding_routing() {
+        let cloud_member_with_local_embedding = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://member.example.test/v1"
+            },
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8090"
+            }
+        });
+        assert!(!settings_enable_native_kb_ask(
+            &cloud_member_with_local_embedding
+        ));
+
+        let native_provider = serde_json::json!({
+            "llm": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:18090"
+            }
+        });
+        assert!(settings_enable_native_kb_ask(&native_provider));
+
+        let legacy_scheduler_endpoint = serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "http://192.168.1.20:8090/v1"
+            }
+        });
+        assert!(settings_enable_native_kb_ask(&legacy_scheduler_endpoint));
+    }
+
+    #[test]
+    fn scheduler_failure_policy_distinguishes_delay_failure_and_degrade() {
+        let delayed = attune_core::error::VaultError::LlmUnavailable(
+            "local scheduler job job_abc timed out".to_string(),
+        );
+        let delayed_view = classify_scheduler_failure(
+            &delayed,
+            SchedulerDegradationPolicy::ExplicitDegradedResult,
+        );
+        assert_eq!(delayed_view.code, "local-scheduler-delayed");
+        assert!(delayed_view.retryable);
+        assert!(!delayed_view.may_degrade);
+
+        let oversize = attune_core::error::VaultError::LlmUnavailable(
+            "local scheduler /kb/tasks/kb.query.ask returned 422 Unprocessable Entity: too large"
+                .to_string(),
+        );
+        let oversize_view = classify_scheduler_failure(
+            &oversize,
+            SchedulerDegradationPolicy::ExplicitDegradedResult,
+        );
+        assert_eq!(oversize_view.code, "local-scheduler-oversize");
+        assert!(!oversize_view.may_degrade);
+
+        let failed = attune_core::error::VaultError::LlmUnavailable(
+            "local scheduler job job_abc failed: worker crashed".to_string(),
+        );
+        let strict_view =
+            classify_scheduler_failure(&failed, SchedulerDegradationPolicy::HonestFailure);
+        let degrade_view =
+            classify_scheduler_failure(&failed, SchedulerDegradationPolicy::ExplicitDegradedResult);
+        assert!(!strict_view.may_degrade);
+        assert!(degrade_view.may_degrade);
+    }
+
+    #[test]
+    fn scheduler_failure_body_includes_task_operation_and_policy() {
+        let failed = attune_core::error::VaultError::LlmUnavailable(
+            "local scheduler /jobs/job_abc returned 500 Internal Server Error: {\"detail\":\"worker_error\"}"
+                .to_string(),
+        );
+        let (_status, body) = scheduler_failure_body_with_context(
+            &failed,
+            SchedulerDegradationPolicy::HonestFailure,
+            "OCR failed",
+            Some("kb.document.ocr_recognize"),
+            Some("ocr_recognize"),
+            Some("ocr"),
+        );
+
+        assert_eq!(body["task"], "kb.document.ocr_recognize");
+        assert_eq!(body["operation"], "ocr_recognize");
+        assert_eq!(body["component"], "ocr");
+        assert_eq!(body["degradation_policy"], "honest_failure");
+        assert_eq!(body["degradation_allowed"], false);
+    }
+
+    #[test]
+    fn kb_ask_submit_timeout_has_sync_answer_headroom_and_env_override() {
+        let _guard = env_lock();
+        let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS").ok();
+        std::env::remove_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS");
+
+        assert_eq!(
+            kb_ask_submit_timeout(),
+            Duration::from_secs(120),
+            "sync kb.query.ask may include 30B model generation and must cover high-complexity RAG turns"
+        );
+
+        std::env::set_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS", "45000");
+        assert_eq!(kb_ask_submit_timeout(), Duration::from_secs(45));
+
+        match saved {
+            Some(value) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS", value),
+            None => std::env::remove_var("ATTUNE_CHAT_SCHEDULER_SUBMIT_TIMEOUT_MS"),
+        }
+    }
+
+    #[test]
+    fn scheduler_ingest_uses_coarse_l2_only_chunking_defaults() {
+        for key in [
+            "ATTUNE_SCHEDULER_INGEST_CHUNK_SIZE",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_SIZE",
+            "ATTUNE_INGEST_CHUNK_SIZE",
+            "ATTUNE_INDEX_CHUNK_SIZE",
+            "ATTUNE_CHUNK_SIZE",
+            "ATTUNE_SCHEDULER_INGEST_CHUNK_OVERLAP",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_OVERLAP",
+            "ATTUNE_INGEST_CHUNK_OVERLAP",
+            "ATTUNE_INDEX_CHUNK_OVERLAP",
+            "ATTUNE_CHUNK_OVERLAP",
+            "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+            "ATTUNE_INGEST_INCLUDE_LEVEL1",
+            "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+            "ATTUNE_INGEST_INCLUDE_LEVEL2",
+        ] {
+            if std::env::var_os(key).is_some() {
+                return;
+            }
+        }
+        let chunking = attune_core::chunker::ChunkingOptions::scheduler_from_env();
+        assert_eq!(
+            chunking.chunk_size,
+            attune_core::chunker::DEFAULT_SCHEDULER_CHUNK_SIZE
+        );
+        assert_eq!(
+            chunking.overlap,
+            attune_core::chunker::DEFAULT_SCHEDULER_OVERLAP
+        );
+        assert!(!chunking.include_level1);
+        assert!(chunking.include_level2);
+    }
+}

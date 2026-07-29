@@ -44,7 +44,15 @@ fn wal_reopen_after_drop_preserves_committed_data() {
         (0..5)
             .map(|i| {
                 store
-                    .insert_item(&dek, &format!("Doc {i}"), &make_content(2), None, "note", None, None)
+                    .insert_item(
+                        &dek,
+                        &format!("Doc {i}"),
+                        &make_content(2),
+                        None,
+                        "note",
+                        None,
+                        None,
+                    )
                     .unwrap()
             })
             .collect()
@@ -79,7 +87,15 @@ fn repeated_open_close_idempotent() {
         let store = Store::open(&db_path).unwrap();
         for i in 0..3 {
             store
-                .insert_item(&dek, &format!("Doc {i}"), &make_content(1), None, "note", None, None)
+                .insert_item(
+                    &dek,
+                    &format!("Doc {i}"),
+                    &make_content(1),
+                    None,
+                    "note",
+                    None,
+                    None,
+                )
                 .unwrap();
         }
     }
@@ -90,7 +106,15 @@ fn repeated_open_close_idempotent() {
         assert_eq!(store.item_count().unwrap(), 3, "第二次 open 前 3 条必须在");
         for i in 3..5 {
             store
-                .insert_item(&dek, &format!("Doc {i}"), &make_content(1), None, "note", None, None)
+                .insert_item(
+                    &dek,
+                    &format!("Doc {i}"),
+                    &make_content(1),
+                    None,
+                    "note",
+                    None,
+                    None,
+                )
                 .unwrap();
         }
     }
@@ -99,10 +123,15 @@ fn repeated_open_close_idempotent() {
     {
         let store = Store::open(&db_path).unwrap();
         let count = store.item_count().unwrap();
-        assert_eq!(count, 5, "三次 open/close 后 item 总数必须 = 5，实际 = {count}");
+        assert_eq!(
+            count, 5,
+            "三次 open/close 后 item 总数必须 = 5，实际 = {count}"
+        );
     }
 
-    println!("[crash_recovery] repeated_open_close_idempotent: OK — 5 items across 3 open/close cycles");
+    println!(
+        "[crash_recovery] repeated_open_close_idempotent: OK — 5 items across 3 open/close cycles"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -129,9 +158,16 @@ fn reindex_then_drop_reopen_consistent() {
         item_id = store
             .insert_item(&dek, "Persist Test", &content, None, "note", None, None)
             .unwrap();
-        let stats =
-            reindex::reindex_item(&store, &mut vectors, &fulltext, &item_id, "Persist Test", &content, "note")
-                .unwrap();
+        let stats = reindex::reindex_item(
+            &store,
+            &mut vectors,
+            &fulltext,
+            &item_id,
+            "Persist Test",
+            &content,
+            "note",
+        )
+        .unwrap();
         expected_chunks = stats.chunks_enqueued;
         assert!(expected_chunks >= 1, "至少 1 个 chunk 入队");
     } // store, vectors, fulltext all dropped
@@ -172,7 +208,16 @@ fn embed_queue_survives_store_drop_and_reopen() {
         // 直接入队若干任务（reindex 会入队，这里用它来填充 queue）
         let mut vectors = VectorIndex::new(384).unwrap();
         let ft = FulltextIndex::open_memory().unwrap();
-        let stats = reindex::reindex_item(&store, &mut vectors, &ft, &item_id, "Queue Test", &content, "note").unwrap();
+        let stats = reindex::reindex_item(
+            &store,
+            &mut vectors,
+            &ft,
+            &item_id,
+            "Queue Test",
+            &content,
+            "note",
+        )
+        .unwrap();
         enqueued = stats.chunks_enqueued;
     }
 
@@ -194,7 +239,11 @@ fn embed_queue_survives_store_drop_and_reopen() {
     for task in &tasks {
         store2.mark_embedding_done(task.id).unwrap();
     }
-    assert_eq!(store2.pending_embedding_count().unwrap(), 0, "全部 done 后 pending 必须为 0");
+    assert_eq!(
+        store2.pending_embedding_count().unwrap(),
+        0,
+        "全部 done 后 pending 必须为 0"
+    );
 
     println!("[crash_recovery] embed_queue_reopen: OK — {enqueued} tasks dequeued after reopen");
 }

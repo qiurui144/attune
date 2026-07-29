@@ -31,5 +31,5 @@ attune 4 个核心算法优势 benchmark (criterion-driven, statistical) 现独�
 ## 历史报告
 
 - `2026-Q2.md` — Q2 进度
-- `dual-track-baseline.md` — Python / Rust 双线 baseline
+- `dual-track-baseline.md` — historical baseline report
 - `phase-b-eval-2026-04-28.txt` / `phase-b-final.json` — Phase B 评估

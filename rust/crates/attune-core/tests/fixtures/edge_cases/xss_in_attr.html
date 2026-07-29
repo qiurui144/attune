@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head><title>Attr XSS</title></head>
+<body>
+  <p>VISIBLE_ATTR_TEST_MARKER is the only legit text.</p>
+  <button onmouseover="alert('XSS_ONMOUSEOVER_MARKER')">hover</button>
+  <input value="XSS_INPUT_VALUE_MARKER" onfocus="alert('XSS_ONFOCUS_MARKER')" />
+  <body onload="alert('XSS_BODY_ONLOAD_MARKER')">
+  <details ontoggle="alert('XSS_ONTOGGLE_MARKER')">summary</details>
+  <img src=x onerror=alert('XSS_BARE_ONERROR_MARKER')>
+</body>
+</html>

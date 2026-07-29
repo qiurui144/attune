@@ -9,7 +9,11 @@ fn agent(id: &str, tier: Tier, cost: CostClass, floor: &str) -> AgentSpec {
         id: id.to_string(),
         tier,
         plugin: "law-pro".to_string(),
-        kind: if floor.is_empty() { Kind::Deterministic } else { Kind::LlmJudge },
+        kind: if floor.is_empty() {
+            Kind::Deterministic
+        } else {
+            Kind::LlmJudge
+        },
         capability_boundary: format!("boundary-{id}"),
         model_tier_floor: floor.to_string(),
         cost_class: cost,
@@ -31,7 +35,13 @@ fn zero_cost_deterministic_runs_local_no_model() {
     let sched = Scheduler::new(Entitlement::paid_with_quota(100));
     let a = agent("civil_loan", Tier::Paid, CostClass::Zero, "");
     let d = sched.route(&a, None);
-    assert_eq!(d, ScheduleDecision::Local { model: None, degraded_from_cloud: false });
+    assert_eq!(
+        d,
+        ScheduleDecision::Local {
+            model: None,
+            degraded_from_cloud: false
+        }
+    );
     assert!(d.is_runnable());
 }
 
@@ -77,7 +87,12 @@ fn cloud_quota_exhausted_high_floor_cannot_degrade_blocks() {
     // gpt-4o-mini floor: a 3B local model cannot satisfy it → block (never
     // silently downgrade quality, §2.3).
     let sched = Scheduler::new(Entitlement::paid_with_quota(0));
-    let a = agent("defamation_extractor", Tier::Paid, CostClass::Cloud, "gpt-4o-mini");
+    let a = agent(
+        "defamation_extractor",
+        Tier::Paid,
+        CostClass::Cloud,
+        "gpt-4o-mini",
+    );
     let d = sched.route(&a, None);
     assert!(matches!(d, ScheduleDecision::BlockedQuotaExhausted { .. }));
     assert!(d.is_blocked());
@@ -92,7 +107,10 @@ fn cloud_quota_exhausted_no_local_available_blocks() {
     };
     let sched = Scheduler::new(ent);
     let a = agent("fact_extractor", Tier::Paid, CostClass::Cloud, "qwen3b");
-    assert!(matches!(sched.route(&a, None), ScheduleDecision::BlockedQuotaExhausted { .. }));
+    assert!(matches!(
+        sched.route(&a, None),
+        ScheduleDecision::BlockedQuotaExhausted { .. }
+    ));
 }
 
 // ── entitlement block ─────────────────────────────────────────────────────
@@ -118,7 +136,12 @@ fn free_agent_free_user_runs() {
 #[test]
 fn disabled_agent_blocks_before_any_cost() {
     let sched = Scheduler::new(Entitlement::paid_with_quota(100));
-    let a = agent("defamation_extractor", Tier::Paid, CostClass::Cloud, "gpt-4o-mini");
+    let a = agent(
+        "defamation_extractor",
+        Tier::Paid,
+        CostClass::Cloud,
+        "gpt-4o-mini",
+    );
     let d = sched.route(&a, Some("weak-model F1 below floor"));
     assert!(matches!(d, ScheduleDecision::BlockedDisabled { .. }));
     assert!(d.is_blocked());

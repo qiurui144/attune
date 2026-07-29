@@ -1,0 +1,6 @@
+id: 11-empty-scope-error
+description: 空 scope (0 item) → analyze_items 返回 EmptyScope 错误, 不产 proposal (error case)
+min_cluster_size: 5
+items: []
+expected:
+  error: empty-scope

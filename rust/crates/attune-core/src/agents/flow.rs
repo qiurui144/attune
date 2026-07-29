@@ -181,7 +181,12 @@ impl FlowSet {
                 }
             }
             if f.degrade.on_step_fail == OnStepFail::FallbackAgent
-                && f.degrade.fallback_agent.as_deref().unwrap_or("").trim().is_empty()
+                && f.degrade
+                    .fallback_agent
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
             {
                 return Err(format!(
                     "flow {} uses on_step_fail=fallback_agent but declares no fallback_agent",
@@ -243,7 +248,11 @@ impl FlowSet {
     pub fn route(&self, message: &str) -> Option<&FlowDef> {
         self.flows
             .iter()
-            .filter(|f| f.route_keywords.iter().any(|k| message.contains(k.as_str())))
+            .filter(|f| {
+                f.route_keywords
+                    .iter()
+                    .any(|k| message.contains(k.as_str()))
+            })
             .max_by(|x, y| {
                 x.route_priority
                     .cmp(&y.route_priority)
@@ -291,7 +300,10 @@ impl FlowSet {
 
 /// Build a quick lookup of `flow_id → priority` (used by routing diagnostics).
 pub fn flow_priorities(set: &FlowSet) -> BTreeMap<String, i32> {
-    set.flows.iter().map(|f| (f.id.clone(), f.route_priority)).collect()
+    set.flows
+        .iter()
+        .map(|f| (f.id.clone(), f.route_priority))
+        .collect()
 }
 
 /// The flow an intent resolved to — either a declared multi-step flow or a
@@ -337,7 +349,11 @@ pub fn resolve_flow(
     let best = registry
         .agents()
         .iter()
-        .filter(|a| a.route_keywords.iter().any(|k| message.contains(k.as_str())))
+        .filter(|a| {
+            a.route_keywords
+                .iter()
+                .any(|k| message.contains(k.as_str()))
+        })
         .max_by(|x, y| {
             x.route_priority
                 .cmp(&y.route_priority)
@@ -575,7 +591,10 @@ pub fn run_flow(
         // ④ ACP-4 + ACP-3 — run the scheduled step through the governable runner.
         let degraded = matches!(
             decision,
-            ScheduleDecision::Local { degraded_from_cloud: true, .. }
+            ScheduleDecision::Local {
+                degraded_from_cloud: true,
+                ..
+            }
         );
         match runner.run(agent, &decision, &payload) {
             Ok(out) => {
@@ -636,7 +655,13 @@ fn finish_non_optional(
     // failure), surface Degraded to make the disposition explicit.
     let last_was_block = trace
         .last()
-        .map(|t| !t.ran && (t.note.contains("blocked") || t.note.contains("disabled") || t.note.contains("quota") || t.note.contains("entitlement")))
+        .map(|t| {
+            !t.ran
+                && (t.note.contains("blocked")
+                    || t.note.contains("disabled")
+                    || t.note.contains("quota")
+                    || t.note.contains("entitlement"))
+        })
         .unwrap_or(false);
     let status = if status == FlowStatus::Partial && last_was_block {
         FlowStatus::Degraded
@@ -659,7 +684,10 @@ fn schedule_note(decision: &ScheduleDecision) -> String {
             ..
         } => "scheduled: local (degraded from cloud — quota exhausted)".to_string(),
         ScheduleDecision::Local { model, .. } => {
-            format!("scheduled: local (model={})", model.as_deref().unwrap_or("default"))
+            format!(
+                "scheduled: local (model={})",
+                model.as_deref().unwrap_or("default")
+            )
         }
         other => format!("scheduled: {other:?}"),
     }

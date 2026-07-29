@@ -10,7 +10,7 @@
 #   F-01-VAULT       1. /api/v1/vault/status 在新 vault 报 sealed
 #                    8. /vault/setup 不 crash + 返 token (基本可用性)
 #   F-09-FORMFACTOR  6. /diagnostics 暴露 form_factor + prefers_local_llm
-#                    7. ATTUNE_FORM_FACTOR=k3 env var override 生效
+#                    7. ATTUNE_FORM_FACTOR=local_scheduler compat env var override 生效
 #   F-16-DISTRIBUTION 2. 二进制 spawn 成功 + 健康端点 200
 #                    3. CORS preflight + Chrome 扩展 origin 允许
 #                    4. 未知 origin 不允许跨域
@@ -36,6 +36,12 @@ BINARY="${ATTUNE_SERVER_BIN:-rust/target/release/attune-server-headless}"
 PORT="${ATTUNE_SMOKE_PORT:-18901}"
 HOST="${ATTUNE_SMOKE_HOST:-127.0.0.1}"
 BASE_URL="http://${HOST}:${PORT}"
+BIN_DIR="$(cd "$(dirname "$BINARY")" && pwd)"
+if [ -d "$BIN_DIR/deps" ]; then
+    export LD_LIBRARY_PATH="$BIN_DIR:$BIN_DIR/deps:${LD_LIBRARY_PATH:-}"
+else
+    export LD_LIBRARY_PATH="$BIN_DIR:${LD_LIBRARY_PATH:-}"
+fi
 
 if [ ! -x "$BINARY" ]; then
     warn "二进制不存在: $BINARY，尝试构建..."
@@ -43,15 +49,15 @@ if [ ! -x "$BINARY" ]; then
         || fail "cargo build 失败"
 fi
 
-# ── 启动 server (no-auth 模式 + 模拟 K3 形态以测 v0.6.1 form_factor) ────
-# F-09-FORMFACTOR: 通过 ATTUNE_FORM_FACTOR=k3 测试 env var override 路径
+# ── 启动 server (no-auth 模式 + 模拟 edge scheduler appliance 形态) ────
+# F-09-FORMFACTOR: 内部枚举仍使用 local_scheduler 兼容值，用户可见命名为 edge scheduler。
 SMOKE_TMP=$(mktemp -d -t attune-smoke-XXXXXX)
 export HOME="$SMOKE_TMP"
 export XDG_DATA_HOME="$SMOKE_TMP/data"
 export XDG_CONFIG_HOME="$SMOKE_TMP/config"
-export ATTUNE_FORM_FACTOR=k3
+export ATTUNE_FORM_FACTOR=local_scheduler
 
-ok "启动 attune-server-headless on $BASE_URL (HOME=$SMOKE_TMP, ATTUNE_FORM_FACTOR=k3)"
+ok "启动 attune-server-headless on $BASE_URL (HOME=$SMOKE_TMP, edge scheduler form factor compat=local_scheduler)"
 "$BINARY" --host "$HOST" --port "$PORT" --no-auth > /tmp/attune-smoke-server.log 2>&1 &
 SERVER_PID=$!
 
@@ -121,16 +127,17 @@ TOKEN=$(echo "$SETUP_RESP" | grep -oE '"token":"[^"]+"' | head -1 | sed 's/"toke
 [ -n "$TOKEN" ] || fail "Test 7/10: vault setup 未返 token: $SETUP_RESP"
 ok "Test 7/10: F-01-VAULT setup → token (${#TOKEN} chars)"
 
-# ── 测试 8: F-09-FORMFACTOR — diagnostics 暴露 form_factor=k3 ────
+# ── 测试 8: F-09-FORMFACTOR — diagnostics 暴露 edge scheduler appliance compat form_factor ────
 DIAG=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/status/diagnostics")
-echo "$DIAG" | grep -q '"form_factor":"k3"' || fail "Test 8/10: 期望 form_factor=k3 (因 ATTUNE_FORM_FACTOR=k3): $(echo "$DIAG" | head -c 200)"
-echo "$DIAG" | grep -q '"prefers_local_llm":true' || fail "Test 8/10: K3 形态应 prefers_local_llm=true"
-ok "Test 8/10: F-09-FORMFACTOR /diagnostics 报 form_factor=k3 + prefers_local_llm=true"
+echo "$DIAG" | grep -q '"form_factor":"local_scheduler"' || fail "Test 8/10: 期望 form_factor=local_scheduler (因 ATTUNE_FORM_FACTOR=local_scheduler): $(echo "$DIAG" | head -c 200)"
+echo "$DIAG" | grep -q '"prefers_local_llm":true' || fail "Test 8/10: edge scheduler 形态应 prefers_local_llm=true"
+ok "Test 8/10: F-09-FORMFACTOR /diagnostics 报 edge scheduler compat form_factor + prefers_local_llm=true"
 
-# ── 测试 9: F-09-FORMFACTOR — settings 默认 LLM = ollama (K3) ────
+# ── 测试 9: F-09-FORMFACTOR — settings 默认 LLM = edge scheduler endpoint ────
 SETTINGS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/settings")
-echo "$SETTINGS" | grep -q '"provider":"ollama"' || fail "Test 9/10: K3 形态应默认 llm.provider=ollama: $(echo "$SETTINGS" | head -c 200)"
-ok "Test 9/10: F-09-FORMFACTOR K3 settings 默认 ollama"
+echo "$SETTINGS" | grep -q '"provider":"openai_compat"' || fail "Test 9/10: edge scheduler 形态应默认 llm.provider=openai_compat: $(echo "$SETTINGS" | head -c 240)"
+echo "$SETTINGS" | grep -q '"endpoint":"http://127.0.0.1:8090/v1"' || fail "Test 9/10: edge scheduler 形态应默认走 scheduler endpoint: $(echo "$SETTINGS" | head -c 240)"
+ok "Test 9/10: F-09-FORMFACTOR edge scheduler settings 默认 OpenAI-compatible endpoint"
 
 # ── 测试 10: 关键安全不变量 — settings GET 必须 redact api_key ────
 # 即使 vault 解锁，GET /settings 也不应回传 api_key 明文

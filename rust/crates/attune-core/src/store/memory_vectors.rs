@@ -89,9 +89,9 @@ impl Store {
 
     /// All memory embeddings — used to build the in-memory MemoryVectorIndex at startup.
     pub fn list_all_memory_vectors(&self) -> Result<Vec<MemoryVectorRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT memory_id, embedding, dim, model, created_at FROM memory_vectors",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT memory_id, embedding, dim, model, created_at FROM memory_vectors")?;
         let rows = stmt
             .query_map([], |r| {
                 let blob: Vec<u8> = r.get(1)?;
@@ -152,9 +152,7 @@ mod tests {
     #[test]
     fn rejects_empty_embedding() {
         let store = Store::open_memory().unwrap();
-        let err = store
-            .put_memory_vector("any-id", &[], "m", 0)
-            .unwrap_err();
+        let err = store.put_memory_vector("any-id", &[], "m", 0).unwrap_err();
         assert!(matches!(err, VaultError::InvalidInput(_)));
     }
 
@@ -166,8 +164,12 @@ mod tests {
             .insert_memory(&dek, "episodic", 0, 100, &["h1".into()], "s", "m", 0)
             .unwrap();
         let mem_id = store.list_recent_memories(&dek, 1).unwrap()[0].id.clone();
-        store.put_memory_vector(&mem_id, &[1.0, 2.0], "old-model", 1).unwrap();
-        store.put_memory_vector(&mem_id, &[9.0, 8.0, 7.0], "new-model", 2).unwrap();
+        store
+            .put_memory_vector(&mem_id, &[1.0, 2.0], "old-model", 1)
+            .unwrap();
+        store
+            .put_memory_vector(&mem_id, &[9.0, 8.0, 7.0], "new-model", 2)
+            .unwrap();
         let got = store.get_memory_vector(&mem_id).unwrap().unwrap();
         assert_eq!(got.dim, 3);
         assert_eq!(got.model, "new-model");
@@ -182,7 +184,9 @@ mod tests {
             .insert_memory(&dek, "episodic", 0, 100, &["h1".into()], "s", "m", 0)
             .unwrap();
         let mem_id = store.list_recent_memories(&dek, 1).unwrap()[0].id.clone();
-        store.put_memory_vector(&mem_id, &[1.0, 2.0], "m", 0).unwrap();
+        store
+            .put_memory_vector(&mem_id, &[1.0, 2.0], "m", 0)
+            .unwrap();
         assert_eq!(store.memory_vector_count().unwrap(), 1);
         store.delete_memory_by_id(&mem_id).unwrap();
         assert_eq!(

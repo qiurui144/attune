@@ -19,7 +19,12 @@ fn fv(value: &str) -> FieldValue {
     FieldValue {
         value: Some(value.into()),
         confidence: 0.9,
-        bbox: Some(BBox { x: 1, y: 2, w: 3, h: 4 }),
+        bbox: Some(BBox {
+            x: 1,
+            y: 2,
+            w: 3,
+            h: 4,
+        }),
         source_line_idx: Some(0),
     }
 }
@@ -27,7 +32,12 @@ fn fv(value: &str) -> FieldValue {
 fn rl(text: &str) -> RawLine {
     RawLine {
         text: text.into(),
-        bbox: BBox { x: 0, y: 0, w: 100, h: 20 },
+        bbox: BBox {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 20,
+        },
         confidence: 0.95,
     }
 }
@@ -37,12 +47,18 @@ fn rl(text: &str) -> RawLine {
 #[test]
 fn document_v1_serde_roundtrip() {
     let v = StructuredFields::DocumentV1 {
-        fields: DocumentFields { title: Some(fv("My Title")), blocks: vec![] },
+        fields: DocumentFields {
+            title: Some(fv("My Title")),
+            blocks: vec![],
+        },
         unrecognized_fields: vec!["blocks".into()],
         validation_warnings: vec![],
     };
     let json = serde_json::to_string(&v).expect("ser");
-    assert!(json.contains("\"schema\":\"document_v1\""), "tag present: {json}");
+    assert!(
+        json.contains("\"schema\":\"document_v1\""),
+        "tag present: {json}"
+    );
     let de: StructuredFields = serde_json::from_str(&json).expect("de");
     match de {
         StructuredFields::DocumentV1 { fields, .. } => {
@@ -54,7 +70,11 @@ fn document_v1_serde_roundtrip() {
 
 #[test]
 fn receipt_v1_serde_roundtrip() {
-    let fields = ReceiptFields { invoice_no: fv("12345678"), amount_total: fv("1234.56"), ..Default::default() };
+    let fields = ReceiptFields {
+        invoice_no: fv("12345678"),
+        amount_total: fv("1234.56"),
+        ..Default::default()
+    };
     let v = StructuredFields::ReceiptV1 {
         fields,
         unrecognized_fields: vec!["buyer".into()],
@@ -64,7 +84,11 @@ fn receipt_v1_serde_roundtrip() {
     assert!(json.contains("\"schema\":\"receipt_v1\""));
     let de: StructuredFields = serde_json::from_str(&json).expect("de");
     match de {
-        StructuredFields::ReceiptV1 { fields, validation_warnings, .. } => {
+        StructuredFields::ReceiptV1 {
+            fields,
+            validation_warnings,
+            ..
+        } => {
             assert_eq!(fields.invoice_no.value.as_deref(), Some("12345678"));
             assert_eq!(validation_warnings, vec!["test warning"]);
         }
@@ -74,7 +98,11 @@ fn receipt_v1_serde_roundtrip() {
 
 #[test]
 fn table_v1_serde_roundtrip() {
-    let fields = TableFields { row_count: fv("3"), column_count: fv("4"), ..Default::default() };
+    let fields = TableFields {
+        row_count: fv("3"),
+        column_count: fv("4"),
+        ..Default::default()
+    };
     let v = StructuredFields::TableV1 {
         fields,
         unrecognized_fields: vec![],
@@ -93,7 +121,11 @@ fn table_v1_serde_roundtrip() {
 
 #[test]
 fn card_v1_serde_roundtrip() {
-    let fields = CardFields { name: fv("Alice"), email: fv("alice@example.com"), ..Default::default() };
+    let fields = CardFields {
+        name: fv("Alice"),
+        email: fv("alice@example.com"),
+        ..Default::default()
+    };
     let v = StructuredFields::CardV1 {
         fields,
         unrecognized_fields: vec!["address".into()],
@@ -112,7 +144,11 @@ fn card_v1_serde_roundtrip() {
 
 #[test]
 fn id_card_cn_v1_serde_roundtrip() {
-    let fields = IdCardCnFields { name: fv("张三"), id_number: fv("110101199001010015"), ..Default::default() };
+    let fields = IdCardCnFields {
+        name: fv("张三"),
+        id_number: fv("110101199001010015"),
+        ..Default::default()
+    };
     let v = StructuredFields::IdCardCnV1 {
         fields,
         unrecognized_fields: vec![],
@@ -123,7 +159,10 @@ fn id_card_cn_v1_serde_roundtrip() {
     let de: StructuredFields = serde_json::from_str(&json).expect("de");
     if let StructuredFields::IdCardCnV1 { fields, .. } = de {
         assert_eq!(fields.name.value.as_deref(), Some("张三"));
-        assert_eq!(fields.id_number.value.as_deref(), Some("110101199001010015"));
+        assert_eq!(
+            fields.id_number.value.as_deref(),
+            Some("110101199001010015")
+        );
     } else {
         panic!("wrong variant");
     }
@@ -131,7 +170,11 @@ fn id_card_cn_v1_serde_roundtrip() {
 
 #[test]
 fn bank_card_v1_serde_roundtrip() {
-    let fields = BankCardFields { card_number: fv("4111 1111 1111 1111"), bank_name: fv("中国工商银行"), ..Default::default() };
+    let fields = BankCardFields {
+        card_number: fv("4111 1111 1111 1111"),
+        bank_name: fv("中国工商银行"),
+        ..Default::default()
+    };
     let v = StructuredFields::BankCardV1 {
         fields,
         unrecognized_fields: vec![],
@@ -141,7 +184,10 @@ fn bank_card_v1_serde_roundtrip() {
     assert!(json.contains("\"schema\":\"bank_card_v1\""));
     let de: StructuredFields = serde_json::from_str(&json).expect("de");
     if let StructuredFields::BankCardV1 { fields, .. } = de {
-        assert_eq!(fields.card_number.value.as_deref(), Some("4111 1111 1111 1111"));
+        assert_eq!(
+            fields.card_number.value.as_deref(),
+            Some("4111 1111 1111 1111")
+        );
         assert_eq!(fields.bank_name.value.as_deref(), Some("中国工商银行"));
     } else {
         panic!("wrong variant");
@@ -150,7 +196,11 @@ fn bank_card_v1_serde_roundtrip() {
 
 #[test]
 fn business_license_v1_serde_roundtrip() {
-    let fields = BusinessLicenseFields { registration_no: fv("91110000600000000X"), company_name: fv("测试有限公司"), ..Default::default() };
+    let fields = BusinessLicenseFields {
+        registration_no: fv("91110000600000000X"),
+        company_name: fv("测试有限公司"),
+        ..Default::default()
+    };
     let v = StructuredFields::BusinessLicenseV1 {
         fields,
         unrecognized_fields: vec!["scope".into()],
@@ -160,7 +210,10 @@ fn business_license_v1_serde_roundtrip() {
     assert!(json.contains("\"schema\":\"business_license_v1\""));
     let de: StructuredFields = serde_json::from_str(&json).expect("de");
     if let StructuredFields::BusinessLicenseV1 { fields, .. } = de {
-        assert_eq!(fields.registration_no.value.as_deref(), Some("91110000600000000X"));
+        assert_eq!(
+            fields.registration_no.value.as_deref(),
+            Some("91110000600000000X")
+        );
     } else {
         panic!("wrong variant");
     }
@@ -196,7 +249,10 @@ fn extract_routes_b_layer_scenes() {
     // B-档 scenes: extract should return Some(_)
     for profile in ["document", "receipt", "table", "card"] {
         let r = attune_core::ocr::structured::extract(profile, &lines, None);
-        assert!(r.is_some(), "profile '{profile}' must return Some StructuredFields");
+        assert!(
+            r.is_some(),
+            "profile '{profile}' must return Some StructuredFields"
+        );
     }
 }
 

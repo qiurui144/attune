@@ -2,10 +2,11 @@
 
 import type { JSX } from 'preact';
 import { useState, useRef } from 'preact/hooks';
-import { Button, Tooltip } from '../components';
+import { Button, Input, Tooltip } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
+import { useFilePicker } from '../hooks/useFilePicker';
 import type { WizardContext } from './types';
 
 type DataMode = 'folder' | 'import' | 'skip';
@@ -19,46 +20,40 @@ export type Step5Props = {
 export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element {
   const [mode, setMode] = useState<DataMode | null>(ctx.dataMode);
   const [folderPaths, setFolderPaths] = useState<string[]>(ctx.boundFolders ?? []);
-  const [folderPicking, setFolderPicking] = useState(false);
+  const [manualPath, setManualPath] = useState('');
   const [importing, setImporting] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const canPickFolder = typeof window !== 'undefined'
-    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  const { isDesktop: canPickFolder, picking: folderPickingSignal, pickDirectory, pickFiles } = useFilePicker();
+  const folderPicking = folderPickingSignal.value;
+
+  function addFolderPath(raw: string): boolean {
+    const path = raw.trim();
+    if (!path) return false;
+    let added = false;
+    setFolderPaths((current) => {
+      if (current.includes(path)) return current;
+      added = true;
+      return [...current, path];
+    });
+    return added;
+  }
+
+  function submitManualPath() {
+    if (addFolderPath(manualPath)) {
+      setManualPath('');
+    }
+  }
 
   async function pickFolder() {
     if (!canPickFolder) {
-      toast('warning', t('wizard.data.folder.toast_browser_only'));
+      toast('info', t('wizard.data.folder.toast_manual_hint'));
       return;
     }
-
-    setFolderPicking(true);
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({
-        directory: true,
-        multiple: true,
-        title: t('wizard.data.folder.dialog_title'),
-      });
-      const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      const normalized = chosen
-        .map((path) => path.trim())
-        .filter((path) => path.length > 0);
-      if (normalized.length > 0) {
-        setFolderPaths((current) => {
-          const next = [...current];
-          for (const path of normalized) {
-            if (!next.includes(path)) {
-              next.push(path);
-            }
-          }
-          return next;
-        });
-      }
-    } catch (e) {
-      toast('error', e instanceof Error ? e.message : String(e));
-    } finally {
-      setFolderPicking(false);
+    const paths = await pickDirectory({ multiple: true, title: t('wizard.data.folder.dialog_title') });
+    for (const path of paths) {
+      addFolderPath(path);
     }
   }
 
@@ -76,11 +71,11 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
 
     try {
       if (mode === 'folder' && folderPaths.length > 0) {
-        await Promise.all(folderPaths.map((path) => api.post('/index/bind', { path, recursive: true })));
+        await Promise.all(folderPaths.map((path) => api.post('/index/bind', { path, recursive: true, background: true })));
         onUpdate({ boundFolders: folderPaths });
         toast('success', t('wizard.data.toast.bound_n', { count: folderPaths.length }));
       } else if (mode === 'import') {
-        const file = fileInputRef.current?.files?.[0];
+        const file = importFile ?? fileInputRef.current?.files?.[0];
         if (file) {
           // Critical 1.3 修复：文件大小 + shape 校验，防恶意 profile 打挂后端
           const MAX_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -105,6 +100,10 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
           await api.post('/profile/import', profile);
           onUpdate({ importedProfile: file.name });
           toast('success', t('wizard.data.toast.imported', { name: file.name }));
+        } else {
+          toast('warning', t('wizard.data.err.no_import_file'));
+          setImporting(false);
+          return;
         }
       }
       onFinish();
@@ -132,45 +131,79 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
         <Option
           icon="📂"
           title={t('wizard.data.folder.title')}
-          desc={canPickFolder ? t('wizard.data.folder.desc') : t('wizard.data.folder.desc_browser_only')}
+          desc={canPickFolder ? t('wizard.data.folder.desc') : t('wizard.data.folder.desc_manual')}
           selected={mode === 'folder'}
           onClick={() => setMode('folder')}
         >
           {mode === 'folder' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-              <div
-                role="button"
-                tabIndex={0}
-                aria-disabled={folderPicking || !canPickFolder}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void pickFolder();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
+              {canPickFolder ? (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-disabled={folderPicking}
+                  onClick={(e) => {
                     e.stopPropagation();
                     void pickFolder();
-                  }
-                }}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minHeight: 36,
-                  padding: '0 var(--space-3)',
-                  borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--color-border)',
-                  background: folderPicking || !canPickFolder ? 'var(--color-surface-muted)' : 'var(--color-surface)',
-                  color: folderPicking || !canPickFolder ? 'var(--color-text-secondary)' : 'var(--color-text)',
-                  cursor: folderPicking || !canPickFolder ? 'not-allowed' : 'pointer',
-                  userSelect: 'none',
-                  fontSize: 'var(--text-xs)',
-                  fontWeight: 600,
-                }}
-              >
-                {folderPicking ? t('wizard.data.folder.btn_picking') : t('wizard.data.folder.btn_add')}
-              </div>
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void pickFolder();
+                    }
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minHeight: 36,
+                    padding: '0 var(--space-3)',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--color-border)',
+                    background: folderPicking ? 'var(--color-surface-muted)' : 'var(--color-surface)',
+                    color: folderPicking ? 'var(--color-text-secondary)' : 'var(--color-text)',
+                    cursor: folderPicking ? 'not-allowed' : 'pointer',
+                    userSelect: 'none',
+                    fontSize: 'var(--text-xs)',
+                    fontWeight: 600,
+                  }}
+                >
+                  {folderPicking ? t('wizard.data.folder.btn_picking') : t('wizard.data.folder.btn_add')}
+                </div>
+              ) : (
+                // headless/纯 Web:手填绝对路径 + 添加按钮(无原生选择器时的等价入口)
+                <div
+                  style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-end' }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div style={{ flex: 1 }}>
+                    <Input
+                      label={t('wizard.data.folder.manual_label')}
+                      value={manualPath}
+                      onInput={(e) => setManualPath(e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          submitManualPath();
+                        }
+                      }}
+                      placeholder={t('wizard.data.folder.manual_placeholder')}
+                    />
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!manualPath.trim()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitManualPath();
+                    }}
+                  >
+                    {t('wizard.data.folder.btn_add')}
+                  </Button>
+                </div>
+              )}
               <div
                 style={{
                   minHeight: 56,
@@ -213,18 +246,46 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
           selected={mode === 'import'}
           onClick={() => {
             setMode('import');
-            fileInputRef.current?.click();
+            if (!canPickFolder) {
+              fileInputRef.current?.click();
+            }
           }}
         >
           <>
+            {canPickFolder && mode === 'import' && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={async (e: Event) => {
+                  e.stopPropagation();
+                  const { paths, files } = await pickFiles({
+                    multiple: false,
+                    accept: '.json,.vault-profile',
+                    title: t('wizard.data.import.dialog_title'),
+                  });
+                  const file = files[0] ?? null;
+                  if (file) {
+                    setImportFile(file);
+                  } else if (paths.length > 0) {
+                    toast('error', t('wizard.data.err.file_read_failed'));
+                  }
+                }}
+              >
+                {`📂 ${t('wizard.data.import.browse')}`}
+              </Button>
+            )}
             <input
               ref={fileInputRef}
               type="file"
               accept=".json,.vault-profile"
               style={{ display: 'none' }}
               onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const input = e.currentTarget;
+                setImportFile(input.files?.[0] ?? null);
+              }}
             />
-            {mode === 'import' && fileInputRef.current?.files?.[0] && (
+            {mode === 'import' && (importFile ?? fileInputRef.current?.files?.[0]) && (
               <div
                 style={{
                   marginTop: 'var(--space-2)',
@@ -232,7 +293,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
                   color: 'var(--color-accent)',
                 }}
               >
-                ✓ {fileInputRef.current.files[0].name}
+                ✓ {(importFile ?? fileInputRef.current?.files?.[0])?.name}
               </div>
             )}
           </>

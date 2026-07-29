@@ -14,7 +14,6 @@ This repository contains two categories of software:
    - All Rust workspace crates: `rust/crates/attune-core`,
      `rust/crates/attune-server`, `rust/crates/attune-cli`
    - Chrome extension source: `extension/`
-   - Python prototype: `src/npu_webhook/`
    - Embedded web UI: `rust/crates/attune-server/assets/`
    - Free plugins (programming/tech): `plugins/free/`
    - Plugin loader + signature verification: `rust/crates/attune-core/src/plugin*`

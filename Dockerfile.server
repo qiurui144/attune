@@ -23,9 +23,10 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     build-essential curl pkg-config libssl-dev cmake ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Rust 1.91 (minimum: kreuzberg-paddle-ocr requires 1.91)
+# Install Rust 1.93 (minimum: cranelift 0.132 via wasmtime/wasm_runtime requires 1.93;
+# CI uses dtolnay/rust-toolchain@stable which already satisfies this — keep Docker in sync)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.91 --profile minimal
+    sh -s -- -y --default-toolchain 1.93 --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /src

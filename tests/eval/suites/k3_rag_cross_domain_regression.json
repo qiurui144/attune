@@ -1,0 +1,33 @@
+{
+  "schema_version": "attune.eval.suite.v1",
+  "suite_id": "k3_rag_cross_domain_regression",
+  "purpose": "Cross-domain regression to expose source drift when unrelated industries share one knowledge base. This is diagnostic, not the default single-industry release acceptance suite.",
+  "corpora": [
+    "networking_tcpip_smoke",
+    "airplane_manuals",
+    "mechanical_design_handbook"
+  ],
+  "scenarios": [
+    "networking_tcpip_troubleshooting",
+    "airplane_operation_guidance",
+    "mechanical_design_multiturn"
+  ],
+  "gates": [
+    "scheduler_contract",
+    "ingest",
+    "search",
+    "chat",
+    "multiturn"
+  ],
+  "thresholds": {
+    "retrieval_hit_at_5_min": 0.85,
+    "citation_hit_rate_min": 0.6,
+    "answer_accuracy_min": 0.2,
+    "terminal_error_rate_max": 0.02,
+    "hot_chat_p95_ms_max": 60000
+  },
+  "ci": {
+    "hardware_required": true,
+    "default_runner": "k3_hardware_diagnostic"
+  }
+}

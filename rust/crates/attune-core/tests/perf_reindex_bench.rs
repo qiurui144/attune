@@ -52,7 +52,8 @@ fn bench_reindex_item_by_size() {
         let insert_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         let t1 = Instant::now();
-        let stats = reindex::reindex_item(&store, &mut vec, &ft, &id, "Doc", &content, "note").unwrap();
+        let stats =
+            reindex::reindex_item(&store, &mut vec, &ft, &id, "Doc", &content, "note").unwrap();
         let reindex_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         println!(
@@ -103,24 +104,33 @@ fn bench_update_item_short_circuit() {
     // 1) 内容真改：必走 BLOB rewrite
     let new_content = format!("{content}\n\nAPPENDED MODIFICATION");
     let t0 = Instant::now();
-    let outcome = store.update_item(&dek, &id, None, Some(&new_content)).unwrap();
+    let outcome = store
+        .update_item(&dek, &id, None, Some(&new_content))
+        .unwrap();
     let modified_ms = t0.elapsed().as_secs_f64() * 1000.0;
     assert!(outcome.content_changed);
     println!("content changed | {:.2}", modified_ms);
 
     // 2) 内容未变：短路（不刷 BLOB）
     let t1 = Instant::now();
-    let outcome2 = store.update_item(&dek, &id, None, Some(&new_content)).unwrap();
+    let outcome2 = store
+        .update_item(&dek, &id, None, Some(&new_content))
+        .unwrap();
     let shortcircuit_ms = t1.elapsed().as_secs_f64() * 1000.0;
     assert!(!outcome2.content_changed, "短路必须不刷 BLOB");
     println!("same content    | {:.2}", shortcircuit_ms);
 
     // 3) 仅 title：完全跳过 content path
     let t2 = Instant::now();
-    let outcome3 = store.update_item(&dek, &id, Some("new title"), None).unwrap();
+    let outcome3 = store
+        .update_item(&dek, &id, Some("new title"), None)
+        .unwrap();
     let title_ms = t2.elapsed().as_secs_f64() * 1000.0;
     assert!(!outcome3.content_changed);
     println!("title only      | {:.2}", title_ms);
 
-    println!("\n→ 短路节省比例: {:.1}%", (1.0 - shortcircuit_ms / modified_ms) * 100.0);
+    println!(
+        "\n→ 短路节省比例: {:.1}%",
+        (1.0 - shortcircuit_ms / modified_ms) * 100.0
+    );
 }

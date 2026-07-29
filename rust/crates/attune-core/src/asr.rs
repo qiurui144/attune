@@ -13,9 +13,141 @@
 //! 可选择性使用：若 `detect_asr_backend()` 返回 None，parser.rs 自动跳过音频文件
 //! 入库（不报错，仅记 warn）。
 
+use crate::asr_sensevoice::SenseVoiceBackend;
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use std::path::Path;
-use std::process::Command;
+
+fn join_text<'a>(parts: impl IntoIterator<Item = &'a str>, separator: &str) -> String {
+    let mut parts = parts.into_iter();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+
+    let mut out = String::from(first);
+    for part in parts {
+        out.push_str(separator);
+        out.push_str(part);
+    }
+    out
+}
+
+fn stderr_excerpt(stderr: &str, max_lines: usize) -> String {
+    join_text(stderr.lines().take(max_lines), " ")
+}
+
+// ── ASR engine abstraction (whisper | sensevoice) ───────────────────────────
+//
+// Catalog (`model-catalog.default.yaml` `asr.engine`) drives which engine a given
+// hardware tier uses. SenseVoice (in-process sherpa-onnx ONNX) is the default for the
+// AMD/Intel Windows tiers (and any catalog `engine: sensevoice`); whisper-cli is kept
+// as the CPU-tier fallback + diarization path (sensevoice pure-CPU FAILs CER 23%, but
+// whisper-cli's per-platform binary is the packaging bug we are removing on the ONNX
+// tiers). Adding a variant extends to future rk-asr / official k2-fsa bindings (spec §6).
+
+/// Selected ASR engine + its resolved backend.
+#[derive(Debug, Clone)]
+pub enum AsrEngine {
+    /// whisper.cpp subprocess (CPU-tier fallback + diarization base).
+    Whisper(AsrBackend),
+    /// in-process SenseVoice (sherpa-onnx) — no per-platform binary to bundle.
+    SenseVoice(SenseVoiceBackend),
+}
+
+impl AsrEngine {
+    /// Stable engine label for telemetry / the `/ai_stack` `asr.engine` field.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AsrEngine::Whisper(_) => "whisper.cpp",
+            AsrEngine::SenseVoice(_) => "sensevoice",
+        }
+    }
+
+    /// Model-name string for the `/ai_stack` `asr.model` field.
+    pub fn model_label(&self) -> Option<String> {
+        match self {
+            AsrEngine::Whisper(b) => Some(b.model_name.clone()),
+            AsrEngine::SenseVoice(_) => Some("sensevoice-small".to_string()),
+        }
+    }
+}
+
+/// Resolve the catalog ASR engine name for the current hardware, without constructing
+/// a backend. Returns e.g. `"sensevoice"` / `"whisper"`. Catalog-driven (built-in baseline
+/// or the verified remote catalog when loaded); falls back to `"whisper"` if the catalog
+/// has no ASR entry for the resolved tier (pre-sensevoice behavior).
+pub fn catalog_asr_engine() -> String {
+    use crate::infer::catalog::{tier_for_hardware, Catalog, Role};
+    let sel = crate::infer::accel::cached_selection();
+    let tier = tier_for_hardware(sel.os, &sel.hardware);
+    let catalog = Catalog::builtin_default();
+    catalog
+        .resolve(&tier, Role::Asr)
+        .map(|c| c.engine.clone())
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "whisper".to_string())
+}
+
+/// Detect the active ASR engine driven by the catalog + on-disk model availability.
+///
+/// Selection (graceful, never panics — `None` ⇒ ASR unavailable, parser skips audio):
+/// 1. catalog ASR engine for the resolved hardware tier.
+/// 2. `engine == "sensevoice"` (and the `asr-sensevoice` feature is compiled in) and the
+///    SenseVoice model is present on disk → `SenseVoice`. If the model is missing or the
+///    feature is off, fall through to whisper (CPU fallback — spec §7 degradation).
+/// 3. otherwise → `Whisper` via [`detect_asr_backend`].
+///
+/// Note: this does **not** download the SenseVoice model — that is the `ai-stack/ensure`
+/// path (server) / [`crate::asr_sensevoice::ensure_sensevoice_model`]. Detection only
+/// reports what is usable *now*, so a fresh install (no model yet) degrades to whisper
+/// rather than blocking.
+pub fn detect_asr_engine() -> Option<AsrEngine> {
+    let engine = catalog_asr_engine();
+    if engine == "sensevoice" && cfg!(feature = "asr-sensevoice") {
+        if let Some(sv) = SenseVoiceBackend::detect() {
+            return Some(AsrEngine::SenseVoice(sv));
+        }
+        log::info!(
+            "ASR: catalog selects sensevoice but model not present on disk yet; \
+             falling back to whisper-cli (run ai-stack/ensure to fetch SenseVoice)"
+        );
+    }
+    detect_asr_backend().map(AsrEngine::Whisper)
+}
+
+/// Transcribe via the selected engine (plain text, no diarization).
+///
+/// SenseVoice path is in-process (sherpa-onnx); whisper path is the existing subprocess.
+///
+/// **Transcribe-time whisper fallback (real, not just a comment).** sherpa's
+/// `read_audio_file` is WAV-only AND requires exactly 16 kHz i16 — so `.mp3` / `.m4a` /
+/// `.flac` / non-16 kHz WAV all `Err` out of SenseVoice. Rather than break formats that
+/// whisper-cli handles natively, on **any** SenseVoice runtime failure we fall back to a
+/// whisper-cli backend if one is available on this machine. So a user uploading an `.mp3`
+/// on a sensevoice tier still gets a transcript (via whisper) instead of an ingest error.
+/// If whisper is also unavailable, the original SenseVoice error is surfaced (no silent
+/// swallow). The parser's multi-speaker path stays on whisper diarization separately.
+pub fn transcribe_with_engine(engine: &AsrEngine, audio_path: &Path) -> Result<String> {
+    match engine {
+        AsrEngine::Whisper(backend) => transcribe_audio(backend, audio_path),
+        AsrEngine::SenseVoice(backend) => {
+            match crate::asr_sensevoice::transcribe_sensevoice(backend, audio_path) {
+                Ok(text) => Ok(text),
+                Err(sv_err) => match detect_asr_backend() {
+                    Some(whisper) => {
+                        log::warn!(
+                            "ASR: SenseVoice failed ({sv_err}); falling back to whisper-cli \
+                             for '{}' (non-WAV/non-16kHz audio or sherpa decode error)",
+                            audio_path.display()
+                        );
+                        transcribe_audio(&whisper, audio_path)
+                    }
+                    None => Err(sv_err),
+                },
+            }
+        }
+    }
+}
 
 /// ASR backend 能力探测结果
 #[derive(Debug, Clone)]
@@ -46,7 +178,7 @@ impl AsrBackend {
 ///
 /// 失败时（命令执行错 / help 输出空）保守返 false（避免误判）。
 fn probe_whisper_gpu_capable(whisper_path: &str) -> bool {
-    let output = match Command::new(whisper_path).arg("--help").output() {
+    let output = match command_no_window(whisper_path).arg("--help").output() {
         Ok(o) => o,
         Err(_) => return false,
     };
@@ -202,15 +334,19 @@ pub fn transcribe_audio(backend: &AsrBackend, audio_path: &Path) -> Result<Strin
             .unwrap_or("audio"),
     );
 
-    let lang_arg = if backend.language == "auto" { "auto" } else { &backend.language };
-    let output = Command::new(&backend.whisper_path)
+    let lang_arg = if backend.language == "auto" {
+        "auto"
+    } else {
+        &backend.language
+    };
+    let output = command_no_window(&backend.whisper_path)
         .args([
             "-m",
             &backend.model_path,
             "-f",
-            audio_path.to_str().ok_or_else(|| {
-                VaultError::InvalidInput("audio path not utf-8".to_string())
-            })?,
+            audio_path
+                .to_str()
+                .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?,
             "-l",
             lang_arg,
             "-otxt",
@@ -226,7 +362,7 @@ pub fn transcribe_audio(backend: &AsrBackend, audio_path: &Path) -> Result<Strin
         return Err(VaultError::InvalidInput(format!(
             "whisper.cpp failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
-            stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 3)
         )));
     }
 
@@ -307,24 +443,28 @@ pub fn detect_diarization_backend() -> Option<DiarizationBackend> {
     let python = detect_python()?;
 
     // 1. whisperX（优先）
-    let wx_check = Command::new(&python)
+    let wx_check = command_no_window(&python)
         .args(["-c", "import whisperx; print('ok')"])
         .output();
     if let Ok(out) = wx_check {
         if out.status.success() {
             log::info!("ASR diarization: whisperX found at {python}");
-            return Some(DiarizationBackend::WhisperX { python_path: python.clone() });
+            return Some(DiarizationBackend::WhisperX {
+                python_path: python.clone(),
+            });
         }
     }
 
     // 2. pyannote-audio
-    let py_check = Command::new(&python)
+    let py_check = command_no_window(&python)
         .args(["-c", "import pyannote.audio; print('ok')"])
         .output();
     if let Ok(out) = py_check {
         if out.status.success() {
             log::info!("ASR diarization: pyannote.audio found at {python}");
-            return Some(DiarizationBackend::Pyannote { python_path: python });
+            return Some(DiarizationBackend::Pyannote {
+                python_path: python,
+            });
         }
     }
 
@@ -366,15 +506,19 @@ pub fn transcribe_audio_with_timestamps(
             .and_then(|s| s.to_str())
             .unwrap_or("audio"),
     );
-    let lang_arg = if backend.language == "auto" { "auto" } else { &backend.language };
-    let output = Command::new(&backend.whisper_path)
+    let lang_arg = if backend.language == "auto" {
+        "auto"
+    } else {
+        &backend.language
+    };
+    let output = command_no_window(&backend.whisper_path)
         .args([
             "-m",
             &backend.model_path,
             "-f",
-            audio_path.to_str().ok_or_else(|| {
-                VaultError::InvalidInput("audio path not utf-8".to_string())
-            })?,
+            audio_path
+                .to_str()
+                .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?,
             "-l",
             lang_arg,
             "-osrt",
@@ -389,7 +533,7 @@ pub fn transcribe_audio_with_timestamps(
         return Err(VaultError::InvalidInput(format!(
             "whisper.cpp (srt) failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
-            stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 3)
         )));
     }
 
@@ -476,10 +620,7 @@ fn parse_srt_time(s: &str) -> Option<u32> {
     if hms.len() != 3 {
         return None;
     }
-    let ms: u32 = parts
-        .get(1)
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
+    let ms: u32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
     Some(hms[0] * 3_600_000 + hms[1] * 60_000 + hms[2] * 1000 + ms)
 }
 
@@ -510,7 +651,11 @@ pub fn transcribe_with_diarization(
         None => {
             // 退化：普通时间戳转写，speaker = None
             let segments = transcribe_audio_with_timestamps(asr, audio_path)?;
-            let full = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+            let full = segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             Ok((segments, full))
         }
     }
@@ -527,20 +672,29 @@ fn transcribe_whisperx(
     audio_path: &Path,
 ) -> Result<(Vec<TranscriptSegment>, String)> {
     let tmp = tempfile::TempDir::new().map_err(VaultError::Io)?;
-    let audio_str = audio_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("audio path not utf-8".to_string())
-    })?;
-    let lang = if asr.language == "auto" { "zh" } else { &asr.language };
+    let audio_str = audio_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?;
+    let lang = if asr.language == "auto" {
+        "zh"
+    } else {
+        &asr.language
+    };
     // whisperx 命令：--model 来自 asr backend 名（如 small/medium/large）
     // --output_format json --output_dir <tmp>
-    let output = Command::new(python_path)
+    let output = command_no_window(python_path)
         .args([
-            "-m", "whisperx",
+            "-m",
+            "whisperx",
             audio_str,
-            "--model", &asr.model_name,
-            "--language", lang,
-            "--output_format", "json",
-            "--output_dir", tmp.path().to_str().unwrap_or("."),
+            "--model",
+            &asr.model_name,
+            "--language",
+            lang,
+            "--output_format",
+            "json",
+            "--output_dir",
+            tmp.path().to_str().unwrap_or("."),
             "--diarize",
         ])
         .output()
@@ -551,17 +705,20 @@ fn transcribe_whisperx(
         return Err(VaultError::InvalidInput(format!(
             "whisperX failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
-            stderr.lines().take(5).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 5)
         )));
     }
 
     // 找 JSON 输出文件（whisperX 输出到 <audio_stem>.json）
-    let json_path = tmp.path().join(
-        audio_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("audio"),
-    ).with_extension("json");
+    let json_path = tmp
+        .path()
+        .join(
+            audio_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio"),
+        )
+        .with_extension("json");
 
     if !json_path.exists() {
         // 尝试找任何 .json 文件
@@ -570,7 +727,9 @@ fn transcribe_whisperx(
             .filter_map(|e| e.ok())
             .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"));
         if let Some(entry) = any_json {
-            return parse_whisperx_json(&std::fs::read_to_string(entry.path()).map_err(VaultError::Io)?);
+            return parse_whisperx_json(
+                &std::fs::read_to_string(entry.path()).map_err(VaultError::Io)?,
+            );
         }
         return Err(VaultError::InvalidInput(format!(
             "whisperX did not produce expected JSON at {}",
@@ -583,9 +742,8 @@ fn transcribe_whisperx(
 
 /// 解析 whisperX JSON 输出 → (segments, full_text)。
 fn parse_whisperx_json(json_str: &str) -> Result<(Vec<TranscriptSegment>, String)> {
-    let v: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-        VaultError::InvalidInput(format!("whisperX JSON parse error: {e}"))
-    })?;
+    let v: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| VaultError::InvalidInput(format!("whisperX JSON parse error: {e}")))?;
     let segs_arr = v["segments"].as_array().ok_or_else(|| {
         VaultError::InvalidInput("whisperX JSON missing 'segments' array".to_string())
     })?;
@@ -597,7 +755,12 @@ fn parse_whisperx_json(json_str: &str) -> Result<(Vec<TranscriptSegment>, String
             let start_ms = (s["start"].as_f64()? * 1000.0) as u32;
             let end_ms = (s["end"].as_f64()? * 1000.0) as u32;
             let speaker = s["speaker"].as_str().map(|sp| sp.to_string());
-            Some(TranscriptSegment { text, start_ms, end_ms, speaker })
+            Some(TranscriptSegment {
+                text,
+                start_ms,
+                end_ms,
+                speaker,
+            })
         })
         .collect();
 
@@ -620,9 +783,9 @@ fn transcribe_pyannote(
     }
 
     // Step 2: pyannote 说话人分离（Python one-liner → JSON）
-    let audio_str = audio_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("audio path not utf-8".to_string())
-    })?;
+    let audio_str = audio_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?;
     let hf_token = std::env::var("HF_TOKEN")
         .or_else(|_| std::env::var("HUGGINGFACE_TOKEN"))
         .unwrap_or_default();
@@ -646,11 +809,15 @@ except Exception as e:
     print(json.dumps({{"error": str(e)}}), file=sys.stderr)
     sys.exit(1)
 "#,
-        token = if hf_token.is_empty() { "None".to_string() } else { format!("'{hf_token}'") },
+        token = if hf_token.is_empty() {
+            "None".to_string()
+        } else {
+            format!("'{hf_token}'")
+        },
         audio = audio_str.replace('\\', "\\\\").replace('\'', "\\'"),
     );
 
-    let output = Command::new(python_path)
+    let output = command_no_window(python_path)
         .args(["-c", &py_script])
         .output()
         .map_err(VaultError::Io)?;
@@ -659,10 +826,10 @@ except Exception as e:
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!(
             "pyannote diarization failed: {}. Falling back to no-speaker output.",
-            stderr.lines().take(2).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 2)
         );
         // 不报错，退化为无说话人
-        let full = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+        let full = join_text(segments.iter().map(|s| s.text.as_str()), "\n");
         return Ok((segments, full));
     }
 
@@ -671,7 +838,11 @@ except Exception as e:
         Ok(v) => v,
         Err(e) => {
             log::warn!("pyannote JSON parse error: {e}. Falling back to no-speaker output.");
-            let full = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+            let full = segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             return Ok((segments, full));
         }
     };
@@ -712,7 +883,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
         match &seg.speaker {
             Some(sp) => {
                 if current_speaker != Some(sp.as_str()) {
-                    if !out.is_empty() { out.push('\n'); }
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
                     out.push('[');
                     out.push_str(sp);
                     out.push_str("]: ");
@@ -723,7 +896,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
                 out.push_str(&seg.text);
             }
             None => {
-                if !out.is_empty() { out.push('\n'); }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
                 out.push_str(&seg.text);
             }
         }
@@ -733,8 +908,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
 
 /// 自动下载 whisper.cpp ggml 模型文件（按 tier）。
 ///
-/// 来源：HuggingFace `ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。
-/// HF_ENDPOINT 环境变量已由 state.rs 按 region 设好（China → hf-mirror.com）。
+/// 来源：`ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。下载源由 S8
+/// 动态选择(`model_source`：候选注册表 + 健康探测 + failover）解析 —— whisper 在 ModelScope
+/// 无覆盖会被自动跳过,改走 company-mirror / hf-mirror / HF 官方。
 ///
 /// 模型保存到 ~/.local/share/attune/models/whisper/{filename}，让 detect_asr_backend
 /// 之后能找到。
@@ -753,14 +929,26 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
         return Ok(target);
     }
 
-    let api = hf_hub::api::sync::Api::new()
-        .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
-    let repo = api.model("ggerganov/whisper.cpp".to_string());
-    let src = repo
-        .get(ggml_filename)
-        .map_err(|e| VaultError::ModelLoad(format!("download {ggml_filename}: {e}")))?;
-    std::fs::copy(&src, &target)
-        .map_err(|e| VaultError::ModelLoad(format!("copy ggml file: {e}")))?;
+    // 离线模式: 缓存未命中时禁止网络下载, 立即 Err → 调用方 graceful degrade(不阻塞)。
+    if crate::infer::model_store::hf_hub_offline() {
+        return Err(VaultError::ModelLoad(format!(
+            "whisper model {ggml_filename} not cached and HF_HUB_OFFLINE is set; refusing network download"
+        )));
+    }
+
+    // S8: 经动态源选择(候选注册表 + 健康探测 + failover)解析下载源,替代静态单源
+    // `hf_endpoint()`。whisper.cpp 在 ModelScope **无覆盖** —— S8 selector 对其
+    // 自动跳过 ModelScope(OnlyXenovaOnnx),改走 company-mirror / hf-mirror / HF 官方,
+    // 任一源失败自动切次优。源探测只在此显式下载路径(非请求路径,R3)。
+    // HF_HUB_OFFLINE 已在上方拦截;显式 HF_ENDPOINT 由 download_with_failover 内部尊重。
+    let sources = crate::infer::model_source::resolve_sources_for("ggerganov/whisper.cpp");
+    let used = crate::infer::model_source::download_with_failover(
+        &sources,
+        "ggerganov/whisper.cpp",
+        ggml_filename,
+        &target,
+    )?;
+    log::info!("whisper model {ggml_filename} downloaded via source '{used}'");
     Ok(target)
 }
 
@@ -768,6 +956,9 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
 ///
 /// 由 state.rs::init_search_engines spawn 在 tokio runtime 中调用。
 /// 失败不阻塞启动，仅 warn 日志（用户可以晚点用 ASR 时再 retry）。
+///
+/// 注：这是 **whisper-only** 路径，保留作弱机 / CPU-fallback 用。catalog 选 sensevoice
+/// 的 capable tier 走 [`fetch_asr_for_tier`]（engine-aware），别直接调本函数。
 pub fn fetch_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {
     let rec = crate::platform::ModelRecommendation::for_tier(tier).ok_or_else(|| {
         crate::error::VaultError::InvalidInput(format!("tier {} not supported", tier.label()))
@@ -775,9 +966,59 @@ pub fn fetch_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::
     ensure_whisper_model(rec.asr_ggml)
 }
 
+/// 拉指定 ASR 引擎的模型（engine-aware）。
+///
+/// `engine == "sensevoice"` → 拉 SenseVoice ONNX + tokens（in-process，无平台二进制）；
+/// 否则按 tier 拉 whisper ggml。返回已就位的模型文件路径（sensevoice 返 model.int8.onnx）。
+///
+/// 这是 boot bootstrap（`state::spawn_model_bootstrap`）与 `/ai-stack/ensure` 共享的纯函数：
+/// 把 "catalog 选哪个引擎 → 拉哪个模型" 的决策收口到一处，消除 rc.5 真机暴露的漂移
+/// （自动 bootstrap 拉 whisper，而 catalog 选 sensevoice → 新装机 ASR 不自动可用）。
+pub fn fetch_asr_model(
+    engine: &str,
+    tier: crate::platform::Tier,
+) -> crate::error::Result<std::path::PathBuf> {
+    if engine == "sensevoice" {
+        // SenseVoice fetch（与 /ai-stack/ensure 同一逻辑，feature-gated 由 asr_sensevoice 内部处理）。
+        let backend = crate::asr_sensevoice::ensure_sensevoice_model()?;
+        Ok(backend.model_path)
+    } else {
+        fetch_for_tier(tier)
+    }
+}
+
+/// 启动时按硬件 catalog 选型拉对的 ASR 模型（engine-aware bootstrap 入口）。
+///
+/// 流程：`catalog_asr_engine()` 解析当前硬件 tier 的 ASR 引擎 → [`fetch_asr_model`] 拉对应模型。
+/// capable tier（amd-win / intel-win / nvidia / local-scheduler）→ SenseVoice；CPU-fallback → whisper ggml。
+///
+/// 由 `state::spawn_model_bootstrap` 调用，取代之前无脑 `fetch_for_tier`（只拉 whisper）。
+pub fn fetch_asr_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {
+    let engine = catalog_asr_engine();
+    log::info!(
+        "ASR bootstrap: catalog engine='{engine}' for tier '{}'",
+        tier.label()
+    );
+    fetch_asr_model(&engine, tier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_text_matches_slice_join_semantics() {
+        let parts = ["alpha", "", " beta "];
+
+        assert_eq!(join_text(parts, "|"), parts.join("|"));
+        assert_eq!(join_text(Vec::<&str>::new(), "\n"), "");
+    }
+
+    #[test]
+    fn stderr_excerpt_limits_lines() {
+        assert_eq!(stderr_excerpt("one\ntwo\nthree", 2), "one two");
+        assert_eq!(stderr_excerpt("", 3), "");
+    }
 
     #[test]
     fn extract_model_name_basic() {
@@ -785,6 +1026,117 @@ mod tests {
         assert_eq!(extract_model_name("/x/ggml-large-v3.bin"), "large");
         assert_eq!(extract_model_name("/x/ggml-base.bin"), "base");
         assert_eq!(extract_model_name("/x/ggml-tiny-q8.bin"), "tiny");
+    }
+
+    // ── rc.6: engine-aware ASR fetch (capable tier auto-fetches SenseVoice) ──
+    //
+    // These assert the ROUTING (which model class the fetcher targets) deterministically,
+    // WITHOUT touching global HOME/HF_HUB_OFFLINE env (which would race other modules' tests
+    // in this shared process). We pre-seed the on-disk model so the fetcher early-returns the
+    // already-present file — the returned path's directory proves which engine was routed to.
+    //
+    // We serialize via a module lock + RAII HOME restore (same idiom as model_source.rs's
+    // HF_ENV_LOCK) because models_dir() derives from HOME; offline is forced only for the
+    // negative (missing-model) assertion where the engine marker in the error is the proof.
+
+    static ASR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        prev_home: Option<std::ffi::OsString>,
+        prev_xdg: Option<std::ffi::OsString>,
+        _tmp: tempfile::TempDir,
+    }
+    impl HomeGuard {
+        fn set(tmp: tempfile::TempDir) -> Self {
+            let prev_home = std::env::var_os("HOME");
+            let prev_xdg = std::env::var_os("XDG_DATA_HOME");
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+                std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+            }
+            Self {
+                prev_home,
+                prev_xdg,
+                _tmp: tmp,
+            }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            #[allow(unsafe_code)]
+            unsafe {
+                match &self.prev_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.prev_xdg {
+                    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+            }
+        }
+    }
+
+    /// `fetch_asr_model("sensevoice", _)` routes to the SenseVoice fetcher: with the model
+    /// pre-seeded on disk it early-returns the SenseVoice `model.int8.onnx` (NOT a whisper ggml).
+    #[test]
+    fn fetch_asr_model_sensevoice_routes_to_sensevoice() {
+        let _lock = ASR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = HomeGuard::set(tmp);
+
+        // Pre-seed SenseVoice assets so the fetcher early-returns (no network).
+        let dir = crate::asr_sensevoice::sensevoice_model_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(crate::asr_sensevoice::SENSEVOICE_MODEL_FILE),
+            b"fake",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(crate::asr_sensevoice::SENSEVOICE_TOKENS_FILE),
+            b"fake",
+        )
+        .unwrap();
+
+        let path = fetch_asr_model("sensevoice", crate::platform::Tier::High)
+            .expect("sensevoice fetch must succeed when model pre-seeded");
+        assert!(
+            path.ends_with(crate::asr_sensevoice::SENSEVOICE_MODEL_FILE),
+            "sensevoice engine must route to SenseVoice model; got: {}",
+            path.display()
+        );
+        assert!(
+            !path.to_string_lossy().contains("ggml"),
+            "must NOT route to whisper ggml; got: {}",
+            path.display()
+        );
+    }
+
+    /// `fetch_asr_model("whisper", _)` routes to whisper ggml: with the ggml pre-seeded it
+    /// early-returns that file (NOT a SenseVoice onnx).
+    #[test]
+    fn fetch_asr_model_whisper_routes_to_whisper() {
+        let _lock = ASR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = HomeGuard::set(tmp);
+
+        // Low tier → ggml-medium-q5_0.bin; pre-seed it so the fetcher early-returns.
+        let rec =
+            crate::platform::ModelRecommendation::for_tier(crate::platform::Tier::Low).unwrap();
+        let wdir = crate::platform::data_dir().join("models").join("whisper");
+        std::fs::create_dir_all(&wdir).unwrap();
+        std::fs::write(wdir.join(rec.asr_ggml), b"fake").unwrap();
+
+        let path = fetch_asr_model("whisper", crate::platform::Tier::Low)
+            .expect("whisper fetch must succeed when ggml pre-seeded");
+        assert!(
+            path.to_string_lossy().contains("ggml")
+                && !path.to_string_lossy().contains("sensevoice"),
+            "whisper engine must route to whisper ggml; got: {}",
+            path.display()
+        );
     }
 
     // ── F-16 hardware utilization: whisper.cpp GPU build detection ──────────
@@ -817,9 +1169,18 @@ mod tests {
             language: "auto".into(),
             gpu_capable: false, // not relevant for this WER threshold test
         };
-        assert!(!mk("tiny").supports_chinese_well(), "tiny WER 35-40% 不达标");
-        assert!(!mk("base").supports_chinese_well(), "base WER 25-30% 不达标");
-        assert!(mk("small").supports_chinese_well(), "small Q8 中文 WER < 20%");
+        assert!(
+            !mk("tiny").supports_chinese_well(),
+            "tiny WER 35-40% 不达标"
+        );
+        assert!(
+            !mk("base").supports_chinese_well(),
+            "base WER 25-30% 不达标"
+        );
+        assert!(
+            mk("small").supports_chinese_well(),
+            "small Q8 中文 WER < 20%"
+        );
         assert!(mk("medium").supports_chinese_well());
         assert!(mk("large").supports_chinese_well());
     }
@@ -937,9 +1298,24 @@ World
     #[test]
     fn format_diarized_text_groups_same_speaker() {
         let segs = vec![
-            TranscriptSegment { text: "Hello".to_string(), start_ms: 0, end_ms: 1000, speaker: Some("SPEAKER_00".to_string()) },
-            TranscriptSegment { text: "world".to_string(), start_ms: 1000, end_ms: 2000, speaker: Some("SPEAKER_00".to_string()) },
-            TranscriptSegment { text: "Hi".to_string(), start_ms: 2000, end_ms: 3000, speaker: Some("SPEAKER_01".to_string()) },
+            TranscriptSegment {
+                text: "Hello".to_string(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: Some("SPEAKER_00".to_string()),
+            },
+            TranscriptSegment {
+                text: "world".to_string(),
+                start_ms: 1000,
+                end_ms: 2000,
+                speaker: Some("SPEAKER_00".to_string()),
+            },
+            TranscriptSegment {
+                text: "Hi".to_string(),
+                start_ms: 2000,
+                end_ms: 3000,
+                speaker: Some("SPEAKER_01".to_string()),
+            },
         ];
         let text = format_diarized_text(&segs);
         // SPEAKER_00 consecutive → should be on same line
@@ -950,13 +1326,26 @@ World
     #[test]
     fn format_diarized_text_no_speaker_plain_text() {
         let segs = vec![
-            TranscriptSegment { text: "第一句".to_string(), start_ms: 0, end_ms: 1000, speaker: None },
-            TranscriptSegment { text: "第二句".to_string(), start_ms: 1000, end_ms: 2000, speaker: None },
+            TranscriptSegment {
+                text: "第一句".to_string(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: None,
+            },
+            TranscriptSegment {
+                text: "第二句".to_string(),
+                start_ms: 1000,
+                end_ms: 2000,
+                speaker: None,
+            },
         ];
         let text = format_diarized_text(&segs);
         assert!(text.contains("第一句"), "got: {text}");
         assert!(text.contains("第二句"), "got: {text}");
-        assert!(!text.contains("SPEAKER"), "no speaker labels expected; got: {text}");
+        assert!(
+            !text.contains("SPEAKER"),
+            "no speaker labels expected; got: {text}"
+        );
     }
 
     // ── whisperX JSON parser ────────────────────────────────────────────────

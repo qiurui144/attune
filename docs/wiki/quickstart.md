@@ -5,19 +5,18 @@
 ### Linux
 
 ```bash
-# AppImage (推荐，无需 root) — v1.0.0
-wget https://github.com/qiurui144/attune/releases/download/v1.0.0/attune.AppImage
-chmod +x attune.AppImage
-./attune.AppImage
+# AppImage (推荐，无需 root)
+# 到 GitHub Releases 下载当前版本的 Attune_*_amd64.AppImage
+xdg-open https://github.com/qiurui144/attune/releases/latest
 
 # 或 deb 包
-wget https://github.com/qiurui144/attune/releases/download/v1.0.0/attune.deb
-sudo dpkg -i attune.deb
+# 到 GitHub Releases 下载当前版本的 Attune_*_amd64.deb
+sudo dpkg -i Attune_*_amd64.deb
 ```
 
 ### Windows
 
-下载 MSI 安装包 [v1.0.0](https://github.com/qiurui144/attune/releases/tag/v1.0.0)，双击安装。
+下载当前稳定版 [NSIS/MSI 安装包](https://github.com/qiurui144/attune/releases/latest)，双击安装。
 
 ### Chrome 扩展
 
@@ -29,14 +28,11 @@ chrome://extensions/ → 加载已解压的扩展程序 → 选 attune/extension
 
 1. 启动 Attune 桌面应用
 2. 设置 Master Password（用于加密 vault）
-3. （可选）配置 LLM API key 或装 Ollama 本地 LLM
-   ```bash
-   # 推荐配置
-   curl -fsSL https://ollama.com/install.sh | sh
-   ollama pull bge-m3            # embedding (568MB)
-   ollama pull qwen2.5:3b        # chat (轻量) 或
-   ollama pull deepseek-r1:14b   # chat (强推理)
-   ```
+3. 配置 AI 执行路径：
+   - 默认：填写云端 OpenAI-compatible endpoint / model / key
+   - 本地高性能或边缘设备：填写 edge scheduler 地址，例如 `http://127.0.0.1:8090`
+
+Attune 不默认安装 Ollama 或拉取模型权重。具体本地模型、RVV/AVX/OpenVINO/DirectML 等优化由 edge scheduler 或用户自管服务负责。
 
 ## 3. 第一次问答
 
@@ -72,9 +68,7 @@ cd attune
 # 1. 拉测试语料（GitHub 公开仓库 + 版本固化）
 bash scripts/download-corpora.sh
 
-# 2. 一站式 bench
-ATTUNE_EMBEDDING_BACKEND=ollama \
-ATTUNE_CHAT_MODEL=deepseek-r1:14b \
+# 2. 一站式 bench（使用当前配置的云端 LLM 或 edge scheduler）
 bash scripts/bench-orchestrator.sh all
 
 # 3. 跑 queries.json 15 题
@@ -108,9 +102,10 @@ attune-pro install --license <YOUR_KEY> law-pro
 ### Q: LLM 必须用付费 API 吗？
 
 不一定。三种模式：
-- **远端 token**（默认）— 用 Anthropic / OpenAI / 阿里通义 等的 API key
-- **本地 Ollama** — 装 qwen2.5:3b 或 deepseek-r1:14b 在自己机器上跑
-- **K3 一体机** — 律所/医院私有部署（v0.7+）
+- **远端 token**（默认）— 使用 OpenAI、通义、DeepSeek 等
+  OpenAI-compatible API 的独立开发者 key；原生 Anthropic Messages API 暂不直连
+- **edge scheduler** — 高性能本机、RISC-V、Windows 或 Linux x86 私有部署
+- **自管 OpenAI-compatible 本地服务** — 仅作为高级/调试路径，Attune 不负责安装或生命周期
 
 ### Q: 哪些文件类型支持？
 
@@ -118,7 +113,7 @@ attune-pro install --license <YOUR_KEY> law-pro
 
 ### Q: 我能离线使用吗？
 
-可以。Embedding / rerank / 全文搜索都是本地的；chat 阶段如果配了本地 LLM（Ollama），完全离线可用。
+可以。Embedding / rerank / 全文搜索都在本地；chat 阶段如果配置了 edge scheduler 或自管本地 OpenAI-compatible 服务，可以完全离线使用。
 
 ### Q: macOS 支持吗？
 

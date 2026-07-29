@@ -11,9 +11,15 @@ mod tests {
         let item_id = store
             .insert_item(&dek, "Title", "Content", None, "note", None, None)
             .unwrap();
-        store.enqueue_embedding(&item_id, 0, "chunk text", 2, 2, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 0, "chunk text", 2, 2, 0)
+            .unwrap();
         let tasks = store.dequeue_embeddings(1).unwrap();
-        assert_eq!(tasks.len(), 1, "queue must have exactly one task after enqueue+dequeue");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "queue must have exactly one task after enqueue+dequeue"
+        );
         tasks[0].id
     }
 
@@ -26,7 +32,10 @@ mod tests {
         store.mark_embedding_failed(task_id, 3).unwrap();
 
         let tasks = store.dequeue_embeddings(1).unwrap();
-        assert!(!tasks.is_empty(), "task must remain pending after first failure (below max)");
+        assert!(
+            !tasks.is_empty(),
+            "task must remain pending after first failure (below max)"
+        );
     }
 
     #[test]
@@ -39,7 +48,10 @@ mod tests {
 
         // abandoned 任务不应被 dequeue 再次返回
         let tasks = store.dequeue_embeddings(1).unwrap();
-        assert!(tasks.is_empty(), "abandoned task must not be returned by dequeue");
+        assert!(
+            tasks.is_empty(),
+            "abandoned task must not be returned by dequeue"
+        );
     }
 
     #[test]
@@ -50,11 +62,17 @@ mod tests {
         // 3 次失败，max=3；前两次保持 pending，第三次应变 abandoned
         store.mark_embedding_failed(task_id, 3).unwrap();
         let t1 = store.dequeue_embeddings(1).unwrap();
-        assert!(!t1.is_empty(), "after 1st failure (max=3) must still be pending");
+        assert!(
+            !t1.is_empty(),
+            "after 1st failure (max=3) must still be pending"
+        );
 
         store.mark_embedding_failed(t1[0].id, 3).unwrap();
         let t2 = store.dequeue_embeddings(1).unwrap();
-        assert!(!t2.is_empty(), "after 2nd failure (max=3) must still be pending");
+        assert!(
+            !t2.is_empty(),
+            "after 2nd failure (max=3) must still be pending"
+        );
 
         store.mark_embedding_failed(t2[0].id, 3).unwrap();
         let t3 = store.dequeue_embeddings(1).unwrap();

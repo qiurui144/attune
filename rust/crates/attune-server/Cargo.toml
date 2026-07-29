@@ -1,6 +1,6 @@
 [package]
 name = "attune-server"
-version = "1.2.0"
+version = "1.5.29"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,13 +14,24 @@ name = "attune-server-headless"
 path = "src/bin/headless.rs"
 
 [dependencies]
-attune-core = { path = "../attune-core" }
+# default-features=false + server default 显式回填 attune-core 的 3 个默认(ort-bundled /
+# asr-sensevoice / wasm-runtime)→ 默认 build 解析的 feature 集**完全不变**(零回归),
+# 但允许 openvino 变体经 --no-default-features 关掉 ort-bundled、改开 ort-dynamic。
+attune-core = { path = "../attune-core", default-features = false }
+# #82: URL host parsing for embedding-endpoint local/RFC-1918 detection (anchored,
+# not starts_with) — closes the OutboundGate privacy bypass. Same pure-Rust crate
+# attune-core already depends on; no new transitive risk.
+url = "2"
 axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 tokio = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
+# CAP-2: inline (base64) artifact return for POST /skill-runtime/skills/{id}/run —
+# avoids a stateful server-side artifact store (spec §2.2 OUT: no cloud storage).
+# Same pure-Rust crate attune-core already depends on; no new transitive risk.
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -28,7 +39,7 @@ tracing-appender = "0.2"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 # dirs：原 5，统一到 workspace = 6
 dirs = { workspace = true }
-lru = "0.13"  # 升级修 RUSTSEC-2026-0002 (0.12 IterMut Stacked Borrows unsound)
+lru = "0.18"  # >=0.16.3 fixes RUSTSEC-2026-0002 (IterMut Stacked Borrows unsound); match attune-core
 uuid = { version = "1", features = ["v4"] }
 reqwest = { workspace = true, features = ["json"] }
 local-ip-address = "0.6"
@@ -38,15 +49,56 @@ local-ip-address = "0.6"
 dunce = "1"
 # thiserror: 统一 AppError derive (OPT-3 / ARCH-A). 各 route 复用 IntoResponse.
 thiserror = "2"
+# futures-util: G1 MCP SSE transport 的 Stream 组合 (stream::once + Sse)。
+# 纯 Rust, attune-core 已传递依赖 futures 0.3, 无新传输风险。
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # RSS worker 到期判断需要解析 last_polled_at RFC3339 时间戳。
 chrono = { workspace = true }
 # Office helper (v0.7.1): OCR 端点写 multipart bytes 到临时文件喂 PP-OCR provider.
 tempfile = "3"
+# Security: redact license_key for log/identity use (SSRF/secret-log hardening,
+# member.rs). Same pure-Rust crates attune-core already pins; no new transitive risk.
+sha2 = "0.10"
+hex = "0.4"
+
+[features]
+# 回填 attune-core 默认(dep 已 default-features=false);openvino 变体 --no-default-features
+# 时去掉 ort-bundled + asr-sensevoice,改 ort-dynamic(见 ort-bundled/ort-dynamic 互斥)。
+default = ["ort-bundled", "asr-sensevoice", "wasm-runtime", "artifact-export-rich"]
+scheduler-runtime = ["attune-core/scheduler-runtime"]
+artifact-export-rich = ["attune-core/artifact-export-rich"]
+ort-bundled = ["attune-core/ort-bundled"]
+ort-dynamic = ["attune-core/ort-dynamic"]
+asr-sensevoice = ["attune-core/asr-sensevoice"]
+wasm-runtime = ["attune-core/wasm-runtime"]
+# Non-text content recognition endpoint (POST /api/v1/ocr/recognize + report/accept).
+# Forwards to attune-core's `nontext` feature. Default-OFF, mirroring attune-core.
+nontext = ["attune-core/nontext"]
+# ── ONNX Runtime EP passthrough → attune-core (全矩阵, 默认全 OFF) ──
+# 这层只是把 feature 透传到 attune-core(那里 cfg-gate 真正的 ort/<ep> + EpChoice 分支)。
+# desktop release workflow 经 attune-desktop 的同名 feature 链式传到这里 → attune-core。
+# 默认 build 不开任何 EP = 纯 CPU(向后兼容, CI 绿)。ORT 互斥: 一个二进制只编一个 GPU EP。
+cuda = ["attune-core/cuda"]
+directml = ["attune-core/directml"]
+coreml = ["attune-core/coreml"]
+openvino = ["attune-core/openvino"]
+rocm = ["attune-core/rocm"]
+tensorrt = ["attune-core/tensorrt"]
+vitis = ["attune-core/vitis"]
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json", "multipart"] }
 tokio = { workspace = true, features = ["test-util"] }
 proptest = "1"
+# MockEmbeddingProvider for memory-reindex route tests (test-only, dev-dep scope).
+attune-core = { path = "../attune-core", features = ["test-utils"] }
+# export route round-trip: re-parse downloaded files (xlsx via calamine, pdf via
+# pdf-extract) to prove the HTTP download is accurate, incl. CJK pdf un-garbled.
+calamine = { version = "0.26", features = ["dates"] }
+pdf-extract = "0.8"
+# export privacy gate test: unzip docx OOXML to prove no plaintext PII in the
+# downloaded file bytes (INT-2 adversarial).
+zip = "2"
 
 [lints]
 workspace = true

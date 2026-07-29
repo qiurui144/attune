@@ -29,7 +29,10 @@ pub async fn list_sessions(
     State(state): State<SharedState>,
     Query(params): Query<PaginationQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock().map_err(|_| err_500("vault lock poisoned"))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| err_500("vault lock poisoned"))?;
     let dek = vault
         .dek_db()
         .map_err(|e| AppError::Forbidden(e.to_string()))?;
@@ -50,7 +53,10 @@ pub async fn get_session(
     State(state): State<SharedState>,
     Path(session_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock().map_err(|_| err_500("vault lock poisoned"))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| err_500("vault lock poisoned"))?;
     let dek = vault
         .dek_db()
         .map_err(|e| AppError::Forbidden(e.to_string()))?;
@@ -74,7 +80,10 @@ pub async fn delete_session(
     State(state): State<SharedState>,
     Path(session_id): Path<String>,
 ) -> AppResult<StatusCode> {
-    let vault = state.vault.lock().map_err(|_| err_500("vault lock poisoned"))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| err_500("vault lock poisoned"))?;
     // 仅校验 vault 已解锁（DEK 本身不用于 delete，不需要传给 store）
     let _ = vault
         .dek_db()

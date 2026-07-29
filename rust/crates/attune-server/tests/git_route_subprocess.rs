@@ -77,7 +77,11 @@ macro_rules! server_or_skip {
     };
 }
 
-async fn post_bind_git(base: &str, client: &reqwest::Client, url: &str) -> (u16, serde_json::Value) {
+async fn post_bind_git(
+    base: &str,
+    client: &reqwest::Client,
+    url: &str,
+) -> (u16, serde_json::Value) {
     let resp = client
         .post(format!("{base}/api/v1/index/bind-git"))
         .json(&serde_json::json!({ "url": url }))
@@ -95,13 +99,16 @@ async fn bind_git_rejects_file_scheme() {
     let (base, client) = server_or_skip!();
     let (status, body) = post_bind_git(&base, &client, "file:///etc/passwd").await;
     assert_eq!(status, 400, "file:// 应被 SSRF guard 拒");
-    assert_eq!(body.get("code").and_then(|c| c.as_str()), Some("invalid-git-url"));
+    assert_eq!(
+        body.get("code").and_then(|c| c.as_str()),
+        Some("invalid-git-url")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bind_git_rejects_ssrf_loopback() {
     let (base, client) = server_or_skip!();
-    let (status, body) = post_bind_git(&base, &client, "http://127.0.0.1:8080/o/r").await;
+    let (status, body) = post_bind_git(&base, &client, "http://127.0.0.1:8090/o/r").await;
     assert_eq!(status, 400, "loopback 必须拒");
     let code = body.get("code").and_then(|c| c.as_str()).unwrap_or("");
     assert!(
@@ -123,7 +130,10 @@ async fn bind_git_rejects_ssh_scheme() {
     let (base, client) = server_or_skip!();
     let (status, body) = post_bind_git(&base, &client, "ssh://git@github.com/o/r").await;
     assert_eq!(status, 400, "ssh scheme 必须拒 (v1 仅 https)");
-    assert_eq!(body.get("code").and_then(|c| c.as_str()), Some("invalid-git-url"));
+    assert_eq!(
+        body.get("code").and_then(|c| c.as_str()),
+        Some("invalid-git-url")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -131,5 +141,8 @@ async fn bind_git_rejects_non_allowlisted_host() {
     let (base, client) = server_or_skip!();
     let (status, body) = post_bind_git(&base, &client, "https://evil.example.com/o/r").await;
     assert_eq!(status, 400, "allowlist 外 host 必须拒");
-    assert_eq!(body.get("code").and_then(|c| c.as_str()), Some("git-url-not-allowed"));
+    assert_eq!(
+        body.get("code").and_then(|c| c.as_str()),
+        Some("git-url-not-allowed")
+    );
 }

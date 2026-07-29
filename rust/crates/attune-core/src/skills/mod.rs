@@ -5,7 +5,7 @@
 //! - 不编排多个 skill, 不做多步推理
 //! - 可调 LLM 但只调一次
 
-pub mod parse_chinese_date;
-pub mod extract_entities;
 pub mod classify_chunk_kind;
+pub mod extract_entities;
+pub mod parse_chinese_date;
 pub mod summarize_text;

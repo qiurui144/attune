@@ -1,12 +1,55 @@
 //! 本地文件夹采集源。遍历目录、按扩展名过滤、把每个文件读成 RawDocument。
 
+use std::io::Read;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use walkdir::WalkDir;
 
 use crate::error::Result;
 use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
 use crate::parser;
+use crate::store::IndexedFileStatMarker;
+
+/// Keep directory scans aligned with the HTTP upload ceiling.  The metadata
+/// check is only an optimization: the bounded reader below is the actual
+/// TOCTOU-safe memory guard when a file grows while it is being scanned.
+const DEFAULT_MAX_LOCAL_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_local_file_bytes() -> u64 {
+    std::env::var("ATTUNE_LOCAL_SCAN_MAX_FILE_BYTES")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_MAX_LOCAL_FILE_BYTES)
+}
+
+fn read_file_bounded(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!(
+                "file is {} bytes, above the local scan limit of {max_bytes} bytes",
+                metadata.len()
+            ),
+        ));
+    }
+
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len().min(max_bytes).min(64 * 1024)).unwrap_or(64 * 1024),
+    );
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("file grew above the local scan limit of {max_bytes} bytes while reading"),
+        ));
+    }
+    Ok(bytes)
+}
 
 /// 本地文件夹采集源。
 pub struct LocalFolderConnector {
@@ -19,6 +62,19 @@ pub struct LocalFolderConnector {
     corpus_domain: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LocalFileCandidate {
+    pub path: PathBuf,
+    pub source_ref: String,
+    pub stat: Option<IndexedFileStatMarker>,
+}
+
+#[derive(Debug)]
+pub struct LocalDocumentRead {
+    pub document: RawDocument,
+    pub stat: Option<IndexedFileStatMarker>,
+}
+
 impl LocalFolderConnector {
     pub fn new(
         root: PathBuf,
@@ -26,7 +82,12 @@ impl LocalFolderConnector {
         file_types: Vec<String>,
         corpus_domain: Option<String>,
     ) -> Self {
-        Self { root, recursive, file_types, corpus_domain }
+        Self {
+            root,
+            recursive,
+            file_types,
+            corpus_domain,
+        }
     }
 
     /// 扩展名是否被接受。
@@ -42,45 +103,60 @@ impl LocalFolderConnector {
             .iter()
             .any(|t| t.trim_start_matches('.').eq_ignore_ascii_case(&ext))
     }
-}
 
-impl SourceConnector for LocalFolderConnector {
-    fn source_kind(&self) -> SourceKind {
-        SourceKind::LocalFolder
-    }
-
-    fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
+    pub fn fetch_candidates(&self, sink: &mut dyn FnMut(LocalFileCandidate)) -> Result<()> {
         let walker = if self.recursive {
             WalkDir::new(&self.root)
         } else {
             WalkDir::new(&self.root).max_depth(1)
         };
         for entry in walker.into_iter().filter_map(|e| {
-            e.map_err(|err| log::warn!("LocalFolderConnector walk error: {err}")).ok()
+            e.map_err(|err| log::warn!("LocalFolderConnector walk error: {err}"))
+                .ok()
         }) {
             let path = entry.path();
             if !path.is_file() || !self.ext_accepted(path) {
                 continue;
             }
-            // 读字节 + 算 SHA-256 作为增量 marker。单文件读失败不致命。
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!("LocalFolderConnector: read {} failed: {e}", path.display());
-                    continue;
-                }
-            };
-            let marker = {
-                use sha2::{Digest, Sha256};
-                format!("{:x}", Sha256::digest(&bytes))
-            };
-            let path_str = path.to_string_lossy().to_string();
-            // Windows 路径含反斜杠且缺第三个斜杠，需规范化为 RFC 8089 file URI。
-            #[cfg(windows)]
-            let uri = format!("file:///{}", path_str.replace('\\', "/"));
-            #[cfg(not(windows))]
-            let uri = format!("file://{path_str}");
-            sink(RawDocument {
+            let stat = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| stat_marker_from_metadata(&metadata));
+            let source_ref = path.to_string_lossy().to_string();
+            sink(LocalFileCandidate {
+                path: path.to_path_buf(),
+                source_ref,
+                stat,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn read_candidate(&self, candidate: &LocalFileCandidate) -> Result<LocalDocumentRead> {
+        let before = std::fs::metadata(&candidate.path)
+            .ok()
+            .and_then(|metadata| stat_marker_from_metadata(&metadata));
+        let bytes = read_file_bounded(&candidate.path, max_local_file_bytes())?;
+        let after = std::fs::metadata(&candidate.path)
+            .ok()
+            .and_then(|metadata| stat_marker_from_metadata(&metadata));
+        let stable_stat = if before.is_some() && before == after {
+            after
+        } else {
+            None
+        };
+        let marker = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))
+        };
+        let path_str = candidate.source_ref.clone();
+        // Windows 路径含反斜杠且缺第三个斜杠，需规范化为 RFC 8089 file URI。
+        #[cfg(windows)]
+        let uri = format!("file:///{}", path_str.replace('\\', "/"));
+        #[cfg(not(windows))]
+        let uri = format!("file://{path_str}");
+        Ok(LocalDocumentRead {
+            document: RawDocument {
                 uri,
                 title: String::new(),
                 content: bytes,
@@ -93,10 +169,79 @@ impl SourceConnector for LocalFolderConnector {
                 tags: None,
                 corpus_domain: self.corpus_domain.clone(),
                 metadata: std::collections::HashMap::new(),
-            });
-        }
+            },
+            stat: stable_stat,
+        })
+    }
+}
+
+impl SourceConnector for LocalFolderConnector {
+    fn source_kind(&self) -> SourceKind {
+        SourceKind::LocalFolder
+    }
+
+    fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
+        self.fetch_candidates(&mut |candidate| {
+            // 读字节 + 算 SHA-256 作为增量 marker。单文件读失败不致命。
+            match self.read_candidate(&candidate) {
+                Ok(read) => sink(read.document),
+                Err(e) => {
+                    log::warn!(
+                        "LocalFolderConnector: read {} failed: {e}",
+                        candidate.path.display()
+                    );
+                }
+            }
+        })?;
         Ok(())
     }
+}
+
+pub(crate) fn stat_marker_from_metadata(
+    metadata: &std::fs::Metadata,
+) -> Option<IndexedFileStatMarker> {
+    let size = i64::try_from(metadata.len()).ok()?;
+    let mtime_ns = system_time_to_ns(metadata.modified().ok()?)?;
+    let (inode, dev) = platform_file_identity(metadata);
+    Some(IndexedFileStatMarker {
+        size,
+        mtime_ns,
+        ctime_ns: platform_change_time_ns(metadata),
+        inode,
+        dev,
+    })
+}
+
+fn system_time_to_ns(time: SystemTime) -> Option<i64> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(duration.as_nanos()).ok()
+}
+
+#[cfg(unix)]
+fn platform_file_identity(metadata: &std::fs::Metadata) -> (Option<i64>, Option<i64>) {
+    use std::os::unix::fs::MetadataExt;
+    (
+        i64::try_from(metadata.ino()).ok(),
+        i64::try_from(metadata.dev()).ok(),
+    )
+}
+
+#[cfg(not(unix))]
+fn platform_file_identity(_metadata: &std::fs::Metadata) -> (Option<i64>, Option<i64>) {
+    (None, None)
+}
+
+#[cfg(unix)]
+fn platform_change_time_ns(metadata: &std::fs::Metadata) -> Option<i64> {
+    use std::os::unix::fs::MetadataExt;
+    let secs = i128::from(metadata.ctime());
+    let nanos = i128::from(metadata.ctime_nsec());
+    i64::try_from(secs.saturating_mul(1_000_000_000) + nanos).ok()
+}
+
+#[cfg(not(unix))]
+fn platform_change_time_ns(_metadata: &std::fs::Metadata) -> Option<i64> {
+    None
 }
 
 #[cfg(test)]
@@ -131,9 +276,17 @@ mod tests {
             assert_eq!(doc.source_kind, crate::ingest::SourceKind::LocalFolder);
             assert!(doc.modified_marker.is_some(), "本地文件应带 SHA-256 marker");
             assert!(!doc.content.is_empty());
-            assert_eq!(doc.corpus_domain.as_deref(), Some("legal"), "corpus_domain 应透传");
+            assert_eq!(
+                doc.corpus_domain.as_deref(),
+                Some("legal"),
+                "corpus_domain 应透传"
+            );
             // RFC 8089: file:///path（三斜杠），且不含反斜杠
-            assert!(doc.uri.starts_with("file:///"), "URI 应以 file:/// 开头: {}", doc.uri);
+            assert!(
+                doc.uri.starts_with("file:///"),
+                "URI 应以 file:/// 开头: {}",
+                doc.uri
+            );
             assert!(!doc.uri.contains('\\'), "URI 不应含反斜杠: {}", doc.uri);
         }
     }
@@ -153,5 +306,16 @@ mod tests {
             connector.fetch_documents(&mut sink).unwrap();
         } // sink drop，释放对 count 的借用
         assert_eq!(count, 1, "non-recursive 只枚举顶层");
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_file_before_allocating_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oversized.pdf");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(4097).unwrap();
+
+        let error = read_file_bounded(&path, 4096).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
     }
 }

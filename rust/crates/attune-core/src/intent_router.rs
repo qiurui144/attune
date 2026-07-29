@@ -97,20 +97,30 @@ impl<'a> IntentRouter<'a> {
     }
 
     fn matches_any_regex(message: &str, patterns: &[String]) -> bool {
-        patterns
-            .iter()
-            .any(|p| Regex::new(p).map(|re| re.is_match(message)).unwrap_or(false))
+        patterns.iter().any(|p| {
+            Regex::new(p)
+                .map(|re| re.is_match(message))
+                .unwrap_or(false)
+        })
     }
 
     fn first_matching_pattern(message: &str, patterns: &[String]) -> Option<String> {
         patterns
             .iter()
-            .find(|p| Regex::new(p).map(|re| re.is_match(message)).unwrap_or(false))
+            .find(|p| {
+                Regex::new(p)
+                    .map(|re| re.is_match(message))
+                    .unwrap_or(false)
+            })
             .cloned()
     }
 
     fn keyword_hits(message: &str, keywords: &[String]) -> Vec<String> {
-        keywords.iter().filter(|k| message.contains(k.as_str())).cloned().collect()
+        keywords
+            .iter()
+            .filter(|k| message.contains(k.as_str()))
+            .cloned()
+            .collect()
     }
 }
 
@@ -155,7 +165,10 @@ chat_trigger:
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].skill_id, "contract-skill");
         assert_eq!(matches[0].priority, 5);
-        assert!(matches[0].matched_via.iter().any(|m| m.starts_with("keyword:")));
+        assert!(matches[0]
+            .matched_via
+            .iter()
+            .any(|m| m.starts_with("keyword:")));
     }
 
     #[test]
@@ -282,7 +295,10 @@ chat_trigger:
         // 仅 1 关键词 → 不匹配
         assert!(router.route("离婚", false, &HashSet::new()).is_empty());
         // 2 关键词 → 匹配
-        assert_eq!(router.route("离婚财产分割", false, &HashSet::new()).len(), 1);
+        assert_eq!(
+            router.route("离婚财产分割", false, &HashSet::new()).len(),
+            1
+        );
     }
 
     // edge: empty message

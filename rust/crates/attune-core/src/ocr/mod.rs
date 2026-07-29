@@ -18,15 +18,32 @@
 //!   `extract_text_from_pdf(provider, path)` → 全文
 //!   `needs_ocr(text)` → 文字层薄判定（保留旧 API）
 
+#[cfg(feature = "local-inference")]
 pub mod ppocr;
 pub mod profile;
 pub mod profile_registry;
 pub mod structured;
 
+#[cfg(feature = "nontext")]
+pub mod nontext;
+
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use profile::OcrProfile;
 use std::path::Path;
-use std::process::Command;
+
+// When `nontext` is off, the Region/report types are unavailable; alias to a
+// zero-variant placeholder so OcrOutput's Option<...> fields type-check and are
+// always `None`. This keeps OcrOutput's shape stable across feature configs.
+#[cfg(feature = "nontext")]
+use crate::ocr::nontext as nontext_regions;
+#[cfg(not(feature = "nontext"))]
+mod nontext_regions {
+    #[derive(Debug, Clone)]
+    pub enum Region {}
+    #[derive(Debug, Clone)]
+    pub enum OcrCorrectionReport {}
+}
 
 /// 单行 OCR 输出（含 bbox 坐标，办公助理结构化抽取需要）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -37,7 +54,7 @@ pub struct RawLine {
 }
 
 /// 像素坐标 bbox（左上角 + 宽高）。
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BBox {
     pub x: u32,
     pub y: u32,
@@ -60,10 +77,14 @@ pub struct OcrOutput {
     /// 行级 OCR 输出（含 bbox），用于 office helper 结构化抽取。
     /// `None` = provider 不支持（默认实现 / mock）；`Some` = PP-OCR 等真实 provider 填充。
     pub lines: Option<Vec<RawLine>>,
+    /// Non-text recognition regions (Stage 1-4 output). `None` = pass not run (old behavior).
+    pub regions: Option<Vec<nontext_regions::Region>>,
+    /// OCR cross-validation / correction report. `None` = cross-validation not run.
+    pub correction_report: Option<nontext_regions::OcrCorrectionReport>,
 }
 
 /// OCR provider 抽象 — 当前只有 PP-OCRv5 一个实现。
-/// trait 仍然保留是为了：测试用 mock + 未来可能的 K3 远程 provider。
+/// trait 仍然保留是为了：测试用 mock + 未来可能的 local-scheduler 远程 provider。
 pub trait OcrProvider: Send + Sync {
     /// 引擎名（用于日志 / diagnostics 端点）
     fn name(&self) -> &str;
@@ -79,7 +100,24 @@ pub trait OcrProvider: Send + Sync {
     /// `PpOcrProvider` 重写以支持完整的场景能力。
     fn extract_structured(&self, image_path: &Path, _profile: &OcrProfile) -> Result<OcrOutput> {
         let text = self.extract_text_from_image(image_path)?;
-        Ok(OcrOutput { text, table_markdown: None, avg_confidence: None, lines: None })
+        Ok(OcrOutput {
+            text,
+            table_markdown: None,
+            avg_confidence: None,
+            lines: None,
+            regions: None,
+            correction_report: None,
+        })
+    }
+
+    /// Run the non-text region recognition pass. Default returns empty (plain-OCR providers
+    /// opt out). `PpOcrProvider` + the nontext orchestrator override when feature enabled.
+    fn recognize_regions(
+        &self,
+        _image_path: &Path,
+        _profile: &OcrProfile,
+    ) -> Result<Vec<nontext_regions::Region>> {
+        Ok(Vec::new())
     }
 }
 
@@ -96,14 +134,19 @@ pub trait OcrProvider: Send + Sync {
 /// - cargo binary / 源码部署 → 用户跑 `attune-server-headless --bootstrap-models`
 /// - 一键工具 ensure_models_downloaded() 仍在 ppocr.rs (供 bootstrap 调用)
 pub fn detect_default_provider() -> Option<Box<dyn OcrProvider>> {
-    if let Some(p) = ppocr::detect() {
-        log::info!("OCR provider: PP-OCRv5 mobile (ORT)");
-        return Some(Box::new(p));
+    #[cfg(feature = "local-inference")]
+    {
+        if let Some(p) = ppocr::detect() {
+            log::info!("OCR provider: PP-OCRv5 mobile (ORT)");
+            return Some(Box::new(p));
+        }
+        log::warn!(
+            "OCR provider: PP-OCR models missing. Run `attune-server-headless --bootstrap-models` \
+             (cargo) or `apt install --reinstall attune` (deb) to download (~21 MB)."
+        );
     }
-    log::warn!(
-        "OCR provider: PP-OCR models missing. Run `attune-server-headless --bootstrap-models` \
-         (cargo) or `apt install --reinstall attune` (deb) to download (~21 MB)."
-    );
+    #[cfg(not(feature = "local-inference"))]
+    log::info!("OCR provider: local inference not compiled; OCR is scheduler-owned");
     None
 }
 
@@ -143,7 +186,7 @@ pub fn extract_text_from_pdf_with_dpi(
 
     // PDF → 多页 PNG (DPI 由 profile 决定: 200 票据 / 300 合同 / 600 古籍)
     let dpi_str = dpi.to_string();
-    let status = Command::new(&pdftoppm)
+    let status = command_no_window(&pdftoppm)
         .args(["-r", dpi_str.as_str(), "-png"])
         .arg(pdf_path)
         .arg(prefix_str)
@@ -202,7 +245,11 @@ pub fn extract_text_from_pdf_with_profile(
     pdf_path: &Path,
     profile: &OcrProfile,
 ) -> Result<String> {
-    let dpi = if (72..=1200).contains(&profile.dpi) { profile.dpi } else { 300 };
+    let dpi = if (72..=1200).contains(&profile.dpi) {
+        profile.dpi
+    } else {
+        300
+    };
     let pdftoppm = which::which("pdftoppm").map_err(|_| {
         VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -218,7 +265,7 @@ pub fn extract_text_from_pdf_with_profile(
         ))
     })?;
     let dpi_str = dpi.to_string();
-    let status = Command::new(&pdftoppm)
+    let status = command_no_window(&pdftoppm)
         .args(["-r", dpi_str.as_str(), "-png"])
         .arg(pdf_path)
         .arg(prefix_str)
@@ -263,7 +310,10 @@ pub fn extract_text_from_pdf_with_profile(
     }
     log::info!(
         "{} PDF structured pipeline: {} pages ok, {} failed, {} bytes text",
-        provider.name(), pages.len() - failed, failed, all.len()
+        provider.name(),
+        pages.len() - failed,
+        failed,
+        all.len()
     );
     Ok(all)
 }
@@ -382,7 +432,11 @@ pub fn auto_detect_scene(filename: &str) -> &'static str {
 
 /// 判断 PDF 是否需要 OCR（pdf_extract 产出文字量低于阈值）
 pub fn needs_ocr(extracted_text: &str) -> bool {
-    extracted_text.chars().filter(|c| !c.is_whitespace()).count() < 100
+    extracted_text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count()
+        < 100
 }
 
 #[cfg(test)]
@@ -414,10 +468,13 @@ mod tests {
     #[test]
     fn dpi_for_profile_unknown_returns_default() {
         // unknown profile id → 300 (registry 加载得到 7 builtin 但无此 id)
+        // Pin the data dir to a temp dir via the thread-local injection seam rather
+        // than overriding HOME/XDG (which leaks process-globally and does NOT isolate
+        // on Windows — dirs reads %LOCALAPPDATA%). See platform::set_dir_override_for_test.
         let tmp = tempfile::TempDir::new().expect("tmp");
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+        let prev = crate::platform::set_dir_override_for_test(Some(tmp.path().to_path_buf()));
         assert_eq!(dpi_for_profile(Some("does-not-exist")), 300);
+        crate::platform::set_dir_override_for_test(prev);
     }
 
     #[test]
@@ -482,7 +539,16 @@ mod office_types_tests {
 
     #[test]
     fn raw_line_serde_roundtrip() {
-        let l = RawLine { text: "hi".into(), bbox: BBox { x: 1, y: 2, w: 3, h: 4 }, confidence: 0.9 };
+        let l = RawLine {
+            text: "hi".into(),
+            bbox: BBox {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            },
+            confidence: 0.9,
+        };
         let s = serde_json::to_string(&l).unwrap();
         let d: RawLine = serde_json::from_str(&s).unwrap();
         assert_eq!(d.text, "hi");
@@ -495,8 +561,51 @@ mod office_types_tests {
 
     #[test]
     fn bbox_copy_and_clone() {
-        let b = BBox { x: 1, y: 2, w: 3, h: 4 };
+        let b = BBox {
+            x: 1,
+            y: 2,
+            w: 3,
+            h: 4,
+        };
         let b2 = b; // Copy
         assert_eq!(b2.x, b.x);
+    }
+
+    #[test]
+    fn ocr_output_new_fields_default_none() {
+        let o = OcrOutput {
+            text: "x".into(),
+            table_markdown: None,
+            avg_confidence: None,
+            lines: None,
+            regions: None,
+            correction_report: None,
+        };
+        assert!(o.regions.is_none());
+        assert!(o.correction_report.is_none());
+    }
+
+    #[test]
+    fn default_recognize_regions_returns_empty() {
+        struct Stub;
+        impl OcrProvider for Stub {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            fn has_chinese(&self) -> bool {
+                false
+            }
+            fn extract_text_from_image(&self, _: &Path) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+        let out = Stub.recognize_regions(
+            Path::new("/x.png"),
+            &crate::ocr::profile::OcrProfile::default(),
+        );
+        assert!(
+            out.unwrap().is_empty(),
+            "default impl must return empty regions"
+        );
     }
 }

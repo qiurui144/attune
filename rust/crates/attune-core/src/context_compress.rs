@@ -17,8 +17,8 @@
 // sha256(chunk_text) + strategy → summary。chunk 内容变 → hash 变 → 自然失效。
 // 批注变更不影响"原文摘要"缓存；批注加权注入到 Prompt 的另一段（非摘要），见 Batch B.2。
 
-use crate::error::Result;
 use crate::crypto::Key32;
+use crate::error::Result;
 use crate::llm::LlmProvider;
 use crate::store::Store;
 use sha2::{Digest, Sha256};
@@ -134,7 +134,9 @@ pub fn compress_chunk(
     // Cache miss → 调 LLM 生成
     if !llm.is_available() {
         // LLM 不可用时退化：用截断的原文代替摘要，别让 chat 流程挂掉
-        log::warn!("context_compress: LLM unavailable, fallback to truncated raw for chunk_hash={hash}");
+        log::warn!(
+            "context_compress: LLM unavailable, fallback to truncated raw for chunk_hash={hash}"
+        );
         let truncated: String = chunk_text.chars().take(strategy.target_chars()).collect();
         return Ok(CompressedChunk {
             injected: truncated,
@@ -147,7 +149,8 @@ pub fn compress_chunk(
     let user_msg = format!("段落：\n{chunk_text}");
     // F-17-PRIVACY: redact chunk_text before LLM (chunk may contain PII from user-ingested docs)
     let redactor = crate::pii::Redactor::default();
-    let summary = crate::pii::llm_chat_redacted(llm, &redactor, &prompt, &user_msg, "context_compress")?;
+    let summary =
+        crate::pii::llm_chat_redacted(llm, &redactor, &prompt, &user_msg, "context_compress")?;
     let summary = summary.trim();
 
     // LLM 偶尔会返超过目标字数的摘要 —— 截断保底
@@ -155,8 +158,13 @@ pub fn compress_chunk(
 
     // 写 cache（失败不致命 —— 本次仍然能回答，下次重做摘要）
     if let Err(e) = store.put_chunk_summary(
-        dek, &hash, strategy.as_str(), item_id,
-        llm.model_name(), &summary_capped, original_chars,
+        dek,
+        &hash,
+        strategy.as_str(),
+        item_id,
+        llm.model_name(),
+        &summary_capped,
+        original_chars,
     ) {
         log::warn!("context_compress: failed to cache summary for {hash}: {e}");
     }
@@ -185,16 +193,26 @@ pub fn generate_summary(
     strategy: ContextStrategy,
 ) -> Result<String> {
     if !llm.is_available() {
-        return Err(crate::error::VaultError::InvalidInput("LLM not available".into()));
+        return Err(crate::error::VaultError::InvalidInput(
+            "LLM not available".into(),
+        ));
     }
     let prompt = build_compression_prompt(strategy);
     let user_msg = format!("段落：\n{chunk_text}");
     // F-17-PRIVACY: redact chunk_text before LLM (per `compress_chunk` doc — same threat model)
     let redactor = crate::pii::Redactor::default();
-    let raw = crate::pii::llm_chat_redacted(llm, &redactor, &prompt, &user_msg, "context_compress.generate_summary")?;
+    let raw = crate::pii::llm_chat_redacted(
+        llm,
+        &redactor,
+        &prompt,
+        &user_msg,
+        "context_compress.generate_summary",
+    )?;
     let summary = raw.trim();
     if summary.is_empty() {
-        return Err(crate::error::VaultError::InvalidInput("empty summary from LLM".into()));
+        return Err(crate::error::VaultError::InvalidInput(
+            "empty summary from LLM".into(),
+        ));
     }
     Ok(summary.chars().take(strategy.target_chars() + 50).collect())
 }
@@ -217,22 +235,25 @@ pub fn compress_batch(
     store: &Store,
     dek: &Key32,
     llm: &dyn LlmProvider,
-    chunks: &[(String, String)],  // (item_id, chunk_text) —— item_id 为空表示 web/临时 chunk
+    chunks: &[(String, String)], // (item_id, chunk_text) —— item_id 为空表示 web/临时 chunk
     strategy: ContextStrategy,
 ) -> Vec<CompressedChunk> {
-    chunks.iter().map(|(item_id, text)| {
-        match compress_chunk(store, dek, llm, item_id, text, strategy) {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("context_compress: chunk compression failed, using raw: {e}");
-                CompressedChunk {
-                    injected: text.clone(),
-                    original_chars: text.chars().count(),
-                    cache_hit: false,
+    chunks
+        .iter()
+        .map(
+            |(item_id, text)| match compress_chunk(store, dek, llm, item_id, text, strategy) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("context_compress: chunk compression failed, using raw: {e}");
+                    CompressedChunk {
+                        injected: text.clone(),
+                        original_chars: text.chars().count(),
+                        cache_hit: false,
+                    }
                 }
-            }
-        }
-    }).collect()
+            },
+        )
+        .collect()
 }
 
 /// 估算文本对应的 token 数量。
@@ -246,8 +267,11 @@ pub fn estimate_tokens(text: &str) -> usize {
     let mut cjk_chars = 0usize;
     let mut ascii_chars = 0usize;
     for ch in text.chars() {
-        if ch.is_ascii() { ascii_chars += 1; }
-        else { cjk_chars += 1; }
+        if ch.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            cjk_chars += 1;
+        }
     }
     // 1.2 * cjk + 0.25 * ascii, round up
     // = (12 * cjk + 25/10 * ascii) / 10 简化为 (12 * cjk + ascii * 2.5) / 10
@@ -279,8 +303,14 @@ mod tests {
     #[test]
     fn parse_strategy() {
         assert_eq!(ContextStrategy::parse("raw"), ContextStrategy::Raw);
-        assert_eq!(ContextStrategy::parse("economical"), ContextStrategy::Economical);
-        assert_eq!(ContextStrategy::parse("accurate"), ContextStrategy::Accurate);
+        assert_eq!(
+            ContextStrategy::parse("economical"),
+            ContextStrategy::Economical
+        );
+        assert_eq!(
+            ContextStrategy::parse("accurate"),
+            ContextStrategy::Accurate
+        );
         // 未知值 → 默认 Economical（与 settings default 一致）
         assert_eq!(ContextStrategy::parse("weird"), ContextStrategy::Economical);
     }
@@ -300,7 +330,7 @@ mod tests {
         let r = compress_chunk(&store, &dek, &mock, &item_id, &text, ContextStrategy::Raw).unwrap();
         assert_eq!(r.injected, text);
         assert!(r.cache_hit); // raw 视作 0 成本
-        // LLM 不该被调用（mock 无响应，若被调会报错）
+                              // LLM 不该被调用（mock 无响应，若被调会报错）
     }
 
     #[test]
@@ -308,7 +338,15 @@ mod tests {
         let (store, dek, item_id) = setup();
         let mock = MockLlmProvider::new("m");
         let text = "短文本原文".repeat(5); // < 150 chars
-        let r = compress_chunk(&store, &dek, &mock, &item_id, &text, ContextStrategy::Economical).unwrap();
+        let r = compress_chunk(
+            &store,
+            &dek,
+            &mock,
+            &item_id,
+            &text,
+            ContextStrategy::Economical,
+        )
+        .unwrap();
         assert_eq!(r.injected, text, "short chunk returned as-is");
         assert!(r.cache_hit);
     }
@@ -320,12 +358,28 @@ mod tests {
         let mock = mock_with("这是一段很长内容的压缩版。"); // LLM 返回摘要
 
         // 第一次：cache miss → 调 LLM
-        let r1 = compress_chunk(&store, &dek, &mock, &item_id, &long_text, ContextStrategy::Economical).unwrap();
+        let r1 = compress_chunk(
+            &store,
+            &dek,
+            &mock,
+            &item_id,
+            &long_text,
+            ContextStrategy::Economical,
+        )
+        .unwrap();
         assert!(!r1.cache_hit);
         assert_eq!(r1.injected, "这是一段很长内容的压缩版。");
 
         // 第二次：cache hit → 不调 LLM（mock 响应列表已空，若被调会 Err）
-        let r2 = compress_chunk(&store, &dek, &mock, &item_id, &long_text, ContextStrategy::Economical).unwrap();
+        let r2 = compress_chunk(
+            &store,
+            &dek,
+            &mock,
+            &item_id,
+            &long_text,
+            ContextStrategy::Economical,
+        )
+        .unwrap();
         assert!(r2.cache_hit);
         assert_eq!(r2.injected, "这是一段很长内容的压缩版。");
     }
@@ -335,7 +389,8 @@ mod tests {
         let (store, dek, _) = setup();
         let text = "这是一段长的 web 搜索结果".repeat(20);
         let mock = MockLlmProvider::new("m");
-        let r = compress_chunk(&store, &dek, &mock, "", &text, ContextStrategy::Economical).unwrap();
+        let r =
+            compress_chunk(&store, &dek, &mock, "", &text, ContextStrategy::Economical).unwrap();
         // web chunk 退到原文（避免云端 API 每次都付费）
         assert_eq!(r.injected, text);
         // 不应写入 cache
@@ -348,7 +403,15 @@ mod tests {
         let long_text = "数据库管理系统的核心功能是存储和检索。".repeat(20);
         let mock = mock_with("DBMS 负责存储与检索。"); // LLM 摘要
 
-        let r = compress_chunk(&store, &dek, &mock, &item_id, &long_text, ContextStrategy::Accurate).unwrap();
+        let r = compress_chunk(
+            &store,
+            &dek,
+            &mock,
+            &item_id,
+            &long_text,
+            ContextStrategy::Accurate,
+        )
+        .unwrap();
         assert!(r.injected.contains("DBMS 负责存储与检索。"));
         assert!(r.injected.contains("原文摘录:"));
     }
@@ -360,12 +423,28 @@ mod tests {
         let (store, dek, item_id) = setup();
         let long_text = "x".repeat(400);
         let mock = mock_with("E"); // economical 摘要
-        let _ = compress_chunk(&store, &dek, &mock, &item_id, &long_text, ContextStrategy::Economical).unwrap();
+        let _ = compress_chunk(
+            &store,
+            &dek,
+            &mock,
+            &item_id,
+            &long_text,
+            ContextStrategy::Economical,
+        )
+        .unwrap();
         assert_eq!(store.chunk_summary_count().unwrap(), 1);
 
         // Accurate 摘要 —— 应再调一次 LLM 并产生第二条缓存
         let mock2 = mock_with("A"); // accurate 摘要
-        let _ = compress_chunk(&store, &dek, &mock2, &item_id, &long_text, ContextStrategy::Accurate).unwrap();
+        let _ = compress_chunk(
+            &store,
+            &dek,
+            &mock2,
+            &item_id,
+            &long_text,
+            ContextStrategy::Accurate,
+        )
+        .unwrap();
         assert_eq!(store.chunk_summary_count().unwrap(), 2);
     }
 
@@ -375,9 +454,19 @@ mod tests {
         let long_text = "x".repeat(500);
         // MockLlmProvider::new 总是可用的；需要模拟不可用，用空响应后触发 Err
         let mock = MockLlmProvider::new("m"); // 无 push_response → chat() 会 Err
-        let r = compress_chunk(&store, &dek, &mock, &item_id, &long_text, ContextStrategy::Economical);
+        let r = compress_chunk(
+            &store,
+            &dek,
+            &mock,
+            &item_id,
+            &long_text,
+            ContextStrategy::Economical,
+        );
         // mock 的 chat() 返回 Err("no mock response") —— compress_chunk 向外抛
-        assert!(r.is_err(), "LLM err should surface (upper layer will fallback)");
+        assert!(
+            r.is_err(),
+            "LLM err should surface (upper layer will fallback)"
+        );
     }
 
     #[test]
@@ -394,8 +483,8 @@ mod tests {
         ];
         let results = compress_batch(&store, &dek, &mock, &batch, ContextStrategy::Economical);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].injected, short_text);   // short passthrough
-        assert_eq!(results[1].injected, "摘要");       // long compressed
+        assert_eq!(results[0].injected, short_text); // short passthrough
+        assert_eq!(results[1].injected, "摘要"); // long compressed
     }
 
     #[test]
@@ -418,20 +507,31 @@ mod tests {
         // 100 汉字预期 ≈ 120 tokens（与 gpt-4o-mini 实测持平）
         let text: String = "字".repeat(100);
         let n = estimate_tokens(&text);
-        assert!((100..=130).contains(&n), "100 CJK chars ≈ 100-130 tokens, got {n}");
+        assert!(
+            (100..=130).contains(&n),
+            "100 CJK chars ≈ 100-130 tokens, got {n}"
+        );
     }
 
     #[test]
     fn generate_summary_unlocked_happy_path() {
         let mock = mock_with("这是压缩后的摘要。");
-        let r = generate_summary(&mock, "很长的原文内容" . repeat(20).as_str(), ContextStrategy::Economical);
+        let r = generate_summary(
+            &mock,
+            "很长的原文内容".repeat(20).as_str(),
+            ContextStrategy::Economical,
+        );
         assert_eq!(r.unwrap(), "这是压缩后的摘要。");
     }
 
     #[test]
     fn generate_summary_errors_on_empty_response() {
         let mock = mock_with("   \n  ");
-        let r = generate_summary(&mock, "some text to summarize please", ContextStrategy::Economical);
+        let r = generate_summary(
+            &mock,
+            "some text to summarize please",
+            ContextStrategy::Economical,
+        );
         assert!(r.is_err(), "empty summary must surface as Err");
     }
 

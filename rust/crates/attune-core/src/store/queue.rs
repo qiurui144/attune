@@ -41,13 +41,24 @@ impl Store {
     /// 加 task_type 过滤后 embed worker 只看自己的任务，classify 任务静默 pending
     /// 等 classifier 上线（无 worker 时不阻塞 embed 流水线）。
     pub fn dequeue_embeddings(&self, batch_size: usize) -> Result<Vec<QueueTask>> {
+        self.dequeue_queue_tasks(batch_size, "embed")
+    }
+
+    /// Dequeue classification placeholders without competing with the embedding
+    /// worker. Each worker applies its own privacy policy before changing queue
+    /// state, so the public entry points remain task-specific.
+    pub fn dequeue_classify_tasks(&self, batch_size: usize) -> Result<Vec<QueueTask>> {
+        self.dequeue_queue_tasks(batch_size, "classify")
+    }
+
+    fn dequeue_queue_tasks(&self, batch_size: usize, task_type: &str) -> Result<Vec<QueueTask>> {
         let tx = self.conn.unchecked_transaction()?;
         let mut stmt = tx.prepare(
             "SELECT id, item_id, chunk_idx, chunk_text, level, section_idx, priority, attempts, task_type
-             FROM embed_queue WHERE status = 'pending' AND task_type = 'embed'
-             ORDER BY priority ASC, created_at ASC LIMIT ?1",
+             FROM embed_queue WHERE status = 'pending' AND task_type = ?1
+             ORDER BY priority ASC, created_at ASC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![batch_size as i64], |row| {
+        let rows = stmt.query_map(params![task_type, batch_size as i64], |row| {
             let chunk_blob: Vec<u8> = row.get(3)?;
             Ok(QueueTask {
                 id: row.get(0)?,
@@ -119,7 +130,11 @@ impl Store {
             params![id],
             |row| row.get(0),
         )?;
-        let new_status = if attempts >= max_attempts { "abandoned" } else { "pending" };
+        let new_status = if attempts >= max_attempts {
+            "abandoned"
+        } else {
+            "pending"
+        };
         tx.execute(
             "UPDATE embed_queue SET status = ?1 WHERE id = ?2",
             params![new_status, id],
@@ -242,7 +257,9 @@ mod tests {
         // 1 pending
         store.enqueue_embedding(&item_id, 0, "p", 2, 1, 0).unwrap();
         // 1 processing
-        store.enqueue_embedding(&item_id, 1, "ing", 2, 1, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 1, "ing", 2, 1, 0)
+            .unwrap();
         store
             .conn
             .execute(
@@ -284,5 +301,24 @@ mod tests {
     fn purge_completed_on_empty_returns_zero() {
         let store = Store::open_memory().unwrap();
         assert_eq!(store.purge_completed_embed_queue().unwrap(), 0);
+    }
+
+    #[test]
+    fn classify_dequeue_isolated_from_embedding_queue() {
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let item_id = store
+            .insert_item(&dek, "t", "body", None, "note", None, None)
+            .unwrap();
+        store
+            .enqueue_embedding(&item_id, 0, "chunk", 1, 1, 0)
+            .unwrap();
+        store.enqueue_classify(&item_id, 2).unwrap();
+
+        let classify = store.dequeue_classify_tasks(10).unwrap();
+        assert_eq!(classify.len(), 1);
+        assert_eq!(classify[0].task_type, "classify");
+        assert_eq!(store.pending_embedding_count().unwrap(), 1);
+        assert!(store.dequeue_classify_tasks(10).unwrap().is_empty());
     }
 }

@@ -10,13 +10,14 @@
 用法：python3 tests/e2e/memory_moat_annotation_e2e.py  → 期望 15 PASS / 0 FAIL"""
 import json
 import sqlite3
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
 BASE = "http://localhost:18905"
-VAULT_DB = "/tmp/attune-e2e/data/attune/vault.db"
+VAULT_DB = os.environ.get("ATTUNE_VAULT_DB", "/tmp/attune-e2e/data/attune/vault.db")
 PASS = 0
 FAIL = 0
 

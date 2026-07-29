@@ -11,13 +11,13 @@
 //! 所有端点都需要 vault unlocked（vault_guard middleware 已在 build_router 层
 //! 拦截 locked 情形并返 403；handler 内仍保留 defensive check 以防中间件配置变更）。
 
+use attune_core::store::{Project, ProjectFile, ProjectTimelineEntry};
+use attune_core::vault::VaultState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use attune_core::store::{Project, ProjectFile, ProjectTimelineEntry};
-use attune_core::vault::VaultState;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -146,7 +146,10 @@ pub async fn add_file_to_project(
         .store()
         .add_file_to_project(&id, &req.file_id, role)
         .map_err(internal_error)?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({"status": "ok"}))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    ))
 }
 
 /// GET /api/v1/projects/:id/files

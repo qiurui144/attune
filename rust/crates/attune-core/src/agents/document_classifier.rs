@@ -45,14 +45,23 @@ impl super::Agent for DocumentClassifierAgent {
     type Input = Vec<(String, String)>; // (file, text) pairs (owned for trait object compat)
     type Output = ClassificationOutput;
 
-    fn id(&self) -> &str { "document_classifier_agent" }
-    fn description(&self) -> &str { "文档分类 + 简单理解 (内置, 不碰行业)" }
-    fn case_kinds(&self) -> &[&str] { &[] } // 通用, 不限定 case_kind
+    fn id(&self) -> &str {
+        "document_classifier_agent"
+    }
+    fn description(&self) -> &str {
+        "文档分类 + 简单理解 (内置, 不碰行业)"
+    }
+    fn case_kinds(&self) -> &[&str] {
+        &[]
+    } // 通用, 不限定 case_kind
 
     fn run(&self, input: Self::Input) -> super::AgentResult<super::AgentOutput<Self::Output>> {
         let docs: Vec<DocumentInput<'_>> = input
             .iter()
-            .map(|(f, t)| DocumentInput { file: f.as_str(), text: t.as_str() })
+            .map(|(f, t)| DocumentInput {
+                file: f.as_str(),
+                text: t.as_str(),
+            })
             .collect();
         Ok(run(&docs))
     }
@@ -65,7 +74,10 @@ pub fn run(inputs: &[DocumentInput<'_>]) -> Output {
     let mut audit_lines = Vec::new();
     let mut low_confidence_count = 0usize;
 
-    audit_lines.push(format!("[document_classifier_agent] 处理 {} 份文档", inputs.len()));
+    audit_lines.push(format!(
+        "[document_classifier_agent] 处理 {} 份文档",
+        inputs.len()
+    ));
 
     for input in inputs {
         let cls = classify_chunk_kind::classify(input.text);
@@ -79,9 +91,14 @@ pub fn run(inputs: &[DocumentInput<'_>]) -> Output {
 
         audit_lines.push(format!(
             "  [{}] kind={} conf={:.2} entities=(p:{}, d:{}, a:{}, l:{}, o:{})",
-            input.file, kind_str, cls.confidence,
-            ents.persons.len(), ents.dates.len(), ents.amounts.len(),
-            ents.locations.len(), ents.organizations.len()
+            input.file,
+            kind_str,
+            cls.confidence,
+            ents.persons.len(),
+            ents.dates.len(),
+            ents.amounts.len(),
+            ents.locations.len(),
+            ents.organizations.len()
         ));
 
         classified.push(ClassifiedEvidence {
@@ -98,7 +115,8 @@ pub fn run(inputs: &[DocumentInput<'_>]) -> Output {
     let mut followups = Vec::new();
     if low_confidence_count > 0 {
         missing.push(format!(
-            "{} 份文档分类置信度 < 0.3, 可能未识别正确类型", low_confidence_count
+            "{} 份文档分类置信度 < 0.3, 可能未识别正确类型",
+            low_confidence_count
         ));
         followups.push("低置信度文档建议人工核对或追加 LLM 二次分类".into());
     }
@@ -110,9 +128,12 @@ pub fn run(inputs: &[DocumentInput<'_>]) -> Output {
     };
 
     Output {
-        computation: ClassificationOutput { classified, kind_summary },
+        computation: ClassificationOutput {
+            classified,
+            kind_summary,
+        },
         audit_trail: audit_lines.join("\n"),
-        red_lines_violated: vec![],   // 文档分类无硬红线
+        red_lines_violated: vec![], // 文档分类无硬红线
         missing_evidence: missing,
         followups,
         confidence: overall_conf,
@@ -130,16 +151,33 @@ mod tests {
     #[test]
     fn classifies_mixed_evidence_pool() {
         let docs = vec![
-            doc("借条.pdf", "借条\n出借人: 张三\n借款人: 李四\n借款本金: 人民币伍拾万元整\n月利率 1%"),
-            doc("流水.pdf", "交易日期 2023-01-15  对方户名 李四  交易金额 +500000  余额 1000000  汇入"),
+            doc(
+                "借条.pdf",
+                "借条\n出借人: 张三\n借款人: 李四\n借款本金: 人民币伍拾万元整\n月利率 1%",
+            ),
+            doc(
+                "流水.pdf",
+                "交易日期 2023-01-15  对方户名 李四  交易金额 +500000  余额 1000000  汇入",
+            ),
             doc("微信.png", "[微信] 张三: 借款已转 [图片]\n李四: 收到 嗯嗯"),
-            doc("收据.pdf", "收据\n今收到张三还款人民币贰万元整\n开票日期: 2023-06-15"),
-            doc("判决.pdf", "(2024)京01民初1号民事判决书\n本院查明: ...\n判决如下: ..."),
+            doc(
+                "收据.pdf",
+                "收据\n今收到张三还款人民币贰万元整\n开票日期: 2023-06-15",
+            ),
+            doc(
+                "判决.pdf",
+                "(2024)京01民初1号民事判决书\n本院查明: ...\n判决如下: ...",
+            ),
         ];
         let out = run(&docs);
         assert_eq!(out.computation.classified.len(), 5);
 
-        let kinds: Vec<&str> = out.computation.classified.iter().map(|c| c.kind.as_str()).collect();
+        let kinds: Vec<&str> = out
+            .computation
+            .classified
+            .iter()
+            .map(|c| c.kind.as_str())
+            .collect();
         assert!(kinds.contains(&"borrowing_doc"));
         assert!(kinds.contains(&"bank_statement"));
         assert!(kinds.contains(&"chat"));
@@ -161,7 +199,11 @@ mod tests {
         assert!(c.entities.persons.iter().any(|p| p.starts_with("张三")));
         assert!(c.entities.persons.iter().any(|p| p.starts_with("李四")));
         assert!(c.entities.dates.contains(&"2023-01-15".to_string()));
-        assert!(c.entities.amounts.iter().any(|a| (a.value - 500_000.0).abs() < 0.01));
+        assert!(c
+            .entities
+            .amounts
+            .iter()
+            .any(|a| (a.value - 500_000.0).abs() < 0.01));
         assert!(c.entities.locations.iter().any(|l| l.contains("海淀区")));
     }
 

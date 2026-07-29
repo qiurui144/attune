@@ -41,7 +41,7 @@ pub struct Entitlement {
     pub paid: bool,
     /// Remaining cloud quota units (e.g. tokens or calls). `0` = exhausted.
     pub cloud_quota_remaining: u64,
-    /// Is a local model available as a fallback (Ollama installed / K3 reachable)?
+    /// Is a local model available as a fallback (Ollama installed / local-scheduler reachable)?
     pub local_available: bool,
 }
 
@@ -103,7 +103,10 @@ pub enum ScheduleDecision {
 impl ScheduleDecision {
     /// Did the call actually get dispatched (locally or to cloud)?
     pub fn is_runnable(&self) -> bool {
-        matches!(self, ScheduleDecision::Local { .. } | ScheduleDecision::Cloud)
+        matches!(
+            self,
+            ScheduleDecision::Local { .. } | ScheduleDecision::Cloud
+        )
     }
 
     /// Did scheduling block the call (entitlement / quota / disabled)?
@@ -147,10 +150,7 @@ impl Scheduler {
         // Entitlement gate: a paid agent requires a paid plan.
         if agent.tier == Tier::Paid && !self.entitlement.paid {
             return ScheduleDecision::BlockedEntitlement {
-                reason: format!(
-                    "agent {} requires a paid plan (tier=paid)",
-                    agent.id
-                ),
+                reason: format!("agent {} requires a paid plan (tier=paid)", agent.id),
             };
         }
 

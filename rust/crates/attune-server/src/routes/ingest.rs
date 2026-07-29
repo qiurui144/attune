@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
-use attune_core::ingest::{ingest_document, IngestOutcome, RawDocument, SourceKind};
+use attune_core::ingest::{ingest_document_with_options, IngestOutcome, RawDocument, SourceKind};
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
@@ -28,7 +28,7 @@ const MAX_INGEST_CONTENT: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_INGEST_TITLE: usize = 500;
 
 /// OSS-S15 fix: embedding 队列深度上限。R18 复现 5p mixed 60min 后累积 30K+ pending
-/// embeddings，server 进入 5min hung（后台 worker 串行 drain Ollama HTTP，前端读路径
+/// embeddings，server 进入 5min hung（后台 worker 串行 drain embedding HTTP，前端读路径
 /// 锁竞争阻塞）。超过此阈值 ingest 入口返回 503 backpressure 强制客户端 retry-after。
 const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
 
@@ -47,6 +47,7 @@ pub async fn ingest(
             body.content.len()
         )));
     }
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(&state, None);
     let vault = state
         .vault
         .lock()
@@ -74,7 +75,10 @@ pub async fn ingest(
     // domain / tags 经 RawDocument 一等字段透传给 insert_item（行为不变）。
     let source_ref = body.url.clone().unwrap_or_else(|| body.title.clone());
     let raw = RawDocument {
-        uri: body.url.clone().unwrap_or_else(|| format!("note://{source_ref}")),
+        uri: body
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("note://{source_ref}")),
         title: body.title.clone(),
         content: body.content.clone().into_bytes(),
         mime_hint: Some("text/plain".into()),
@@ -87,22 +91,42 @@ pub async fn ingest(
         metadata: std::collections::HashMap::new(),
     };
 
-    let outcome = ingest_document(vault.store(), &dek, &raw)
+    let outcome = ingest_document_with_options(vault.store(), &dek, &raw, &ingest_options)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let (id, chunks_queued) = match &outcome {
-        IngestOutcome::Inserted { item_id, chunks_enqueued } => (item_id.clone(), *chunks_enqueued),
-        IngestOutcome::Duplicate { item_id } => (item_id.clone(), 0),
-        IngestOutcome::Updated { item_id, .. } => (item_id.clone(), 0),
+    let (id, chunks_queued, status) = match &outcome {
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => (item_id.clone(), *chunks_enqueued, "ok"),
+        IngestOutcome::Duplicate { item_id } => (item_id.clone(), 0, "duplicate"),
+        IngestOutcome::Updated { item_id, .. } => (item_id.clone(), 0, "ok"),
+        IngestOutcome::Degraded {
+            item_id,
+            chunks_enqueued,
+            ..
+        } => (item_id.clone(), *chunks_enqueued, "degraded"),
         IngestOutcome::Skipped { reason } => {
             return Err(AppError::Unprocessable(reason.clone()));
         }
     };
 
+    // 释放 vault guard，再取 fulltext —— 绝不在持 vault 时取 fulltext（那会反转
+    // 规范锁序 fulltext → vectors → vault，与 search/chat 热点路径冲突 = ABBA）。
+    // 即时 FTS 写只需 body 字段（title/content/source_type）+ id，不依赖 vault。
+    drop(vault);
+
     // 此路由只调 ingest_document（非 _replacing），outcome 只会是 Inserted/Duplicate/Skipped，
     // 不会出现 Updated。仅 Inserted 需失效 search 缓存 + 即时 FTS（搜索不等 embedding）；
     // Duplicate 数据库状态未变，无需失效。
-    if matches!(outcome, IngestOutcome::Inserted { .. }) {
+    if matches!(
+        outcome,
+        IngestOutcome::Inserted { .. }
+            | IngestOutcome::Degraded {
+                chunks_enqueued: 1..,
+                ..
+            }
+    ) {
         if let Ok(mut cache) = state.search_cache.lock() {
             cache.clear();
         }
@@ -114,7 +138,7 @@ pub async fn ingest(
 
     Ok(Json(serde_json::json!({
         "id": id,
-        "status": "ok",
+        "status": status,
         "chunks_queued": chunks_queued
     })))
 }

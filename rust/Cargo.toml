@@ -51,7 +51,7 @@ all = { level = "warn", priority = -1 }
 
 [package]
 name = "attune"
-version = "1.2.0"
+version = "1.5.1"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -74,11 +74,13 @@ path = "tests/server_test.rs"
 [profile.dev]
 # split-debuginfo 加快 link (Linux/macOS 默认 packaged 慢); Windows 上 cargo 自动忽略.
 split-debuginfo = "unpacked"
+# sccache 负责跨 target 复用;关闭增量编译避免 target/incremental 长期膨胀.
+incremental = false
 
 [profile.dev.package."*"]
 # 让所有 dep crate 在 dev profile 也用 O1 (而非默认 O0).
 # 收益: dev test 速度 5x (大头是 serde/regex/tantivy/usearch 这些热 dep).
-# 代价: 第一次 build dep 时间 +30%, 之后增量 build 无影响.
+# 代价: 第一次 build dep 时间 +30%, 之后重复 build 基本无影响.
 opt-level = 1
 
 [profile.release]
@@ -92,5 +94,6 @@ strip = "symbols"
 [profile.test]
 # 测试中 dep 也走 O1, 大幅减少 cargo test 时间. 测试代码本身仍 O0.
 opt-level = 0
+incremental = false
 [profile.test.package."*"]
 opt-level = 1

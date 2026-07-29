@@ -1,0 +1,10 @@
+id: 01-basic-roundtrip
+description: 单条记忆 export→import 到新设备(异 DEK)→ 等价落库, 二次导入幂等 skip
+passphrase: correct-horse-battery
+memories:
+  - { hash: c1, summary: rust ownership and borrowing rules, model: embed-dim4 }
+expected:
+  imported: 1
+  skipped_on_reimport: 1
+  recall_query: ownership
+  recall_min_hits: 1

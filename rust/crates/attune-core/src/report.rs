@@ -61,7 +61,8 @@ impl ReportGenerator for MarkdownReportGenerator {
                           ## 概要 / ## 主要 items 列表 / ## 关联分析。\
                           禁止额外解释、禁止使用代码块包裹整篇报告。";
             // 把 items 序列化为 JSON 给 LLM 看
-            let items_json = serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string());
+            let items_json =
+                serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string());
             let user = format!(
                 "项目 id: {}\n\n以下是该项目的 items（JSON 数组）：\n{}\n\n\
                  请按上述三段结构输出 Markdown 报告。",
@@ -88,11 +89,7 @@ mod tests {
         canned: String,
     }
     impl LlmProvider for MockLlm {
-        fn chat(
-            &self,
-            _system: &str,
-            _user: &str,
-        ) -> Result<(String, crate::usage::TokenUsage)> {
+        fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
             Ok((
                 self.canned.clone(),
                 crate::usage::TokenUsage::empty("mock", "mock"),
@@ -118,7 +115,8 @@ mod tests {
     #[tokio::test]
     async fn markdown_generator_with_mock_llm() {
         let llm = Arc::new(MockLlm {
-            canned: "## 概要\n这是 mock 报告\n\n## 主要 items 列表\n- item A\n\n## 关联分析\n无".to_string(),
+            canned: "## 概要\n这是 mock 报告\n\n## 主要 items 列表\n- item A\n\n## 关联分析\n无"
+                .to_string(),
         });
         let items = vec![
             ReportItem {

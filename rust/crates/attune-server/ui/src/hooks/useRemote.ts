@@ -13,6 +13,7 @@ export type BoundDir = {
 
 export type RemoteActionResult = {
   ok: boolean;
+  background?: boolean;
   error?: string;
 };
 
@@ -29,8 +30,12 @@ export async function listBoundDirs(): Promise<BoundDir[]> {
 
 export async function bindLocalDir(path: string): Promise<RemoteActionResult> {
   try {
-    await api.post('/index/bind', { path, recursive: true });
-    return { ok: true };
+    const res = await api.post<{ background?: boolean }>('/index/bind', {
+      path,
+      recursive: true,
+      background: true,
+    });
+    return { ok: true, background: Boolean(res.background) };
   } catch (e: unknown) {
     if (e instanceof ApiError) {
       return { ok: false, error: extractErrorMessage(e.body) };

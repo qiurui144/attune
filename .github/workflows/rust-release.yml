@@ -92,6 +92,9 @@ jobs:
           # cargo 实际输出的二进制名是 attune-server-headless（不是 attune-server）
           cp "target/${TARGET}/release/attune-server-headless" staged/
           cp "target/${TARGET}/release/attune" staged/
+          find "target/${TARGET}/release" -maxdepth 1 -type f \
+            \( -name 'libsherpa-onnx-c-api.so*' -o -name 'libsherpa-onnx-c-api.dylib*' \) \
+            -exec cp {} staged/ \;
           cp ../LICENSE ../NOTICE ./README.md staged/
           cd staged
           tar -czf "../attune-${ASSET_SUFFIX}.tar.gz" ./*

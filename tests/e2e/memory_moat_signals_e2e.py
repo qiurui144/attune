@@ -10,6 +10,7 @@ R17 S1-Q4 事务修复在真实竞争下有效（content/hash 一致、无数据
 用法：python3 tests/e2e/memory_moat_signals_e2e.py  → 期望 9 PASS / 0 FAIL"""
 import json
 import sqlite3
+import os
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ import urllib.parse
 import urllib.request
 
 BASE = "http://localhost:18905"
-VAULT_DB = "/tmp/attune-e2e/data/attune/vault.db"
+VAULT_DB = os.environ.get("ATTUNE_VAULT_DB", "/tmp/attune-e2e/data/attune/vault.db")
 PASS = 0
 FAIL = 0
 

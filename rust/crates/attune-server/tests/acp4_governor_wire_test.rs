@@ -84,7 +84,11 @@ fn governed_chat_wire_caches_and_records_like_the_route() {
         None,
     )
     .expect("second governed_chat");
-    assert_eq!(r2.cache, CacheOutcome::Hit, "identical prompt served from cache");
+    assert_eq!(
+        r2.cache,
+        CacheOutcome::Hit,
+        "identical prompt served from cache"
+    );
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
         1,
@@ -101,7 +105,10 @@ fn governed_chat_wire_caches_and_records_like_the_route() {
         .unwrap()
         .usage_summary(0, i64::MAX)
         .expect("usage summary");
-    assert_eq!(summary.events, 2, "both miss and hit recorded to usage_events");
+    assert_eq!(
+        summary.events, 2,
+        "both miss and hit recorded to usage_events"
+    );
     assert!(summary.cache_hit_rate > 0.0, "hit registered in telemetry");
 }
 

@@ -14,8 +14,8 @@
 //! - sandbox (信任已装载, sandbox 是签名验证 plugin_sig.rs 的事)
 
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 /// Capability binary 调用结果
@@ -33,9 +33,13 @@ pub struct CapabilityResult {
 
 impl CapabilityResult {
     /// exit code = 0
-    pub fn is_success(&self) -> bool { self.exit_code == 0 && !self.timed_out }
+    pub fn is_success(&self) -> bool {
+        self.exit_code == 0 && !self.timed_out
+    }
     /// exit code = 2 (业务红线)
-    pub fn is_red_line(&self) -> bool { self.exit_code == 2 }
+    pub fn is_red_line(&self) -> bool {
+        self.exit_code == 2
+    }
 }
 
 /// 调用规格
@@ -49,6 +53,10 @@ pub struct CapabilityInvocation {
     pub stdin: Option<String>,
     /// 环境变量 (常见: LLM_ENDPOINT / LLM_API_KEY)
     pub env: Vec<(String, String)>,
+    /// Whether to start the child with an empty environment before applying
+    /// [`Self::env`]. Plugin-agent dispatch enables this so credentials and
+    /// proxy variables inherited by the server process cannot reach a child.
+    pub clear_env: bool,
     /// 超时 (默认 60s)
     pub timeout: Duration,
 }
@@ -60,6 +68,7 @@ impl CapabilityInvocation {
             args: Vec::new(),
             stdin: None,
             env: Vec::new(),
+            clear_env: false,
             timeout: Duration::from_secs(60),
         }
     }
@@ -83,6 +92,12 @@ impl CapabilityInvocation {
         self.env.push((k.into(), v.into()));
         self
     }
+    /// Start the child with no inherited environment. Callers must explicitly
+    /// inject every value the child is allowed to observe.
+    pub fn clear_env(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
     pub fn timeout(mut self, d: Duration) -> Self {
         self.timeout = d;
         self
@@ -96,12 +111,18 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
     if !invocation.binary.exists() {
         return Err(VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("capability binary not found: {}", invocation.binary.display()),
+            format!(
+                "capability binary not found: {}",
+                invocation.binary.display()
+            ),
         )));
     }
 
-    let mut cmd = Command::new(&invocation.binary);
+    let mut cmd = command_no_window(&invocation.binary);
     cmd.args(&invocation.args);
+    if invocation.clear_env {
+        cmd.env_clear();
+    }
     for (k, v) in &invocation.env {
         cmd.env(k, v);
     }
@@ -115,7 +136,15 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
     if let Some(stdin_str) = &invocation.stdin {
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(stdin_str.as_bytes()).map_err(VaultError::Io)?;
+            // BrokenPipe 容错:子进程可能不读 stdin 就快速退出(出错早退 / 无需输入的 agent),
+            // 此时 write_all 返回 BrokenPipe。这非致命——子进程的 stdout + 退出码仍有效,
+            // 继续往下 wait 即可。否则一个快速退出的 agent 会让整个 dispatch 因 stdin
+            // BrokenPipe 失败(CI 时序下偶发,本地难复现)。仅其他 io 错误才上抛。
+            match stdin.write_all(stdin_str.as_bytes()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(VaultError::Io(e)),
+            }
             // drop(stdin) 隐式 close
         }
     } else {
@@ -173,7 +202,7 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
 
 /// Capability 执行运行时分流类型 (spec §5.3).
 ///
-/// - `RustBinary`: 现有 subprocess(平台相关二进制)
+/// - `RustBinary`: 现有 subprocess/rust_binary(平台相关二进制)
 /// - `Wasm`: wasm32-wasip1 模块,wasmtime 执行(一包通吃所有平台)
 /// - `DataOnly`: 无执行体(纯 prompt + JSON schema,宿主侧组合)
 ///
@@ -188,10 +217,11 @@ pub enum CapabilityRuntime {
 
 /// 解析 manifest runtime 字符串到 `CapabilityRuntime`。
 ///
-/// `python_subprocess` / 任何未知值 → `unsupported-runtime` Err。
+/// `subprocess` 是 `rust_binary` 的历史 manifest 别名;`python_subprocess` /
+/// 任何未知值 → `unsupported-runtime` Err。
 pub fn parse_runtime(s: &str) -> Result<CapabilityRuntime> {
     match s {
-        "rust_binary" => Ok(CapabilityRuntime::RustBinary),
+        "rust_binary" | "subprocess" => Ok(CapabilityRuntime::RustBinary),
         "wasm" => Ok(CapabilityRuntime::Wasm),
         "data_only" => Ok(CapabilityRuntime::DataOnly),
         "python_subprocess" => Err(VaultError::InvalidInput(
@@ -229,7 +259,9 @@ pub fn dispatch_capability(
         CapabilityRuntime::Wasm => {
             #[cfg(feature = "wasm-runtime")]
             {
-                crate::wasm_runtime::WasmRunner::shared().run(invocation)
+                // R1.2: shared() 可失败(engine init 失败被缓存) — 返回
+                // `wasm-runtime-unavailable` 错误,WASM 能力禁用,宿主进程继续。
+                crate::wasm_runtime::WasmRunner::shared()?.run(invocation)
             }
             #[cfg(not(feature = "wasm-runtime"))]
             {
@@ -320,6 +352,27 @@ mod tests {
         assert!(r.stdout.contains("test_stdin_payload"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dispatch_can_clear_the_parent_environment() {
+        const SECRET: &str = "ATTUNE_TEST_CAPABILITY_PARENT_SECRET";
+        std::env::set_var(SECRET, "must-not-reach-child");
+        let sh = which::which("sh").unwrap_or_else(|_| PathBuf::from("/bin/sh"));
+        if !sh.exists() {
+            std::env::remove_var(SECRET);
+            eprintln!("skip: sh not found");
+            return;
+        }
+
+        let inv = CapabilityInvocation::new(&sh)
+            .args(["-c", "test -z \"$ATTUNE_TEST_CAPABILITY_PARENT_SECRET\""])
+            .clear_env();
+        let result = dispatch(&inv).expect("dispatch isolated child");
+        std::env::remove_var(SECRET);
+
+        assert_eq!(result.exit_code, 0, "child inherited parent secret");
+    }
+
     #[test]
     fn dispatch_timeout_kills_long_running() {
         let sleep = which::which("sleep").unwrap_or_else(|_| PathBuf::from("/bin/sleep"));
@@ -361,9 +414,19 @@ mod tests {
 
     #[test]
     fn parse_runtime_known_values() {
-        assert_eq!(parse_runtime("rust_binary").unwrap(), CapabilityRuntime::RustBinary);
+        assert_eq!(
+            parse_runtime("rust_binary").unwrap(),
+            CapabilityRuntime::RustBinary
+        );
+        assert_eq!(
+            parse_runtime("subprocess").unwrap(),
+            CapabilityRuntime::RustBinary
+        );
         assert_eq!(parse_runtime("wasm").unwrap(), CapabilityRuntime::Wasm);
-        assert_eq!(parse_runtime("data_only").unwrap(), CapabilityRuntime::DataOnly);
+        assert_eq!(
+            parse_runtime("data_only").unwrap(),
+            CapabilityRuntime::DataOnly
+        );
     }
 
     #[test]

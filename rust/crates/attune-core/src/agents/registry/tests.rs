@@ -122,8 +122,16 @@ fn shipped_registry_every_agent_declares_handoff() {
     // so the ACP-6 flow executor can chain steps.
     let reg = load_shipped();
     for a in reg.agents() {
-        assert!(!a.handoff.consumes.trim().is_empty(), "{} consumes empty", a.id);
-        assert!(!a.handoff.produces.trim().is_empty(), "{} produces empty", a.id);
+        assert!(
+            !a.handoff.consumes.trim().is_empty(),
+            "{} consumes empty",
+            a.id
+        );
+        assert!(
+            !a.handoff.produces.trim().is_empty(),
+            "{} produces empty",
+            a.id
+        );
     }
 }
 
@@ -144,14 +152,17 @@ fn shipped_registry_known_oss_agents_present() {
     // Spot-check all 6 oss-core agents (S4b: law-pro/tech-pro removed from OSS).
     let reg = load_shipped();
     for id in [
-        "document_classifier",    // OSS deterministic
-        "memory_consolidation",   // OSS LLM
-        "linker",                 // OSS deterministic
-        "chat_reliability",       // OSS deterministic
-        "self_evolving_skill",    // OSS deterministic
-        "skill_evolution_cycle",  // OSS LLM
+        "document_classifier",   // OSS deterministic
+        "memory_consolidation",  // OSS LLM
+        "linker",                // OSS deterministic
+        "chat_reliability",      // OSS deterministic
+        "self_evolving_skill",   // OSS deterministic
+        "skill_evolution_cycle", // OSS LLM
     ] {
-        assert!(reg.contains(id), "S4b: shipped OSS registry missing oss-core agent '{id}'");
+        assert!(
+            reg.contains(id),
+            "S4b: shipped OSS registry missing oss-core agent '{id}'"
+        );
     }
 }
 
@@ -238,7 +249,10 @@ consumes = "RawCaseText"
 produces = "DivorceFacts"
 "#;
     let err = AgentRegistry::from_toml_str(toml).unwrap_err();
-    assert!(err.contains("shares_binary") && err.contains("ghost_binary"), "got: {err}");
+    assert!(
+        err.contains("shares_binary") && err.contains("ghost_binary"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -258,7 +272,10 @@ consumes = "A"
 produces = "B"
 "#;
     let err = AgentRegistry::from_toml_str(toml).unwrap_err();
-    assert!(err.contains("shares_binary") && err.contains("itself"), "got: {err}");
+    assert!(
+        err.contains("shares_binary") && err.contains("itself"),
+        "got: {err}"
+    );
 }
 
 // ── golden / pure-logic: parse + accessors ──────────────────────────────
@@ -280,7 +297,10 @@ fn parses_single_agent() {
 fn contains_distinguishes_registered_from_shadow() {
     let reg = AgentRegistry::from_toml_str(one_agent_toml()).unwrap();
     assert!(reg.contains("fact_extractor"));
-    assert!(!reg.contains("ghost_agent"), "shadow agent must not be 'contained'");
+    assert!(
+        !reg.contains("ghost_agent"),
+        "shadow agent must not be 'contained'"
+    );
 }
 
 // ── boundary: empty registry ────────────────────────────────────────────
@@ -288,7 +308,10 @@ fn contains_distinguishes_registered_from_shadow() {
 #[test]
 fn empty_registry_rejected() {
     let err = AgentRegistry::from_toml_str("").unwrap_err();
-    assert!(err.contains("empty"), "empty registry must be rejected: {err}");
+    assert!(
+        err.contains("empty"),
+        "empty registry must be rejected: {err}"
+    );
 }
 
 // ── error: duplicate id ─────────────────────────────────────────────────
@@ -354,7 +377,10 @@ consumes = "B"
 produces = "C"
 "#;
     let err = AgentRegistry::from_toml_str(toml).unwrap_err();
-    assert!(err.contains("overlapping capability_boundary"), "got: {err}");
+    assert!(
+        err.contains("overlapping capability_boundary"),
+        "got: {err}"
+    );
 }
 
 // ── error: empty handoff type ───────────────────────────────────────────
@@ -436,7 +462,10 @@ produces = "C"
     let conflicts = reg.route_conflicts();
     assert_eq!(conflicts.len(), 1, "exactly one shared keyword");
     assert_eq!(conflicts[0].keyword, "shared");
-    assert_eq!(conflicts[0].agent_ids, vec!["a1".to_string(), "a2".to_string()]);
+    assert_eq!(
+        conflicts[0].agent_ids,
+        vec!["a1".to_string(), "a2".to_string()]
+    );
 }
 
 #[test]
@@ -454,17 +483,35 @@ fn render_directory_lists_all_agents_with_columns() {
     let reg = load_shipped();
     let out = reg.render_directory();
     // S4b: 6 oss-core agents only.
-    assert!(out.contains("Agent Registry — 6 agents"), "S4b: OSS registry has 6 agents, got:\n{out}");
+    assert!(
+        out.contains("Agent Registry — 6 agents"),
+        "S4b: OSS registry has 6 agents, got:\n{out}"
+    );
     // Only oss-core plugin group.
     assert!(out.contains("[oss-core]"), "oss-core group must be present");
     // No industry plugin groups (S4b — moved to attune-pro).
-    assert!(!out.contains("[law-pro]"), "S4b: law-pro group must not appear in OSS");
-    assert!(!out.contains("[tech-pro]"), "S4b: tech-pro group must not appear in OSS");
+    assert!(
+        !out.contains("[law-pro]"),
+        "S4b: law-pro group must not appear in OSS"
+    );
+    assert!(
+        !out.contains("[tech-pro]"),
+        "S4b: tech-pro group must not appear in OSS"
+    );
     // Representative oss-core agents.
-    assert!(out.contains("document_classifier"), "document_classifier must be listed");
-    assert!(out.contains("memory_consolidation"), "memory_consolidation must be listed");
+    assert!(
+        out.contains("document_classifier"),
+        "document_classifier must be listed"
+    );
+    assert!(
+        out.contains("memory_consolidation"),
+        "memory_consolidation must be listed"
+    );
     // S4b: industry agents absent.
-    assert!(!out.contains("defamation_extractor"), "S4b: defamation_extractor must not appear in OSS");
+    assert!(
+        !out.contains("defamation_extractor"),
+        "S4b: defamation_extractor must not appear in OSS"
+    );
     // Column headers still rendered.
     assert!(out.contains("handoff:"), "handoff chain rendered");
     assert!(out.contains("gate="), "gate binding rendered");

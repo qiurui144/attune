@@ -1,13 +1,7 @@
 /**
- * LocalModelReadiness — 本地模型一键就绪面板 (zero-terminal UX)
+ * LocalModelReadiness — local scheduler 就绪面板
  *
- * 面向非技术用户：把 Ollama "守护进程是否在 + 模型是否已下载" 归一成三态，
- * 每个缺失态都配一键修复按钮（永不让用户去终端敲命令）：
- *   🔴 daemon_down   → 一键安装 Ollama（POST /ollama/install）+ 轮询直到 daemon 起来
- *   🟡 model_missing → 一键拉取模型（POST /models/pull）+ 轮询直到模型就绪
- *   🟢 ready         → 绿色就绪提示
- *
- * 装不了的平台（macOS / 未知）graceful 降级：给官网下载链接（download_url）。
+ * 本地模型生命周期由 scheduler 管理。
  */
 
 import type { JSX } from 'preact';
@@ -37,14 +31,14 @@ type ReadinessResponse = {
 };
 
 type InstallResponse = {
-  status: 'queued' | 'manual' | 'busy';
+  status: 'queued' | 'manual' | 'busy' | 'scheduler-managed';
   task_id?: string | null;
   download_url?: string | null;
   message: string;
 };
 
 export type LocalModelReadinessProps = {
-  /** 要核对的 Ollama 模型 tag（如 qwen2.5:3b）。空 = 只看 daemon 是否在。 */
+  /** 要核对的 scheduler 模型名。空 = 只看 scheduler 是否可用。 */
   model: string;
   /** 就绪态变化回调（父组件据此 enable/disable "使用本地" 按钮）。 */
   onReadyChange?: (ready: boolean) => void;
@@ -69,7 +63,7 @@ export function LocalModelReadiness({
   const probe = useCallback(async (): Promise<ReadinessResponse | null> => {
     try {
       const q = model.trim() ? `?model=${encodeURIComponent(model.trim())}` : '';
-      const r = await api.get<ReadinessResponse>(`/ollama/readiness${q}`);
+      const r = await api.get<ReadinessResponse>(`/edge-scheduler/readiness${q}`);
       setResp(r);
       onReadyChange?.(r.readiness.state === 'ready');
       return r;
@@ -130,7 +124,7 @@ export function LocalModelReadiness({
     setBusy(true);
     setBusyLabel(t('local_model.install.installing'));
     try {
-      const r = await api.post<InstallResponse>('/ollama/install', {});
+      const r = await api.post<InstallResponse>('/edge-scheduler/ensure', {});
       if (r.status === 'manual') {
         const url = r.download_url ?? plan.homepage;
         window.open(url, '_blank', 'noopener');

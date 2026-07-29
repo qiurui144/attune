@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1dca5f9a5419a0ca2ddee4278b65e0bfbfbcd562b87d9982d95a415e7fe75285 # shrinks to probed = [(ModelSource { id: "s", endpoint: "https://s.example", priority: 1, region_hint: Some(International), coverage: OnlyXenovaOnnx }, SourceHealth { source_id: "s", reachable: false, throughput_bps: 0.0, latency_ms: None }), (ModelSource { id: "a", endpoint: "https://a.example", priority: 1, region_hint: Some(International), coverage: OnlyXenovaOnnx }, SourceHealth { source_id: "a", reachable: false, throughput_bps: 0.0, latency_ms: None }), (ModelSource { id: "s", endpoint: "https://s.example", priority: 1, region_hint: Some(International), coverage: OnlyXenovaOnnx }, SourceHealth { source_id: "s", reachable: true, throughput_bps: 0.0, latency_ms: Some(10) })], repo = "Xenova/bge-m3", cn = false

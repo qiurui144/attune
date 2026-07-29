@@ -3,6 +3,7 @@
 import type { ComponentChildren, JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { useFocusTrap } from '../hooks/useFocusTrap';
+import { t } from '../i18n';
 
 export type DrawerProps = {
   open: boolean;
@@ -124,7 +125,7 @@ export function Drawer({
             <button
               type="button"
               onClick={onClose}
-              aria-label="Close"
+              aria-label={t('common.close')}
               style={{
                 background: 'transparent',
                 border: 'none',

@@ -1,6 +1,6 @@
 // npu-vault/crates/vault-core/src/search.rs
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::embed::EmbeddingProvider;
@@ -17,11 +17,15 @@ pub const RERANK_TOP_K_THRESHOLD: usize = 20;
 pub const DEFAULT_VECTOR_WEIGHT: f32 = 0.6;
 pub const DEFAULT_FULLTEXT_WEIGHT: f32 = 0.4;
 pub const INJECTION_BUDGET: usize = 2000;
+const METADATA_SOURCE_SCAN_LIMIT: usize = 4096;
+const EXACT_SUBSTRING_SCAN_LIMIT: usize = 512;
+const LEXICAL_EXCERPT_MAX_BYTES: usize = 2400;
 
 /// 启用 cross-encoder reranker 的最小候选数。
 /// 候选数 < 此阈值时，RRF 排序比 cross-encoder 重排更稳定（cross-encoder
 /// 在小候选集上放大噪声 / 跨语言错配）。
 pub const RERANK_MIN_CANDIDATES: usize = 5;
+const RERANK_MIN_ACTIONABLE_SCORE: f32 = 0.001;
 
 /// Cross-lingual 降权系数。query 与 doc 语言不匹配时，该 doc 的 score 乘以此系数。
 /// 设为 0.3 而不是直接过滤：保留 cross-lingual 召回（专业术语常借用英文），
@@ -35,22 +39,37 @@ pub const CROSS_LANG_PENALTY: f32 = 0.3;
 ///   - ASCII letter >= 70% → En
 ///   - 其他 → Mixed（不降权，因为专业术语常中英混用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang { Zh, En, Mixed }
+pub enum Lang {
+    Zh,
+    En,
+    Mixed,
+}
 
 pub fn detect_lang(s: &str) -> Lang {
     let (mut cjk, mut ascii_alpha, mut total) = (0usize, 0usize, 0usize);
     for c in s.chars() {
-        if c.is_whitespace() { continue; }
+        if c.is_whitespace() {
+            continue;
+        }
         total += 1;
-        if ('\u{4e00}'..='\u{9fff}').contains(&c) { cjk += 1; }
-        else if c.is_ascii_alphabetic() { ascii_alpha += 1; }
+        if ('\u{4e00}'..='\u{9fff}').contains(&c) {
+            cjk += 1;
+        } else if c.is_ascii_alphabetic() {
+            ascii_alpha += 1;
+        }
     }
-    if total == 0 { return Lang::Mixed; }
+    if total == 0 {
+        return Lang::Mixed;
+    }
     let cjk_ratio = cjk as f32 / total as f32;
     let ascii_ratio = ascii_alpha as f32 / total as f32;
-    if cjk_ratio >= 0.30 { Lang::Zh }
-    else if ascii_ratio >= 0.70 { Lang::En }
-    else { Lang::Mixed }
+    if cjk_ratio >= 0.30 {
+        Lang::Zh
+    } else if ascii_ratio >= 0.70 {
+        Lang::En
+    } else {
+        Lang::Mixed
+    }
 }
 
 /// 对 SearchResult 列表按 query/content 语言匹配降权。
@@ -84,63 +103,44 @@ pub fn apply_cross_lang_penalty(results: &mut [SearchResult], query_lang: Lang) 
 pub const CROSS_DOMAIN_PENALTY: f32 = 0.4;
 
 /// v0.6 Phase B F-Pro Stage 4：从 query 文本检测领域意图（零 LLM 调用）。
-/// 关键词命中策略：每个 domain 维护一组特征词，统计命中数最多的 domain 返回。
-/// 返回 None = 未明确意图（不应用 cross-domain penalty，保持现状）。
 ///
-/// 关键词集建议来源：vertical plugin.yaml::chat_trigger.project_keywords。
-/// 当 plugin loader 已加载 vertical plugin 时调用方应优先用 plugin 数据；
-/// 这里仅提供 hardcoded fallback 让 OSS 裸装也能用基础识别能力。
-pub fn detect_query_domain(query: &str) -> Option<String> {
-    use std::collections::HashMap;
-
-    // hardcoded fallback：覆盖 attune-pro 6 vertical 的核心特征词
-    // 每个 domain 选 12-20 个高判别性词（避免泛词如"问题/可以"）
-    let keywords_by_domain: &[(&str, &[&str])] = &[
-        ("legal", &[
-            "法律", "法条", "法规", "法院", "判决", "案件", "案号", "诉讼", "起诉", "判例",
-            "民法", "刑法", "民法典", "合同法", "公司法", "商标法", "专利法",
-            "借贷", "商标", "股东", "股权", "侵权", "违约", "赔偿", "仲裁",
-            "反洗钱", "劳动合同", "工伤", "婚姻", "继承",
-        ]),
-        ("tech", &[
-            // Rust / 系统编程
-            "Rust", "ownership", "borrow", "lifetime",
-            // Python / 通用
-            "Python", "decorator", "tuple", "list comprehension",
-            // 算法 / 数据结构
-            "算法", "数据结构", "动态规划", "二叉树", "哈希", "梯度下降", "过拟合",
-            // 系统 / 分布式
-            "Linux", "Docker", "kubernetes", "k8s", "Redis", "MySQL", "PostgreSQL",
-            "分布式", "TCP", "HTTP", "Socket",
-            // 数据库
-            "SQL", "索引", "事务",
-        ]),
-        ("medical", &[
-            "病历", "诊断", "症状", "用药", "处方", "手术", "病人", "患者",
-            "临床", "医院", "禁忌", "副作用", "剂量",
-        ]),
-        ("patent", &[
-            "专利", "权利要求", "申请号", "IPC", "OA", "审查", "优先权", "新颖性",
-            "创造性", "实用新型", "外观设计", "PCT",
-        ]),
-    ];
-
+/// **S4b MU-5 (R8 boundary)**：领域词表 **完全由 plugin 提供**，不再硬编码任何行业
+/// 关键词。per oss-pro-strategy §4.3，legal / medical / patent / tech 全部属于
+/// attune-pro vertical —— 行业 domain detection 不应活在 OSS attune-core。
+///
+/// 关键词来源：vertical plugin（attune-pro）经
+/// `PluginRegistry::all_chat_trigger_keywords_by_domain()` 提供 `(domain, keywords)`
+/// 分组；调用方传入。每个 domain 统计命中词数，命中最多者胜出（同分按传入顺序优先）。
+///
+/// - `domain_keywords` 空（OSS 裸装无 vertical plugin）→ 返 `None` →
+///   不应用 cross-domain penalty → 走 generic ranking（graceful degrade）。
+///   domain-aware reranking 是 pro feature（§4.3），OSS 裸装优雅降级。
+/// - 任一 domain 命中 ≥1 词 → 返该 domain；零命中 → `None`。
+///
+/// `domain` 字符串需与 ingest 写入 item 的 `corpus_domain` 对齐
+/// （`apply_cross_domain_penalty` 比对 `corpus_domain`）。
+pub fn detect_query_domain<D: AsRef<str>, K: AsRef<str>>(
+    query: &str,
+    domain_keywords: &[(D, Vec<K>)],
+) -> Option<String> {
+    if domain_keywords.is_empty() {
+        return None;
+    }
     let q = query.to_lowercase();
-    let mut hit_counts: HashMap<&str, usize> = HashMap::new();
-    for (domain, kws) in keywords_by_domain {
-        for kw in *kws {
-            // 中文命中按子串；英文命中按子串（lowercase 已处理大小写）
-            if q.contains(&kw.to_lowercase()) {
-                *hit_counts.entry(*domain).or_insert(0) += 1;
-            }
+    // 同分按传入序优先 → 用严格 `>` 累积，首个达到最大命中数的 domain 胜出。
+    let mut best: Option<(&str, usize)> = None;
+    for (domain, kws) in domain_keywords {
+        let hits = kws
+            .iter()
+            // 中文/英文均按子串命中（lowercase 已统一英文大小写）
+            .filter(|kw| q.contains(&kw.as_ref().to_lowercase()))
+            .count();
+        // 至少 1 个命中才参与（避免误识别）；严格大于才替换 → 保留首见最大者
+        if hits >= 1 && best.map(|(_, b)| hits > b).unwrap_or(true) {
+            best = Some((domain.as_ref(), hits));
         }
     }
-    // 至少 1 个命中才返回（避免误识别），同分则按表序优先
-    hit_counts
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .filter(|(_, c)| *c >= 1)
-        .map(|(d, _)| d.to_string())
+    best.map(|(domain, _)| domain.to_string())
 }
 
 /// 跨领域降权：query 有 domain hint（如 "legal"）时，doc.corpus_domain 不匹配的降权。
@@ -160,14 +160,443 @@ pub fn apply_cross_domain_penalty(results: &mut [SearchResult], query_domain: Op
     }
 }
 
+fn normalized_ascii_tokens(s: &str) -> HashSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "and", "are", "for", "from", "give", "into", "local", "many", "now", "source", "the",
+        "this", "while", "with", "without",
+    ];
+    const STEM_EXCEPTIONS: &[&str] = &["dos", "ios", "rtos", "windows"];
+    let stopwords: HashSet<&str> = STOPWORDS.iter().copied().collect();
+    let stem_exceptions: HashSet<&str> = STEM_EXCEPTIONS.iter().copied().collect();
+    s.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter_map(|tok| {
+            let tok = tok.trim();
+            if tok.len() < 2 || stopwords.contains(tok) {
+                return None;
+            }
+            let stemmed = if tok.len() > 3 && tok.ends_with('s') && !stem_exceptions.contains(tok) {
+                &tok[..tok.len() - 1]
+            } else {
+                tok
+            };
+            Some(stemmed.to_string())
+        })
+        .collect()
+}
+
+fn source_hint_text(r: &SearchResult) -> String {
+    let mut out = String::new();
+    out.push_str(&r.title);
+    out.push('\n');
+    if let Some(path) = &r.source_path {
+        out.push_str(path);
+        out.push('\n');
+    }
+    for crumb in &r.breadcrumb {
+        out.push_str(crumb);
+        out.push('\n');
+    }
+    out.to_ascii_lowercase()
+}
+
+fn token_matches_with_prefix(query_token: &str, source_token: &str) -> bool {
+    query_token == source_token
+        || query_token.len() >= 3
+            && source_token.len() >= 3
+            && (query_token.starts_with(source_token) || source_token.starts_with(query_token))
+}
+
+fn source_phrase_boost(query: &str, source: &str) -> f32 {
+    let mut boost = 0.0f32;
+    let q = query.to_ascii_lowercase();
+
+    let has = |needle: &str| source.contains(needle);
+    let q_has = |needle: &str| q.contains(needle);
+
+    boost += aircraft_hint_boost(&q, source);
+    boost += source_exclusion_penalty(&q, source);
+
+    if (q_has("qrh") || q_has("quick reference")) && (has("qrh") || has("quick reference")) {
+        boost += 0.22;
+    }
+    if (q_has("abnormal") || q_has("emergency") || q_has("checklist"))
+        && (has("qrh") || has("quick reference"))
+    {
+        boost += 0.10;
+    }
+    if q_has("fctm") && has("fctm") {
+        boost += 0.18;
+    }
+    if (q_has("fcom") || q_has("flight crew operating")) && has("fcom") {
+        boost += 0.10;
+    }
+    if (q_has("sop") || q_has("standard operating"))
+        && (has("/sop") || has("\\sop") || has("-sop") || has("standard operating"))
+    {
+        boost += 0.24;
+    }
+    if q_has("takeoff") && (has("takeoff") || has("take-off")) {
+        boost += 0.16;
+    }
+    if (q_has("separated")
+        || q_has("seperate")
+        || q_has("seperated")
+        || q_has("distinct from fcom")
+        || q_has("not fcom")
+        || q_has("not the full 320fcom"))
+        && has("fcom")
+    {
+        boost -= 0.10;
+    }
+    if (q_has("system") || q_has("systems") || q_has("separated") || q_has("seperated"))
+        && (has("/systems")
+            || has("systems (")
+            || has("-hydraulic")
+            || has("-electrical")
+            || has("-fuel")
+            || has("-navigation")
+            || has("-powerplant")
+            || has("-landing_gear")
+            || has("-flight_controls"))
+    {
+        boost += 0.12;
+    }
+    for code in ["320fcom1", "320fcom3", "qrh320"] {
+        if q_has(code) && has(code) {
+            boost += 0.16;
+        }
+    }
+    if q_has("hydraulic") && has("hydraulic") {
+        boost += 0.14;
+    }
+    if (q_has("landing gear") || q_has("ata 32"))
+        && (has("landing gear") || has("32-landing") || has("ata 32"))
+    {
+        boost += 0.12;
+    }
+    if (q_has("flight controls") || q_has("flight control") || q_has("ata 27"))
+        && (has("flight controls")
+            || has("flight control")
+            || has("flights-controls")
+            || has("flight_controls")
+            || has("ata 27"))
+    {
+        boost += 0.16;
+    }
+    if q_has("electrical") && has("electrical") {
+        boost += 0.14;
+    }
+    if q_has("fuel") && has("fuel") {
+        boost += 0.14;
+    }
+    if q_has("navigation") && has("navigation") {
+        boost += 0.16;
+    }
+    if q_has("powerplant") && has("powerplant") {
+        boost += 0.16;
+    }
+    if (q_has("abbreviation") || q_has("abbreviations"))
+        && (has("abbreviation") || has("abbreviations"))
+    {
+        boost += 0.38;
+    }
+    if q_has("pdf") && has(".pdf") {
+        boost += 0.04;
+    }
+    if q_has("markdown") && (has(".md") || has("markdown")) && !q_has("pdf source") {
+        boost += 0.04;
+    }
+
+    boost
+}
+
+fn source_exclusion_penalty(query: &str, source: &str) -> f32 {
+    const EXCLUSION_MARKERS: &[&str] = &[
+        "不要引入",
+        "不要包含",
+        "不包括",
+        "排除",
+        "without",
+        "exclude",
+        "excluding",
+        "not ",
+    ];
+    let has_exclusion = EXCLUSION_MARKERS
+        .iter()
+        .any(|marker| query.contains(marker));
+    if !has_exclusion {
+        return 0.0;
+    }
+
+    const EXCLUSION_ALIASES: &[(&str, &[&str])] = &[
+        ("a220", &["a220", "cs300", "bd500"]),
+        (
+            "a320",
+            &["a320", "a318/a319/a320", "320fcom", "qrh320", "320-"],
+        ),
+        ("a330", &["a330", "330fcom", "330-"]),
+        ("a340", &["a340", "340fcom", "340-"]),
+        ("a350", &["a350", "350-"]),
+        ("a380", &["a380", "380fcom", "380-"]),
+        (
+            "boeing",
+            &[
+                "boeing", "b737", "b747", "b757", "b767", "b777", "b787", "737-", "747-", "757-",
+                "767-", "777-", "787-",
+            ],
+        ),
+    ];
+
+    let mut penalty = 0.0;
+    for (trigger, aliases) in EXCLUSION_ALIASES {
+        if query_excludes_source_hint(query, trigger, EXCLUSION_MARKERS)
+            && aliases.iter().any(|alias| source.contains(alias))
+        {
+            penalty -= 0.45;
+        }
+    }
+    penalty
+}
+
+fn query_excludes_source_hint(query: &str, trigger: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| {
+        query
+            .find(marker)
+            .map(|idx| query[idx + marker.len()..].contains(trigger))
+            .unwrap_or(false)
+    })
+}
+
+fn aircraft_hint_boost(query: &str, source: &str) -> f32 {
+    const AIRCRAFT_ALIASES: &[(&str, &[&str])] = &[
+        ("a220", &["a220", "cs300", "bd500"]),
+        (
+            "a320",
+            &["a320", "a318/a319/a320", "320fcom", "qrh320", "320-"],
+        ),
+        ("a330", &["a330", "330fcom", "330-"]),
+        ("a340", &["a340", "340fcom", "340-"]),
+        ("a350", &["a350", "350-"]),
+        ("a380", &["a380", "380fcom", "380-"]),
+        (
+            "b737",
+            &["b737", "737max", "737 max", "737-8", "737-tbc", "737-"],
+        ),
+        ("b747", &["b747", "747-8", "747-400", "747-", "747 "]),
+        ("b757", &["b757", "757-", "757 "]),
+        ("b767", &["b767", "767-", "767 "]),
+        ("b777", &["b777", "777-", "777 "]),
+        ("b787", &["b787", "787-", "787 "]),
+        ("mig29", &["mig-29", "mig29", "mikoyan"]),
+    ];
+
+    let query_tags: Vec<&str> = AIRCRAFT_ALIASES
+        .iter()
+        .filter(|(_, aliases)| aliases.iter().any(|alias| query.contains(alias)))
+        .map(|(tag, _)| *tag)
+        .collect();
+    if query_tags.is_empty() {
+        return 0.0;
+    }
+
+    let source_tags: Vec<&str> = AIRCRAFT_ALIASES
+        .iter()
+        .filter(|(_, aliases)| aliases.iter().any(|alias| source.contains(alias)))
+        .map(|(tag, _)| *tag)
+        .collect();
+    let matches = query_tags
+        .iter()
+        .filter(|tag| source_tags.iter().any(|source_tag| source_tag == *tag))
+        .count();
+
+    let mut boost = (matches as f32 * 0.16).min(0.32);
+    if matches == 0 && !source_tags.is_empty() {
+        boost -= 0.16;
+    }
+    if query.contains("boeing") && source.contains("airbus") {
+        boost -= 0.06;
+    }
+    if query.contains("airbus") && source.contains("boeing") {
+        boost -= 0.06;
+    }
+    if (query.contains("mig") || query.contains("mikoyan")) && !source.contains("mig") {
+        boost -= 0.08;
+    }
+    boost
+}
+
+/// Apply a cheap SRAS-style source selector reward.
+///
+/// Long manuals produce many chunks, which can make large-but-wrong PDFs dominate
+/// vector/RRF scores. This deterministic pass rewards candidates whose title,
+/// source path, or breadcrumb matches explicit source hints in the query
+/// (manual family, ATA number, aircraft code, filename fragments). It is kept
+/// small and local: no LLM call, no corpus-specific schema requirement.
+pub fn apply_source_hint_boost(query: &str, results: &mut [SearchResult]) {
+    if results.is_empty() {
+        return;
+    }
+    let query_tokens = normalized_ascii_tokens(query);
+    if query_tokens.is_empty() {
+        return;
+    }
+
+    for r in results.iter_mut() {
+        let source = source_hint_text(r);
+        let source_tokens = normalized_ascii_tokens(&source);
+        let overlap = query_tokens
+            .iter()
+            .filter(|tok| {
+                source_tokens
+                    .iter()
+                    .any(|source_tok| token_matches_with_prefix(tok, source_tok))
+            })
+            .count();
+        let token_boost = (overlap as f32 * 0.018).min(0.12);
+        r.score += token_boost + source_phrase_boost(query, &source);
+    }
+}
+
+fn platform_hints(query: &str) -> HashSet<&'static str> {
+    let tokens = normalized_ascii_tokens(query);
+    let mut hints = HashSet::new();
+    if tokens.contains("rtos") || tokens.contains("freertos") {
+        hints.insert("rtos");
+    }
+    if tokens.contains("linux") || tokens.contains("tina") {
+        hints.insert("linux");
+    }
+    if tokens.contains("android") {
+        hints.insert("android");
+    }
+    if tokens.contains("windows") || tokens.contains("win") {
+        hints.insert("windows");
+    }
+    hints
+}
+
+fn source_platforms(result: &SearchResult) -> HashSet<&'static str> {
+    let source = source_hint_text(result);
+    let tokens = normalized_ascii_tokens(&source);
+    let mut platforms = HashSet::new();
+    if tokens.contains("rtos") || tokens.contains("freertos") {
+        platforms.insert("rtos");
+    }
+    if tokens.contains("linux") || tokens.contains("tina") {
+        platforms.insert("linux");
+    }
+    if tokens.contains("android") {
+        platforms.insert("android");
+    }
+    if tokens.contains("windows") || tokens.contains("win") {
+        platforms.insert("windows");
+    }
+    platforms
+}
+
+pub fn apply_platform_hint_adjustment(query: &str, results: &mut [SearchResult]) {
+    let hints = platform_hints(query);
+    if hints.is_empty() {
+        return;
+    }
+    for result in results {
+        let platforms = source_platforms(result);
+        if platforms.is_empty() {
+            continue;
+        }
+        let matches = hints.iter().any(|hint| platforms.contains(hint));
+        let conflicts = platforms.iter().any(|platform| !hints.contains(platform));
+        if matches {
+            result.score += 0.70;
+        }
+        if conflicts && !matches {
+            result.score -= 0.90;
+        } else if conflicts {
+            result.score -= 0.20;
+        }
+    }
+}
+
+fn lexical_needle_weight(needle: &str) -> f32 {
+    let has_identifier_punct = needle
+        .chars()
+        .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#' | ':'));
+    if has_identifier_punct && needle.len() >= 8 {
+        6.0
+    } else if has_identifier_punct {
+        4.0
+    } else if needle.len() >= 12 {
+        4.0
+    } else if needle.len() >= 6 {
+        2.0
+    } else {
+        1.0
+    }
+}
+
+fn query_coverage_boost(query: &str, result: &SearchResult) -> f32 {
+    let needles = lexical_needles(query);
+    if needles.is_empty() {
+        return 0.0;
+    }
+
+    let mut haystack = String::new();
+    haystack.push_str(&result.title);
+    haystack.push('\n');
+    if let Some(path) = &result.source_path {
+        haystack.push_str(path);
+        haystack.push('\n');
+    }
+    haystack.push_str(&result.content);
+    let haystack = haystack.to_ascii_lowercase();
+
+    let total_weight: f32 = needles
+        .iter()
+        .map(|needle| lexical_needle_weight(needle))
+        .sum();
+    if total_weight <= 0.0 {
+        return 0.0;
+    }
+
+    let matched_weight: f32 = needles
+        .iter()
+        .filter(|needle| haystack.contains(needle.as_str()))
+        .map(|needle| lexical_needle_weight(needle))
+        .sum();
+    let coverage = matched_weight / total_weight;
+    let absolute = (matched_weight * 0.05).min(0.55);
+    let identifier_hits = needles
+        .iter()
+        .filter(|needle| {
+            needle
+                .chars()
+                .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#' | ':'))
+                && haystack.contains(needle.as_str())
+        })
+        .count();
+
+    (coverage * 0.45) + absolute + (identifier_hits as f32 * 0.10).min(0.30)
+}
+
+pub fn apply_query_coverage_boost(query: &str, results: &mut [SearchResult]) {
+    for result in results {
+        result.score += query_coverage_boost(query, result);
+    }
+}
+
 /// 搜索结果
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchResult {
     pub item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_idx: Option<usize>,
     pub score: f32,
     pub title: String,
     pub content: String,
     pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     pub inject_content: Option<String>,
     /// v0.6 Phase B F-Pro：item.corpus_domain（legal/tech/medical/.../general）。
     /// search 阶段按 query intent 跨域降权防止"反洗钱"被 cs-notes 顶占。
@@ -231,6 +660,9 @@ pub struct SearchParams {
     /// Skip query_rewrite LLM call entirely (deterministic retrieval — bench
     /// uses this to isolate retrieval quality from LLM noise).
     pub skip_rewrite: bool,
+    /// Skip vector embedding/search for metadata-source queries that can be
+    /// answered by fulltext + SRAS source selection.
+    pub skip_vector: bool,
     /// Skip rerank LLM call entirely (same motivation as `skip_rewrite`).
     pub skip_rerank: bool,
 }
@@ -258,6 +690,7 @@ impl SearchParams {
             domain_hint: None,
             seed: None,
             skip_rewrite: false,
+            skip_vector: false,
             skip_rerank: false,
         }
     }
@@ -290,6 +723,26 @@ pub struct SearchContext<'a> {
     pub dek: &'a crate::crypto::Key32,
 }
 
+const CHUNK_KEY_SEP: &str = "\u{1f}";
+
+fn chunk_hit_key(item_id: &str, chunk_idx: usize) -> String {
+    format!("{item_id}{CHUNK_KEY_SEP}{chunk_idx}")
+}
+
+fn parse_hit_key(key: &str) -> (&str, Option<usize>) {
+    let Some((item_id, chunk)) = key.rsplit_once(CHUNK_KEY_SEP) else {
+        return (key, None);
+    };
+    match chunk.parse::<usize>() {
+        Ok(idx) => (item_id, Some(idx)),
+        Err(_) => (key, None),
+    }
+}
+
+fn hit_key_item_id(key: &str) -> &str {
+    parse_hit_key(key).0
+}
+
 /// RRF 融合两组排名结果
 pub fn rrf_fuse(
     vector_results: &[(String, f32)],
@@ -299,20 +752,380 @@ pub fn rrf_fuse(
     top_k: usize,
 ) -> Vec<(String, f32)> {
     let mut scores: HashMap<String, f32> = HashMap::new();
+    let mut representative_by_item: HashMap<String, String> = HashMap::new();
 
     for (rank, (id, _score)) in vector_results.iter().enumerate() {
         let rrf = vector_weight / (RRF_K + rank as f32 + 1.0);
-        *scores.entry(id.clone()).or_default() += rrf;
+        let item_id = hit_key_item_id(id).to_string();
+        let representative = representative_by_item
+            .entry(item_id)
+            .or_insert_with(|| id.clone())
+            .clone();
+        *scores.entry(representative).or_default() += rrf;
     }
     for (rank, (id, _score)) in fulltext_results.iter().enumerate() {
         let rrf = fulltext_weight / (RRF_K + rank as f32 + 1.0);
-        *scores.entry(id.clone()).or_default() += rrf;
+        let item_id = hit_key_item_id(id).to_string();
+        let representative = representative_by_item
+            .entry(item_id)
+            .or_insert_with(|| id.clone())
+            .clone();
+        *scores.entry(representative).or_default() += rrf;
     }
 
     let mut sorted: Vec<(String, f32)> = scores.into_iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     sorted.truncate(top_k);
     sorted
+}
+
+fn merge_ranked_results(
+    primary: Vec<(String, f32)>,
+    secondary: Vec<(String, f32)>,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(limit.min(primary.len() + secondary.len()));
+    for (id, score) in primary.into_iter().chain(secondary.into_iter()) {
+        if seen.insert(id.clone()) {
+            out.push((id, score));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn metadata_source_candidates(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let Ok(items) = ctx.store.list_items(METADATA_SOURCE_SCAN_LIMIT, 0) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for item in items {
+        let mut result = SearchResult {
+            item_id: item.id,
+            score: 0.0,
+            title: item.title,
+            source_type: item.source_type,
+            source_path: item.url,
+            corpus_domain: item.domain.unwrap_or_else(|| "general".to_string()),
+            ..Default::default()
+        };
+        apply_source_hint_boost(query, std::slice::from_mut(&mut result));
+        if result.score > 0.10 {
+            candidates.push((result.item_id, result.score));
+        }
+    }
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(limit);
+    candidates
+}
+
+fn exact_substring_fallback_query(query: &str) -> bool {
+    let q = query.trim();
+    let len = q.chars().count();
+    (3..=128).contains(&len)
+        && q.chars()
+            .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#') || c.is_ascii_digit())
+}
+
+fn lexical_fast_path_query(query: &str) -> bool {
+    let q = query.trim();
+    let len = q.chars().count();
+    if !(2..=96).contains(&len) {
+        return false;
+    }
+
+    let token_count = q.split_whitespace().count().max(1);
+    let has_digit = q.chars().any(|c| c.is_ascii_digit());
+    let has_identifier_punct = q
+        .chars()
+        .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#'));
+
+    if has_identifier_punct || has_digit {
+        return true;
+    }
+
+    // One- or two-token keyword searches are usually intentional lexical
+    // lookups. Do not make them wait for a scheduler embedding call when
+    // Tantivy already has candidates.
+    token_count <= 2 && len <= 48
+}
+
+fn exact_substring_candidates(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    if limit == 0 || !exact_substring_fallback_query(query) {
+        return Vec::new();
+    }
+
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(items) = ctx.store.list_items(EXACT_SUBSTRING_SCAN_LIMIT, 0) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let title = item.title.to_lowercase();
+        let url = item.url.unwrap_or_default().to_lowercase();
+        let title_or_path_hit = title.contains(&needle) || url.contains(&needle);
+        let content_hit = if title_or_path_hit {
+            false
+        } else {
+            ctx.store
+                .get_item(ctx.dek, &item.id)
+                .ok()
+                .flatten()
+                .map(|full| full.content.to_lowercase().contains(&needle))
+                .unwrap_or(false)
+        };
+        if title_or_path_hit || content_hit {
+            out.push((item.id, if title_or_path_hit { 0.35 } else { 0.30 }));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn lexical_content_candidates(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let needles = lexical_needles(query);
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    let total_weight: f32 = needles
+        .iter()
+        .map(|needle| lexical_needle_weight(needle))
+        .sum();
+    if total_weight <= 0.0 {
+        return Vec::new();
+    }
+
+    let Ok(items) = ctx.store.list_items(EXACT_SUBSTRING_SCAN_LIMIT, 0) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Ok(Some(full)) = ctx.store.get_item(ctx.dek, &item.id) else {
+            continue;
+        };
+        let mut source_text = String::new();
+        source_text.push_str(&full.title);
+        source_text.push('\n');
+        if let Some(path) = &full.url {
+            source_text.push_str(path);
+            source_text.push('\n');
+        }
+        let source_text = source_text.to_ascii_lowercase();
+        let content = full.content.to_ascii_lowercase();
+
+        let source_weight: f32 = needles
+            .iter()
+            .filter(|needle| source_text.contains(needle.as_str()))
+            .map(|needle| lexical_needle_weight(needle))
+            .sum();
+        let window_weight = lexical_best_window_score(&content, &needles);
+        let matched_weight = source_weight + window_weight;
+        let coverage = matched_weight / total_weight;
+        if matched_weight >= 3.0 && coverage >= 0.10 {
+            out.push((
+                item.id,
+                0.25 + coverage.min(1.5) + (matched_weight * 0.01).min(0.35),
+            ));
+        }
+    }
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out.truncate(limit);
+    out
+}
+
+fn lexical_needles(query: &str) -> Vec<String> {
+    let mut needles = Vec::new();
+    let mut current = String::new();
+    let mut current_is_cjk = false;
+
+    let flush = |buf: &mut String, is_cjk: bool, out: &mut Vec<String>| {
+        let s = buf.trim();
+        if is_cjk {
+            let chars = s.chars().collect::<Vec<_>>();
+            if chars.len() >= 2 {
+                for n in 2..=3.min(chars.len()) {
+                    for gram in chars.windows(n) {
+                        out.push(gram.iter().collect::<String>());
+                    }
+                }
+                if chars.len() <= 6 {
+                    out.push(s.to_string());
+                }
+            }
+        } else if s.len() >= 2 {
+            out.push(s.to_ascii_lowercase());
+        }
+        buf.clear();
+    };
+
+    for ch in query.chars() {
+        let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&ch);
+        let is_ascii_ident =
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.' | '+' | '#' | ':');
+        if is_cjk || is_ascii_ident {
+            if !current.is_empty() && current_is_cjk != is_cjk {
+                flush(&mut current, current_is_cjk, &mut needles);
+            }
+            current_is_cjk = is_cjk;
+            current.push(ch);
+        } else if !current.is_empty() {
+            flush(&mut current, current_is_cjk, &mut needles);
+        }
+    }
+    if !current.is_empty() {
+        flush(&mut current, current_is_cjk, &mut needles);
+    }
+
+    needles.sort();
+    needles.dedup();
+    needles
+}
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+fn lexical_window_score(window: &str, needles: &[String]) -> f32 {
+    needles
+        .iter()
+        .map(|needle| {
+            let count = window.matches(needle).count().min(3) as f32;
+            count * lexical_needle_weight(needle)
+        })
+        .sum()
+}
+
+fn lexical_best_window_score(content: &str, needles: &[String]) -> f32 {
+    let mut best = 0.0f32;
+    for needle in needles {
+        let mut search_from = 0usize;
+        while let Some(rel) = content.get(search_from..).and_then(|s| s.find(needle)) {
+            let pos = search_from + rel;
+            let desired_start = pos.saturating_sub(LEXICAL_EXCERPT_MAX_BYTES / 3);
+            let start = floor_char_boundary(content, desired_start);
+            let end = ceil_char_boundary(
+                content,
+                (start + LEXICAL_EXCERPT_MAX_BYTES).min(content.len()),
+            );
+            if let Some(window) = content.get(start..end) {
+                best = best.max(lexical_window_score(window, needles));
+            }
+            search_from = pos.saturating_add(needle.len()).min(content.len());
+            if search_from >= content.len() {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn lexical_excerpt_for_item(
+    query: &str,
+    content: &str,
+) -> Option<(String, Option<usize>, Option<usize>)> {
+    if content.len() <= LEXICAL_EXCERPT_MAX_BYTES {
+        return None;
+    }
+
+    let needles = lexical_needles(query);
+    if needles.is_empty() {
+        return None;
+    }
+
+    let haystack = content.to_ascii_lowercase();
+    let mut best: Option<(usize, f32, usize)> = None;
+    for needle in &needles {
+        let mut search_from = 0usize;
+        while let Some(rel) = haystack.get(search_from..).and_then(|s| s.find(needle)) {
+            let pos = search_from + rel;
+            let desired_start = pos.saturating_sub(LEXICAL_EXCERPT_MAX_BYTES / 3);
+            let start = floor_char_boundary(content, desired_start);
+            let end = ceil_char_boundary(
+                content,
+                (start + LEXICAL_EXCERPT_MAX_BYTES).min(content.len()),
+            );
+            let Some(window) = haystack.get(start..end) else {
+                search_from = pos.saturating_add(needle.len()).min(haystack.len());
+                continue;
+            };
+            let score = lexical_window_score(window, &needles);
+            let replace = best
+                .map(|(_, best_score, best_start)| {
+                    score > best_score || score == best_score && start < best_start
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((start, score, start));
+            }
+            search_from = pos.saturating_add(needle.len()).min(haystack.len());
+        }
+    }
+
+    let (start, score, _) = best?;
+    if score <= 0.0 {
+        return None;
+    }
+    let end = ceil_char_boundary(
+        content,
+        (start + LEXICAL_EXCERPT_MAX_BYTES).min(content.len()),
+    );
+    content
+        .get(start..end)
+        .map(|excerpt| (excerpt.to_string(), Some(start), Some(end)))
+}
+
+/// Collapse repeated chunk hits to the first/best item hit before RRF.
+///
+/// Vector search returns chunk-level hits. Without this normalization, a long
+/// PDF with thousands of chunks can accumulate many RRF contributions for the
+/// same item and suppress a short but exact source such as a QRH or subsystem
+/// manual. Input is expected to be rank-sorted; the first occurrence is the
+/// best representative for that item.
+pub fn dedup_ranked_results(results: Vec<(String, f32)>) -> Vec<(String, f32)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(results.len());
+    for (id, score) in results {
+        if seen.insert(hit_key_item_id(&id).to_string()) {
+            out.push((id, score));
+        }
+    }
+    out
 }
 
 /// 动态注入预算分配
@@ -323,7 +1136,8 @@ pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
         let per_item = (budget / results.len().max(1)).max(100);
         for r in results.iter_mut() {
             let content = &r.content;
-            let end = content.char_indices()
+            let end = content
+                .char_indices()
                 .nth(per_item)
                 .map(|(i, _)| i)
                 .unwrap_or(content.len());
@@ -335,7 +1149,8 @@ pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
         let share = r.score / total_score;
         let alloc = (budget as f32 * share).max(100.0) as usize;
         let content = &r.content;
-        let end = content.char_indices()
+        let end = content
+            .char_indices()
             .nth(alloc)
             .map(|(i, _)| i)
             .unwrap_or(content.len());
@@ -362,11 +1177,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// 当 query 向量可用且结果集实际数量不超过 `RERANK_TOP_K_THRESHOLD` 时调用。
 /// 原地修改 `results` 的 `score` 字段并重新排序。
-pub fn rerank(
-    query_vec: &[f32],
-    results: &mut [SearchResult],
-    vector_index: &VectorIndex,
-) {
+pub fn rerank(query_vec: &[f32], results: &mut [SearchResult], vector_index: &VectorIndex) {
     for result in results.iter_mut() {
         let rrf_score = result.score;
         let rerank_score = vector_index
@@ -375,7 +1186,17 @@ pub fn rerank(
             .unwrap_or(0.0);
         result.score = RERANK_VECTOR_WEIGHT * rerank_score + RERANK_RRF_WEIGHT * rrf_score;
     }
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn reranker_scores_are_actionable(scores: &[f32]) -> bool {
+    scores
+        .iter()
+        .any(|score| score.is_finite() && *score >= RERANK_MIN_ACTIONABLE_SCORE)
 }
 
 /// 三阶段搜索：initial_k 粗召回 → intermediate_k RRF 融合 → Rerank → top_k 返回
@@ -388,48 +1209,117 @@ pub fn search_with_context(
     query: &str,
     params: &SearchParams,
 ) -> crate::error::Result<Vec<SearchResult>> {
-    // 1. 全文搜索（initial_k）
-    let ft_results = ctx.fulltext
-        .map(|ft| ft.search(query, params.initial_k).unwrap_or_else(|e| {
-            log::warn!("fulltext search error: {e}");
-            vec![]
-        }))
-        .unwrap_or_default();
+    // 1. Source metadata + fulltext recall.
+    //
+    // For source-shaped interactive queries, metadata titles/paths are usually
+    // the highest-signal channel. Run that first so cold post-unlock traffic is
+    // not forced through Tantivy while the background FTS rebuild is still
+    // committing segments.
+    let metadata_results = if params.skip_vector {
+        metadata_source_candidates(ctx, query, params.initial_k)
+    } else {
+        Vec::new()
+    };
+    let skip_fulltext = params.skip_vector && metadata_results.len() >= params.top_k.max(1);
+    let ft_results = if skip_fulltext {
+        log::info!(
+            "search stages: fulltext skipped; metadata_source_candidates={}",
+            metadata_results.len()
+        );
+        Vec::new()
+    } else {
+        ctx.fulltext
+            .map(|ft| {
+                ft.search(query, params.initial_k).unwrap_or_else(|e| {
+                    log::warn!("fulltext search error: {e}");
+                    vec![]
+                })
+            })
+            .unwrap_or_default()
+    };
+    let ft_results = dedup_ranked_results(ft_results);
+    let ft_results = if params.skip_vector {
+        log::info!(
+            "search stages: metadata_source_candidates={}",
+            metadata_results.len()
+        );
+        merge_ranked_results(metadata_results, ft_results, params.initial_k)
+    } else {
+        ft_results
+    };
+
+    let lexical_results = lexical_content_candidates(ctx, query, params.initial_k.min(64));
+    let ft_results = if lexical_results.is_empty() {
+        ft_results
+    } else {
+        log::info!(
+            "search stages: lexical_content_candidates={}",
+            lexical_results.len()
+        );
+        merge_ranked_results(lexical_results, ft_results, params.initial_k)
+    };
+
+    let ft_results = if ft_results.is_empty() {
+        let exact_results = exact_substring_candidates(ctx, query, params.initial_k);
+        if !exact_results.is_empty() {
+            log::info!(
+                "search stages: exact substring fallback={} query='{}'",
+                exact_results.len(),
+                query.chars().take(50).collect::<String>()
+            );
+        }
+        exact_results
+    } else {
+        ft_results
+    };
+
+    let lexical_fast_path =
+        !params.skip_vector && !ft_results.is_empty() && lexical_fast_path_query(query);
 
     // 2. 向量搜索（initial_k）
     // J3 (per spec §J3)：拿到 vector 结果后立即按 min_score 过滤；
     // 低于阈值的进 RRF 前丢弃，避免噪音污染融合排序。
-    let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) =
+    let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) = if params.skip_vector {
+        log::info!("search stages: vector skipped by SearchParams");
+        (vec![], None)
+    } else if lexical_fast_path {
+        log::info!(
+            "search stages: vector skipped by lexical fast path query='{}' fts={}",
+            query.chars().take(50).collect::<String>(),
+            ft_results.len()
+        );
+        (vec![], None)
+    } else {
         match (&ctx.embedding, &ctx.vectors) {
-            (Some(emb), Some(vecs)) => {
-                match emb.embed(&[query]) {
-                    Ok((e, _usage)) if !e.is_empty() => {
-                        let qv = e[0].clone();
-                        let raw: Vec<(String, f32)> = vecs.search(&qv, params.initial_k)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|(meta, score)| (meta.item_id, score))
-                            .collect();
-                        let filtered: Vec<(String, f32)> = match params.min_score {
-                            Some(threshold) => {
-                                let kept: Vec<_> = raw.into_iter()
-                                    .filter(|(_, s)| *s >= threshold)
-                                    .collect();
-                                log::info!(
-                                    "search J3: vector min_score={:.3} kept {} results",
-                                    threshold, kept.len()
-                                );
-                                kept
-                            }
-                            None => raw,
-                        };
-                        (filtered, Some(qv))
-                    }
-                    _ => (vec![], None),
+            (Some(emb), Some(vecs)) => match emb.embed(&[query]) {
+                Ok((e, _usage)) if !e.is_empty() => {
+                    let qv = e[0].clone();
+                    let raw: Vec<(String, f32)> = vecs
+                        .search(&qv, params.initial_k)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(meta, score)| (chunk_hit_key(&meta.item_id, meta.chunk_idx), score))
+                        .collect();
+                    let filtered: Vec<(String, f32)> = match params.min_score {
+                        Some(threshold) => {
+                            let kept: Vec<_> =
+                                raw.into_iter().filter(|(_, s)| *s >= threshold).collect();
+                            log::info!(
+                                "search J3: vector min_score={:.3} kept {} results",
+                                threshold,
+                                kept.len()
+                            );
+                            kept
+                        }
+                        None => raw,
+                    };
+                    (dedup_ranked_results(filtered), Some(qv))
                 }
-            }
+                _ => (vec![], None),
+            },
             _ => (vec![], None),
-        };
+        }
+    };
 
     log::info!(
         "search stages: query='{}' fts={} vec={}",
@@ -439,19 +1329,48 @@ pub fn search_with_context(
     );
 
     // 3. RRF 融合 → intermediate_k
-    let fused = rrf_fuse(&vec_results, &ft_results, DEFAULT_VECTOR_WEIGHT, DEFAULT_FULLTEXT_WEIGHT, params.intermediate_k);
+    let fused = rrf_fuse(
+        &vec_results,
+        &ft_results,
+        DEFAULT_VECTOR_WEIGHT,
+        DEFAULT_FULLTEXT_WEIGHT,
+        params.intermediate_k,
+    );
     log::info!("search stages: rrf_fused={}", fused.len());
 
     // 4. 获取并解密 items + F2 (W3 batch A) 拉 breadcrumb sidecar
     let mut results: Vec<SearchResult> = Vec::new();
-    for (item_id, score) in &fused {
+    for (hit_key, score) in &fused {
+        let (item_id, chunk_idx) = parse_hit_key(hit_key);
         if let Ok(Some(item)) = ctx.store.get_item(ctx.dek, item_id) {
             // breadcrumb 现已加密落盘，需传 dek 解密
-            let (breadcrumb, off_start, off_end) = ctx
-                .store
-                .get_first_chunk_breadcrumb(ctx.dek, &item.id)
-                .ok()
-                .flatten()
+            let chunk_span =
+                chunk_idx.and_then(|idx| ctx.store.get_chunk_span(&item.id, idx).ok().flatten());
+            let chunk_content = chunk_span.and_then(|(start, end, _level, _section_idx)| {
+                item.content
+                    .get(start..end)
+                    .map(|s| (s.to_string(), Some(start), Some(end)))
+            });
+            let (content, span_start, span_end) = chunk_content
+                .or_else(|| lexical_excerpt_for_item(query, &item.content))
+                .unwrap_or_else(|| {
+                    let start = None;
+                    let end = None;
+                    (item.content.clone(), start, end)
+                });
+            let (breadcrumb, off_start, off_end) = chunk_idx
+                .and_then(|idx| {
+                    ctx.store
+                        .get_chunk_breadcrumb(ctx.dek, &item.id, idx)
+                        .ok()
+                        .flatten()
+                })
+                .or_else(|| {
+                    ctx.store
+                        .get_first_chunk_breadcrumb(ctx.dek, &item.id)
+                        .ok()
+                        .flatten()
+                })
                 .map(|(p, s, e)| (p, Some(s), Some(e)))
                 .unwrap_or_default();
             // v0.6 Phase B F-Pro：拉 corpus_domain；item 不存在 / 列缺时回退 'general'
@@ -461,14 +1380,16 @@ pub fn search_with_context(
                 .unwrap_or_else(|_| "general".to_string());
             results.push(SearchResult {
                 item_id: item.id,
+                chunk_idx,
                 score: *score,
                 title: item.title,
-                content: item.content,
+                content,
                 source_type: item.source_type,
+                source_path: item.url,
                 inject_content: None,
                 breadcrumb,
-                chunk_offset_start: off_start,
-                chunk_offset_end: off_end,
+                chunk_offset_start: span_start.or(off_start),
+                chunk_offset_end: span_end.or(off_end),
                 corpus_domain,
             });
         }
@@ -485,13 +1406,19 @@ pub fn search_with_context(
     // query/doc 语言匹配对 score 做降权，防止大篇幅异语言文档排到前面。
     let query_lang = detect_lang(query);
 
-    if let Some(reranker) = &ctx.reranker {
+    if params.skip_rerank {
+        log::info!("search stages: reranker skipped by SearchParams");
+    } else if let Some(reranker) = &ctx.reranker {
         if results.len() >= RERANK_MIN_CANDIDATES {
             let docs: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
             match reranker.score(query, &docs) {
                 Ok(scores) => {
-                    for (r, s) in results.iter_mut().zip(scores.iter()) {
-                        r.score = *s;
+                    if reranker_scores_are_actionable(&scores) {
+                        for (r, s) in results.iter_mut().zip(scores.iter()) {
+                            r.score = *s;
+                        }
+                    } else {
+                        log::warn!("reranker returned no actionable scores, keeping RRF order");
                     }
                 }
                 Err(e) => {
@@ -501,7 +1428,8 @@ pub fn search_with_context(
         } else {
             log::info!(
                 "search stages: reranker skipped (candidates={} < {})",
-                results.len(), RERANK_MIN_CANDIDATES
+                results.len(),
+                RERANK_MIN_CANDIDATES
             );
         }
     } else if results.len() <= RERANK_TOP_K_THRESHOLD {
@@ -519,9 +1447,19 @@ pub fn search_with_context(
     // 如 query="反洗钱"（domain_hint=legal）+ doc.corpus_domain=tech → score *= 0.4
     apply_cross_domain_penalty(&mut results, params.domain_hint.as_deref());
 
+    // SRAS/source selector reward: explicit source hints should beat generic
+    // semantic similarity, especially with 512-dim local embeddings and long
+    // scanned manuals where large PDFs otherwise dominate by chunk count.
+    apply_source_hint_boost(query, &mut results);
+    apply_platform_hint_adjustment(query, &mut results);
+    apply_query_coverage_boost(query, &mut results);
+
     // 最终排序
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score)
-        .unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // 6. 截取 top_k（保护：如果 top_k=0，别截成空）
     let final_k = params.top_k.max(1);
@@ -542,8 +1480,14 @@ mod tests {
 
     #[test]
     fn detect_lang_pure_english() {
-        assert_eq!(detect_lang("What is rust ownership and borrowing"), Lang::En);
-        assert_eq!(detect_lang("Box T smart pointer reference cycles"), Lang::En);
+        assert_eq!(
+            detect_lang("What is rust ownership and borrowing"),
+            Lang::En
+        );
+        assert_eq!(
+            detect_lang("Box T smart pointer reference cycles"),
+            Lang::En
+        );
     }
 
     #[test]
@@ -558,40 +1502,168 @@ mod tests {
     fn cross_lang_penalty_en_query_cn_doc_downweighted() {
         let mut results = vec![
             SearchResult {
-                item_id: "1".into(), score: 0.2, title: "references-and-borrowing".into(),
-                content: "In Rust, references allow you to refer to a value without taking ownership.".into(),
-                source_type: "file".into(), inject_content: None, ..Default::default() },
+                item_id: "1".into(),
+                score: 0.2,
+                title: "references-and-borrowing".into(),
+                content:
+                    "In Rust, references allow you to refer to a value without taking ownership."
+                        .into(),
+                source_type: "file".into(),
+                inject_content: None,
+                ..Default::default()
+            },
             SearchResult {
-                item_id: "2".into(), score: 0.3, title: "民法典".into(),
+                item_id: "2".into(),
+                score: 0.3,
+                title: "民法典".into(),
                 content: "中华人民共和国民法典第一编 总则".into(),
-                source_type: "file".into(), inject_content: None, ..Default::default() },
+                source_type: "file".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
         apply_cross_lang_penalty(&mut results, Lang::En);
         assert_eq!(results[0].score, 0.2, "英文文档不降权");
-        assert!(results[1].score < 0.1, "中文文档应被降权 (0.3 * 0.3 = 0.09): {}",
-            results[1].score);
+        assert!(
+            results[1].score < 0.1,
+            "中文文档应被降权 (0.3 * 0.3 = 0.09): {}",
+            results[1].score
+        );
     }
 
     #[test]
     fn cross_lang_penalty_mixed_query_no_penalty() {
-        let mut results = vec![
-            SearchResult {
-                item_id: "1".into(), score: 0.5, title: "rust 所有权".into(),
-                content: "Rust ownership system...".into(),
-                source_type: "file".into(), inject_content: None, ..Default::default() },
-        ];
+        let mut results = vec![SearchResult {
+            item_id: "1".into(),
+            score: 0.5,
+            title: "rust 所有权".into(),
+            content: "Rust ownership system...".into(),
+            source_type: "file".into(),
+            inject_content: None,
+            ..Default::default()
+        }];
         apply_cross_lang_penalty(&mut results, Lang::Mixed);
         assert_eq!(results[0].score, 0.5, "Mixed query 不应降权任何结果");
     }
 
+    // ── S4b MU-5 (R8): detect_query_domain is plugin-driven, no hardcoded industry words ──
+
+    /// Helper: build a domain→keyword mapping the way the plugin registry would,
+    /// so tests don't depend on owned-vs-borrowed str types.
+    fn dk(pairs: &[(&'static str, &[&'static str])]) -> Vec<(&'static str, Vec<&'static str>)> {
+        pairs.iter().map(|(d, kws)| (*d, kws.to_vec())).collect()
+    }
+
+    #[test]
+    fn detect_query_domain_oss_bare_no_plugin_returns_none() {
+        // OSS 裸装无 vertical plugin → 空词表 → 永远 None（无 cross-domain penalty）。
+        // 这是 oss-pro-strategy §4.3 边界规则的代码层验证：行业 domain detection 不在 OSS。
+        let empty: Vec<(&str, Vec<&str>)> = Vec::new();
+        assert_eq!(detect_query_domain("反洗钱合同纠纷怎么处理", &empty), None);
+        assert_eq!(
+            detect_query_domain("Rust ownership and borrowing", &empty),
+            None
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_plugin_keywords_detect_correctly() {
+        // vertical plugin（attune-pro）提供 domain 词表后才识别。
+        let domains = dk(&[
+            ("legal", &["反洗钱", "诉讼", "合同"]),
+            ("medical", &["病历", "处方"]),
+        ]);
+        assert_eq!(
+            detect_query_domain("反洗钱合同纠纷怎么处理", &domains).as_deref(),
+            Some("legal")
+        );
+        assert_eq!(
+            detect_query_domain("帮我看看这份病历", &domains).as_deref(),
+            Some("medical")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_zero_hit_returns_none() {
+        // 提供了词表但 query 不含任何特征词 → None（不误识别）。
+        let domains = dk(&[("legal", &["诉讼", "合同"])]);
+        assert_eq!(detect_query_domain("今天天气怎么样", &domains), None);
+    }
+
+    #[test]
+    fn detect_query_domain_tie_prefers_input_order() {
+        // 两个 domain 各命中 1 词（平手）→ 按传入顺序取首个（legal 先于 tech）。
+        let domains = dk(&[("legal", &["合同"]), ("tech", &["索引"])]);
+        assert_eq!(
+            detect_query_domain("合同里的索引字段", &domains).as_deref(),
+            Some("legal")
+        );
+        // 顺序反转 → tech 胜出，证明的确是 input-order 而非字母序。
+        let domains_rev = dk(&[("tech", &["索引"]), ("legal", &["合同"])]);
+        assert_eq!(
+            detect_query_domain("合同里的索引字段", &domains_rev).as_deref(),
+            Some("tech")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_most_hits_wins() {
+        // 命中数多的 domain 胜出（不受 input order 影响）。
+        let domains = dk(&[
+            ("tech", &["索引"]),                  // 1 命中
+            ("legal", &["合同", "诉讼", "赔偿"]), // 3 命中
+        ]);
+        assert_eq!(
+            detect_query_domain("合同诉讼赔偿与索引", &domains).as_deref(),
+            Some("legal")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_case_insensitive_english() {
+        // 英文关键词大小写无关（query 与 keyword 都 lowercase 后子串匹配）。
+        let domains = dk(&[("tech", &["Rust", "Docker"])]);
+        assert_eq!(
+            detect_query_domain("How does RUST ownership work", &domains).as_deref(),
+            Some("tech")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_drives_cross_domain_penalty_only_with_plugin() {
+        // 端到端：plugin 提供词表 → detect → penalty 生效；无 plugin → 无 penalty。
+        let mk = |dom: &str| SearchResult {
+            item_id: "x".into(),
+            score: 1.0,
+            title: "t".into(),
+            content: "c".into(),
+            source_type: "file".into(),
+            inject_content: None,
+            corpus_domain: dom.into(),
+            ..Default::default()
+        };
+        // OSS 裸装：detect → None → penalty no-op
+        let empty: Vec<(&str, Vec<&str>)> = Vec::new();
+        let d = detect_query_domain("反洗钱诉讼", &empty);
+        let mut results = vec![mk("tech")];
+        apply_cross_domain_penalty(&mut results, d.as_deref());
+        assert_eq!(results[0].score, 1.0, "OSS 裸装无词表 → 不降权");
+        // 装了 legal plugin：detect → legal → tech doc 被降权
+        let domains = dk(&[("legal", &["反洗钱", "诉讼"])]);
+        let d = detect_query_domain("反洗钱诉讼", &domains);
+        let mut results = vec![mk("tech")];
+        apply_cross_domain_penalty(&mut results, d.as_deref());
+        assert!(
+            (results[0].score - CROSS_DOMAIN_PENALTY).abs() < 1e-6,
+            "legal query + tech doc 应降权到 {CROSS_DOMAIN_PENALTY}: {}",
+            results[0].score
+        );
+    }
+
     #[test]
     fn rrf_fuse_basic() {
-        let vec_results = vec![
-            ("a".into(), 0.9), ("b".into(), 0.7), ("c".into(), 0.5),
-        ];
-        let ft_results = vec![
-            ("b".into(), 10.0), ("a".into(), 8.0), ("d".into(), 5.0),
-        ];
+        let vec_results = vec![("a".into(), 0.9), ("b".into(), 0.7), ("c".into(), 0.5)];
+        let ft_results = vec![("b".into(), 10.0), ("a".into(), 8.0), ("d".into(), 5.0)];
 
         let fused = rrf_fuse(&vec_results, &ft_results, 0.6, 0.4, 10);
         assert!(!fused.is_empty());
@@ -615,6 +1687,265 @@ mod tests {
         assert_eq!(fused[0].0, "a");
     }
 
+    #[test]
+    fn merge_ranked_results_prefers_metadata_and_dedups() {
+        let primary = vec![("qrh".to_string(), 0.8), ("fcom".to_string(), 0.7)];
+        let secondary = vec![("fcom".to_string(), 0.4), ("sop".to_string(), 0.3)];
+
+        let merged = merge_ranked_results(primary, secondary, 3);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("qrh".to_string(), 0.8),
+                ("fcom".to_string(), 0.7),
+                ("sop".to_string(), 0.3)
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_ranked_results_keeps_first_item_hit() {
+        let ranked = vec![
+            ("big-pdf".to_string(), 0.91),
+            ("big-pdf".to_string(), 0.90),
+            ("qrh".to_string(), 0.84),
+            ("big-pdf".to_string(), 0.83),
+        ];
+        let deduped = dedup_ranked_results(ranked);
+        assert_eq!(
+            deduped,
+            vec![("big-pdf".to_string(), 0.91), ("qrh".to_string(), 0.84)]
+        );
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_explicit_manual_source() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "fcom".into(),
+                score: 0.50,
+                title: "320FCOM3 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "qrh".into(),
+                score: 0.43,
+                title: "QRH320 - QUICK REFERENCE".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 QRH quick reference handbook abnormal emergency checklist",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "qrh");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_aircraft_specific_qrh() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a220-qhr".into(),
+                score: 0.54,
+                title: "a220-300-cs300-bd500-1a11-quick-reference-handbook".into(),
+                source_path: Some("file:///Airbus/A220/QRH/a220-300-cs300-bd500-1a11-quick-reference-handbook.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-qhr".into(),
+                score: 0.42,
+                title: "QRH320 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 QRH quick reference handbook abnormal emergency checklist",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-qhr");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_aircraft_specific_fcom() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-fcom".into(),
+                score: 0.52,
+                title: "320FCOM3 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "b737max-fcom".into(),
+                score: 0.46,
+                title: "B737 MAX Flight Crew Operations Manual".into(),
+                source_path: Some("file:///Boeing/737MAX/737MAX-FCOM.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "Boeing 737 MAX FCOM flight crew operating manual source",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "b737max-fcom");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_boeing_numeric_model_from_path() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-fcom".into(),
+                score: 0.54,
+                title: "320FCOM1 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM1.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "b787-fcom".into(),
+                score: 0.42,
+                title: "787-tbc_om_tbc_c_100215_v1v2_b2p-c".into(),
+                source_path: Some(
+                    "file:///Boeing/B787/FCOM/787-tbc_om_tbc_c_100215_v1v2_b2p-c.pdf".into(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "Boeing 787 FCOM flight crew operations manual",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "b787-fcom");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_separated_system_manual_over_bulk_fcom() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-fcom".into(),
+                score: 0.56,
+                title: "320FCOM3 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-flight-controls".into(),
+                score: 0.43,
+                title: "A320 Flight Controls".into(),
+                source_path: Some("file:///Airbus/A320/Systems/A320-Flight_Controls.pdf".into()),
+                breadcrumb: vec!["systems".into(), "flight controls".into()],
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 flight controls system separated manual distinct from FCOM",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-flight-controls");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_sop_takeoff_sources() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-qhr".into(),
+                score: 0.50,
+                title: "QRH320 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-sop-takeoff".into(),
+                score: 0.36,
+                title: "4_A320-Takeoff".into(),
+                source_path: Some("file:///Airbus/A320/SOP/4_A320-Takeoff.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 SOP takeoff standard operating procedure",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-sop-takeoff");
+    }
+
+    #[test]
+    fn source_hint_boost_penalizes_explicitly_excluded_sources() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "boeing-qhr".into(),
+                score: 0.58,
+                title: "747-8_QRH - Quick Action".into(),
+                source_path: Some("file:///Boeing/747/QRH/747-8_QRH.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-qhr".into(),
+                score: 0.40,
+                title: "QRH320 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "继续，只基于上一轮引用的 A320 QRH 来源；不要引入 A330、A340 或 Boeing。",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-qhr");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_abbreviation_sources() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "generic-qhr".into(),
+                score: 0.49,
+                title: "QRH320 - QUICK REFERENCE".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "abbreviations".into(),
+                score: 0.38,
+                title: "Airplane Manual Abbreviations".into(),
+                source_path: Some("file:///Reference/Abbreviations Manuals.md".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "airplane manual abbreviations ATA FCOM QRH AMM",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "abbreviations");
+    }
+
     /// Regression: top_k>20 previously panicked at `intermediate_k = (top_k*2).clamp(top_k, 40)`
     /// because top_k*2 > 40 made the clamp `min > max`. See
     /// docs/superpowers/specs/2026-05-24-knowledge-base-deepseek-rag-audit.md §B2.
@@ -625,9 +1956,15 @@ mod tests {
         for tk in [1usize, 5, 10, 20, 21, 30, 50, 99, 100] {
             let p = SearchParams::with_defaults(tk);
             assert!(p.initial_k >= 20, "initial_k floor at 20 for top_k={tk}");
-            assert!(p.intermediate_k >= tk, "intermediate_k must be >= top_k for top_k={tk}");
+            assert!(
+                p.intermediate_k >= tk,
+                "intermediate_k must be >= top_k for top_k={tk}"
+            );
             // intermediate_k 上限 200 防止 rerank 过度膨胀（每个候选都过 ONNX 推理）
-            assert!(p.intermediate_k <= 200, "intermediate_k ceiling 200 for top_k={tk}");
+            assert!(
+                p.intermediate_k <= 200,
+                "intermediate_k ceiling 200 for top_k={tk}"
+            );
             assert_eq!(p.top_k, tk);
         }
     }
@@ -636,18 +1973,33 @@ mod tests {
     fn allocate_budget_proportional() {
         let mut results = vec![
             SearchResult {
-                item_id: "a".into(), score: 0.8, title: "A".into(),
-                content: "A".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "a".into(),
+                score: 0.8,
+                title: "A".into(),
+                content: "A".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
             SearchResult {
-                item_id: "b".into(), score: 0.2, title: "B".into(),
-                content: "B".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "b".into(),
+                score: 0.2,
+                title: "B".into(),
+                content: "B".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
         allocate_budget(&mut results, 2000);
 
         let a_len = results[0].inject_content.as_ref().unwrap().chars().count();
         let b_len = results[1].inject_content.as_ref().unwrap().chars().count();
         // "a" has 80% score, should get ~1600 chars; "b" has 20%, should get ~400 (min 100)
-        assert!(a_len > b_len, "Higher score should get more budget: a={a_len} b={b_len}");
+        assert!(
+            a_len > b_len,
+            "Higher score should get more budget: a={a_len} b={b_len}"
+        );
         assert!(b_len >= 100, "Minimum budget should be 100: got {b_len}");
     }
 
@@ -655,11 +2007,23 @@ mod tests {
     fn allocate_budget_zero_scores() {
         let mut results = vec![
             SearchResult {
-                item_id: "a".into(), score: 0.0, title: "A".into(),
-                content: "A".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "a".into(),
+                score: 0.0,
+                title: "A".into(),
+                content: "A".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
             SearchResult {
-                item_id: "b".into(), score: 0.0, title: "B".into(),
-                content: "B".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "b".into(),
+                score: 0.0,
+                title: "B".into(),
+                content: "B".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
         allocate_budget(&mut results, 2000);
         // Equal distribution when scores are 0
@@ -680,16 +2044,53 @@ mod tests {
         use crate::vectors::{VectorIndex, VectorMeta};
 
         let mut idx = VectorIndex::new(2).unwrap();
-        idx.add(&[1.0, 0.0], VectorMeta { item_id: "close".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
-        idx.add(&[0.0, 1.0], VectorMeta { item_id: "far".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+        idx.add(
+            &[1.0, 0.0],
+            VectorMeta {
+                item_id: "close".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &[0.0, 1.0],
+            VectorMeta {
+                item_id: "far".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
 
         let mut results = vec![
-            SearchResult { item_id: "far".into(),   score: 0.9, title: "Far".into(),   content: "c".into(), source_type: "note".into(), inject_content: None, ..Default::default() },
-            SearchResult { item_id: "close".into(), score: 0.5, title: "Close".into(), content: "c".into(), source_type: "note".into(), inject_content: None, ..Default::default() },
+            SearchResult {
+                item_id: "far".into(),
+                score: 0.9,
+                title: "Far".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "close".into(),
+                score: 0.5,
+                title: "Close".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
 
         rerank(&[1.0, 0.0], &mut results, &idx);
-        assert_eq!(results[0].item_id, "close", "Reranker should elevate closer vector");
+        assert_eq!(
+            results[0].item_id, "close",
+            "Reranker should elevate closer vector"
+        );
     }
 
     #[test]
@@ -698,8 +2099,22 @@ mod tests {
 
         let idx = VectorIndex::new(2).unwrap();
         let mut results = vec![
-            SearchResult { item_id: "a".into(), score: 0.8, title: "A".into(), content: "c".into(), source_type: "note".into(), ..Default::default() },
-            SearchResult { item_id: "b".into(), score: 0.3, title: "B".into(), content: "c".into(), source_type: "note".into(), ..Default::default() },
+            SearchResult {
+                item_id: "a".into(),
+                score: 0.8,
+                title: "A".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "b".into(),
+                score: 0.3,
+                title: "B".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                ..Default::default()
+            },
         ];
         rerank(&[1.0, 0.0], &mut results, &idx);
         assert!(results[0].score >= results[1].score);
@@ -709,13 +2124,13 @@ mod tests {
     fn search_params_defaults_clamp_correctly() {
         let p = SearchParams::with_defaults(5);
         assert_eq!(p.top_k, 5);
-        assert_eq!(p.initial_k, 25);   // 5*5=25, in [20,500]
+        assert_eq!(p.initial_k, 25); // 5*5=25, in [20,500]
         assert_eq!(p.intermediate_k, 10); // 5*2=10
-        // 通用 search 默认不启用 min_score 阈值，保持向后行为契约
+                                          // 通用 search 默认不启用 min_score 阈值，保持向后行为契约
         assert_eq!(p.min_score, None);
 
         let p2 = SearchParams::with_defaults(1);
-        assert_eq!(p2.initial_k, 20);  // min clamp
+        assert_eq!(p2.initial_k, 20); // min clamp
         assert_eq!(p2.intermediate_k, 2); // max(1, 2) = 2
 
         // top_k=20: 旧契约 intermediate_k=40 (max clamp), 新契约 intermediate_k=40 (top_k*2)
@@ -741,11 +2156,8 @@ mod tests {
     #[test]
     fn min_score_filter_keeps_above_threshold() {
         // 模拟 vecs.search 返回 [0.50, 0.70, 0.85]
-        let raw: Vec<(String, f32)> = vec![
-            ("a".into(), 0.50),
-            ("b".into(), 0.70),
-            ("c".into(), 0.85),
-        ];
+        let raw: Vec<(String, f32)> =
+            vec![("a".into(), 0.50), ("b".into(), 0.70), ("c".into(), 0.85)];
         let kept_065: Vec<_> = raw.iter().filter(|(_, s)| *s >= 0.65).cloned().collect();
         assert_eq!(kept_065.len(), 2, "0.65 阈值应保留 2 个 (0.70 + 0.85)");
         assert_eq!(kept_065[0].0, "b");
@@ -764,16 +2176,28 @@ mod tests {
         let rag = SearchParams::with_defaults_for_rag(5);
         assert_eq!(rag.min_score, Some(0.65));
         assert_eq!(rag.top_k, 5);
-        assert_eq!(rag.initial_k, 25);  // 与通用版同构
+        assert_eq!(rag.initial_k, 25); // 与通用版同构
     }
 
     #[test]
     fn min_score_threshold_curve_documented_in_spec() {
         // 锁住吴师兄文章给出的曲线值，避免有人未读 spec 误改默认
         let rag = SearchParams::with_defaults_for_rag(5);
-        assert_eq!(rag.min_score, Some(0.65), "RAG 默认 0.65（保守端，召回优先）");
+        assert_eq!(
+            rag.min_score,
+            Some(0.65),
+            "RAG 默认 0.65（保守端，召回优先）"
+        );
         // 0.72 是吴师兄推荐的"精度优先"档，未来 Settings 提供
         // 0.78 开始漏边缘 case，仅极端精度场景用
+    }
+
+    #[test]
+    fn reranker_scores_must_be_actionable_before_overriding_rrf() {
+        assert!(!reranker_scores_are_actionable(&[0.0, 0.0, f32::NAN]));
+        assert!(!reranker_scores_are_actionable(&[0.0001, 0.0009]));
+        assert!(reranker_scores_are_actionable(&[0.0, 0.001]));
+        assert!(reranker_scores_are_actionable(&[0.42, 0.0]));
     }
 
     // #9: search_with_context 三阶段管道（有 Reranker）
@@ -786,8 +2210,28 @@ mod tests {
         let dek = crate::crypto::Key32::generate();
 
         // 插入两条 item
-        store.insert_item(&dek, "低分文档", "content about cats", None, "note", None, None).unwrap();
-        store.insert_item(&dek, "高分文档", "content about dogs", None, "note", None, None).unwrap();
+        store
+            .insert_item(
+                &dek,
+                "低分文档",
+                "content about cats",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .insert_item(
+                &dek,
+                "高分文档",
+                "content about dogs",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
 
         // Reranker 固定返回固定分数（第二条评分更高）
         let reranker: std::sync::Arc<dyn crate::infer::RerankProvider> =
@@ -805,7 +2249,10 @@ mod tests {
         // 无 FTS 也无向量时 fused 为空，search_with_context 返回空但不 panic
         let params = SearchParams::with_defaults(5);
         let results = search_with_context(&ctx, "dogs", &params);
-        assert!(results.is_ok(), "search_with_context should not fail with reranker");
+        assert!(
+            results.is_ok(),
+            "search_with_context should not fail with reranker"
+        );
         // 无数据源时结果为空
         assert!(results.unwrap().is_empty());
     }
@@ -831,6 +2278,442 @@ mod tests {
         let results = search_with_context(&ctx, "any query", &params).unwrap();
         // 无数据源时结果为空，但不应 panic
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_with_context_exact_substring_fallback_for_code_like_queries() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let item_id = store
+            .insert_item(
+                &dek,
+                "multi - 多语言",
+                "# 多语言\n\n中文 English 日本語 한국어 🚀🔥✨ émojis BOUNDARY_MULTI_MARK\n\n## 节\n\nمرحبا Ω≈ç√∫\n",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(&ctx, "BOUNDARY_MULTI_MARK", &params).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+        assert!(results[0].content.contains("BOUNDARY_MULTI_MARK"));
+    }
+
+    #[test]
+    fn search_with_context_lexical_hit_injects_matched_excerpt_not_cover() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let cover = "cover page and table of contents\n".repeat(120);
+        let evidence = "The RTOS DMA flow calls hal_dma_chan_request before hal_dma_start and releases resources afterwards.";
+        let content = format!("{cover}\n## DMA API\n\n{evidence}\n");
+        let item_id = store
+            .insert_item(&dek, "rtos dmac manual", &content, None, "file", None, None)
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(&ctx, "hal_dma_chan_request", &params).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+        assert!(results[0].content.contains("hal_dma_chan_request"));
+        assert!(results[0].content.contains("hal_dma_start"));
+        assert!(
+            !results[0].content.starts_with("cover page"),
+            "lexical fallback should not inject the beginning of a long document"
+        );
+        assert!(results[0].chunk_offset_start.unwrap_or_default() > 0);
+    }
+
+    #[test]
+    fn query_coverage_boost_prefers_specific_identifier_over_chip_only_hit() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "chip-faq".to_string(),
+                score: 0.30,
+                title: "V821 FAQ".to_string(),
+                content: "V821 RTOS console and board configuration notes".to_string(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "api-manual".to_string(),
+                score: 0.10,
+                title: "RTOS DMAC developer guide".to_string(),
+                content: "DMA flow uses hal_dma_chan_request and then hal_dma_start.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_query_coverage_boost("V821 RTOS hal_dma_chan_request hal_dma_start", &mut results);
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        assert_eq!(results[0].item_id, "api-manual");
+    }
+
+    #[test]
+    fn query_coverage_boost_handles_natural_chinese_action_words() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "platform-memory".to_string(),
+                score: 0.40,
+                title: "V821 RTOS memory guide".to_string(),
+                content: "V821 RTOS reserved memory and kernel boot configuration.".to_string(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "dma-flow".to_string(),
+                score: 0.20,
+                title: "RTOS DMAC developer guide".to_string(),
+                content:
+                    "API 说明：hal_dma_chan_request 申请 DMA 通道。hal_dma_start 启动 DMA 传输。"
+                        .to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_query_coverage_boost(
+            "V821 RTOS 里申请 DMA 通道并启动一次传输，大概按什么流程做？",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        assert_eq!(results[0].item_id, "dma-flow");
+    }
+
+    #[test]
+    fn search_with_context_natural_chinese_query_adds_lexical_content_candidate() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "V821 RTOS memory guide",
+                "V821 RTOS reserved memory and kernel boot configuration. DMA is mentioned in a boot optimization note.",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let dma_id = store
+            .insert_item(
+                &dek,
+                "RTOS DMAC developer guide",
+                "模块接口说明：hal_dma_chan_request 用于申请 DMA 通道；配置描述符后，调用 hal_dma_start 启动 DMA 传输。",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(
+            &ctx,
+            "V821 RTOS 里申请 DMA 通道并启动一次传输，大概按什么流程做？",
+            &params,
+        )
+        .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].item_id, dma_id);
+        assert!(results[0].content.contains("hal_dma_chan_request"));
+    }
+
+    #[test]
+    fn lexical_content_candidates_prefer_local_procedure_evidence_over_scattered_terms() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "Long mixed platform manual",
+                &[
+                    "V821 应用手册提到 RTOS 与 Linux 协同启动。",
+                    &"无关内容。".repeat(300),
+                    "某章节说 DMA 可用于视频缓存。",
+                    &"背景介绍。".repeat(300),
+                    "另一个章节讨论通道资源和一次传输统计，但没有给出接口。",
+                ]
+                .join("\n"),
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let dma_id = store
+            .insert_item(
+                &dek,
+                "RTOS DMAC developer guide",
+                "模块接口说明：hal_dma_chan_request 用于申请 DMA 通道；配置描述符后，调用 hal_dma_start 启动 DMA 传输。",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(
+            &ctx,
+            "V821 RTOS 申请 DMA 通道然后启动一次传输，流程怎么走？",
+            &params,
+        )
+        .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].item_id, dma_id);
+    }
+
+    #[test]
+    fn platform_hint_adjustment_prefers_explicit_rtos_source_over_linux_source() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "linux-dmac".to_string(),
+                score: 0.50,
+                title: "Linux_DMAC_开发指南 - Linux DMAC".to_string(),
+                content: "dma_request_channel 申请 DMA 通道".to_string(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "rtos-dmac".to_string(),
+                score: 0.40,
+                title: "RTOS_DMAC_开发指南 - RTOS DMAC".to_string(),
+                content: "hal_dma_chan_request 申请 DMA 通道".to_string(),
+                ..Default::default()
+            },
+        ];
+        apply_source_hint_boost("RTOS 申请 DMA 通道", &mut results);
+        apply_platform_hint_adjustment("RTOS 申请 DMA 通道", &mut results);
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        assert_eq!(results[0].item_id, "rtos-dmac");
+    }
+
+    #[test]
+    fn search_with_context_returns_matched_vector_chunk_content() {
+        use crate::store::Store;
+        use crate::vectors::{VectorIndex, VectorMeta};
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let content =
+            "front matter and table of contents\n\nactual API evidence TARGET_CHUNK_FUNC call flow\n";
+        let item_id = store
+            .insert_item(&dek, "manual", content, None, "file", None, None)
+            .unwrap();
+        let target_start = content.find("actual API evidence").unwrap();
+        let target_end = content.len();
+        store
+            .upsert_chunk_span(&item_id, 1, target_start, target_end, 2, 1)
+            .unwrap();
+
+        let mut vectors = VectorIndex::new(2).unwrap();
+        vectors
+            .add(
+                &[0.0, 1.0],
+                VectorMeta {
+                    item_id: item_id.clone(),
+                    chunk_idx: 0,
+                    level: 2,
+                    section_idx: 0,
+                },
+            )
+            .unwrap();
+        vectors
+            .add(
+                &[1.0, 0.0],
+                VectorMeta {
+                    item_id: item_id.clone(),
+                    chunk_idx: 1,
+                    level: 2,
+                    section_idx: 1,
+                },
+            )
+            .unwrap();
+        let embedding = Arc::new(CountingEmbeddingProvider {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: Some(&vectors),
+            embedding: Some(embedding),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let results =
+            search_with_context(&ctx, "where is target api", &SearchParams::with_defaults(5))
+                .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+        assert_eq!(results[0].chunk_idx, Some(1));
+        assert!(results[0].content.contains("TARGET_CHUNK_FUNC"));
+        assert!(!results[0].content.contains("table of contents"));
+    }
+
+    struct CountingEmbeddingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::embed::EmbeddingProvider for CountingEmbeddingProvider {
+        fn embed(
+            &self,
+            texts: &[&str],
+        ) -> crate::error::Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((
+                texts.iter().map(|_| vec![1.0f32, 0.0]).collect(),
+                crate::usage::TokenUsage::empty("counting", "test"),
+            ))
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn search_with_context_lexical_fast_path_skips_embedding_when_fts_hits() {
+        use crate::index::FulltextIndex;
+        use crate::store::Store;
+        use crate::vectors::VectorIndex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let item_id = store
+            .insert_item(
+                &dek,
+                "loop fixture",
+                "# Loop fixture\n\nLOOPMARK42 tokio keyword body.\n",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let ft = FulltextIndex::open_memory().unwrap();
+        ft.add_document(
+            &item_id,
+            "loop fixture",
+            "# Loop fixture\n\nLOOPMARK42 tokio keyword body.\n",
+            "file",
+        )
+        .unwrap();
+        let vectors = VectorIndex::new(2).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedding = Arc::new(CountingEmbeddingProvider {
+            calls: calls.clone(),
+        });
+        let ctx = SearchContext {
+            fulltext: Some(&ft),
+            vectors: Some(&vectors),
+            embedding: Some(embedding),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(10);
+        let results = search_with_context(&ctx, "LOOPMARK42", &params).unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+
+        let results = search_with_context(&ctx, "tokio", &params).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+    }
+
+    #[test]
+    fn search_with_context_natural_query_still_uses_embedding() {
+        use crate::index::FulltextIndex;
+        use crate::store::Store;
+        use crate::vectors::VectorIndex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "rust ownership",
+                "Rust ownership and borrowing guide.",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let ft = FulltextIndex::open_memory().unwrap();
+        let vectors = VectorIndex::new(2).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedding = Arc::new(CountingEmbeddingProvider {
+            calls: calls.clone(),
+        });
+        let ctx = SearchContext {
+            fulltext: Some(&ft),
+            vectors: Some(&vectors),
+            embedding: Some(embedding),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(10);
+        let _ = search_with_context(&ctx, "what is rust ownership", &params).unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -928,18 +2811,18 @@ fn parse_n_units_ago(q: &str, now_unix: i64) -> Option<TimeFilter> {
     };
 
     // 找数字 — 阿拉伯优先，否则中文单字
-    let n: Option<i64> = q
-        .chars()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|w| {
-            // 阿拉伯数字（最多 3 位）
-            if w[0].is_ascii_digit() {
-                let s: String = q.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
-                return s.parse::<i64>().ok();
-            }
-            cn_digit(w[0])
-        });
+    let n: Option<i64> = q.chars().collect::<Vec<_>>().windows(2).find_map(|w| {
+        // 阿拉伯数字（最多 3 位）
+        if w[0].is_ascii_digit() {
+            let s: String = q
+                .chars()
+                .skip_while(|c| !c.is_ascii_digit())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            return s.parse::<i64>().ok();
+        }
+        cn_digit(w[0])
+    });
 
     let n = n?;
     if n <= 0 || n > 365 {
@@ -954,13 +2837,19 @@ fn parse_n_units_ago(q: &str, now_unix: i64) -> Option<TimeFilter> {
     if q.contains("周前") || q.contains("weeks ago") || q.contains("week ago") {
         let start = now_unix - n * 7 * DAY;
         let end = start + 7 * DAY - 1;
-        return Some(TimeFilter { start_unix: start, end_unix: end });
+        return Some(TimeFilter {
+            start_unix: start,
+            end_unix: end,
+        });
     }
     if q.contains("月前") || q.contains("months ago") || q.contains("month ago") {
         // 近似 30 天
         let start = now_unix - n * 30 * DAY;
         let end = start + 30 * DAY - 1;
-        return Some(TimeFilter { start_unix: start, end_unix: end });
+        return Some(TimeFilter {
+            start_unix: start,
+            end_unix: end,
+        });
     }
 
     None
@@ -992,7 +2881,10 @@ fn week_range(now_unix: i64, offset_weeks: i64) -> TimeFilter {
 
 fn month_range(now_unix: i64, offset_months: i64) -> TimeFilter {
     use chrono::{Datelike, TimeZone, Utc};
-    let now = Utc.timestamp_opt(now_unix, 0).single().unwrap_or_else(Utc::now);
+    let now = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
     let (mut year, mut month) = (now.year(), now.month() as i32);
     month += offset_months as i32;
     while month < 1 {
@@ -1009,7 +2901,11 @@ fn month_range(now_unix: i64, offset_months: i64) -> TimeFilter {
         .map(|d| d.timestamp())
         .unwrap_or(now_unix);
     // 月末 = 下月 1 日 - 1 秒
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     let next_start = Utc
         .with_ymd_and_hms(next_year, next_month as u32, 1, 0, 0, 0)
         .single()

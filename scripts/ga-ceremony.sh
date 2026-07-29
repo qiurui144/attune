@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ga-ceremony.sh — v1.0.0 GA 三仓 ceremony 自动化
+# ga-ceremony.sh — Attune GA 三仓 ceremony 自动化
 #
 # 用法:
 #   bash scripts/ga-ceremony.sh --dry-run     # 列出将要执行的操作，不执行
@@ -7,8 +7,8 @@
 #
 # 流程:
 #   1. 预检（CI 绿 / working tree clean / develop push / 6 类下限 gate）
-#   2. attune 仓：develop → main --no-ff + tag v1.0.0 + desktop-v1.0.0
-#   3. attune-pro 仓：develop → main --no-ff + tag v1.0.0
+#   2. attune 仓：develop → main --no-ff + tag v${ATTUNE_VERSION} + desktop-v${ATTUNE_VERSION}
+#   3. attune-pro 仓：develop → main --no-ff + tag v${ATTUNE_PRO_VERSION}
 #   4. cloud 仓：tag cloud-v2.2.0
 #   5. push 三仓 + 所有 tag
 #   6. 等待 GH Actions 触发，报告 release 链接
@@ -26,7 +26,7 @@ ATTUNE_PRO="${ATTUNE_PRO_REPO:-/data/company/project/attune-pro}"
 CLOUD="${CLOUD_REPO:-/data/company/cloud}"
 
 # GA 版本常量
-ATTUNE_VERSION="1.0.0"
+ATTUNE_VERSION="1.5.0"
 CLOUD_TAG="cloud-v2.2.0"
 ATTUNE_PRO_VERSION="1.0.0"
 
@@ -78,7 +78,7 @@ dry_or_run() {
 
 echo
 bold "╔══════════════════════════════════════════════════════════════╗"
-bold "║   attune v1.0.0 GA ceremony — $(date '+%Y-%m-%d %H:%M:%S')        ║"
+bold "║   attune v${ATTUNE_VERSION} GA ceremony — $(date '+%Y-%m-%d %H:%M:%S')        ║"
 bold "╚══════════════════════════════════════════════════════════════╝"
 echo
 bold "模式: $MODE"
@@ -203,7 +203,7 @@ else
   warn "  建议: export ATTUNE_ENFORCE_SIX_CATEGORY_FLOOR=1 后重跑"
 fi
 
-# 1e. RELEASE.md v1.0.0 节存在
+# 1e. RELEASE.md 当前版本节存在
 check_release_section() {
   local label="$1" file="$2" version="$3"
   if [ ! -f "$file" ]; then
@@ -310,14 +310,14 @@ if [ "$MODE" = "dry-run" ]; then
   echo
   bold "STEP 2: attune 仓"
   info "git -C $ATTUNE checkout main && git -C $ATTUNE pull origin main"
-  info "git -C $ATTUNE merge --no-ff develop -m 'merge: develop → main (v1.0.0 GA)'"
+  info "git -C $ATTUNE merge --no-ff develop -m 'merge: develop → main (v${ATTUNE_VERSION} GA)'"
   info "git -C $ATTUNE tag -a v${ATTUNE_VERSION}         -m '... (从 rust/RELEASE.md 生成)'"
   info "git -C $ATTUNE tag -a desktop-v${ATTUNE_VERSION} -m '... (从 rust/RELEASE.md 生成)'"
   info "git -C $ATTUNE push origin main v${ATTUNE_VERSION} desktop-v${ATTUNE_VERSION}"
   echo
   bold "STEP 3: attune-pro 仓"
   info "git -C $ATTUNE_PRO checkout main && git -C $ATTUNE_PRO pull origin main"
-  info "git -C $ATTUNE_PRO merge --no-ff develop -m 'merge: develop → main (v1.0.0 GA)'"
+  info "git -C $ATTUNE_PRO merge --no-ff develop -m 'merge: develop → main (v${ATTUNE_PRO_VERSION} GA)'"
   info "git -C $ATTUNE_PRO tag -a v${ATTUNE_PRO_VERSION} -m '... (从 RELEASE.md 生成)'"
   info "git -C $ATTUNE_PRO push origin main v${ATTUNE_PRO_VERSION}"
   echo
@@ -340,7 +340,7 @@ fi
 
 bold "══ EXECUTE 确认 ═════════════════════════════════════════════════"
 echo
-yellow "即将执行 v1.0.0 GA ceremony，操作不可撤销（tag 一旦 push）。"
+yellow "即将执行 v${ATTUNE_VERSION} GA ceremony，操作不可撤销（tag 一旦 push）。"
 echo
 printf "请确认三仓 develop 状态已最终 review。输入 'yes' 继续，其他任意键中止: "
 read -r answer
@@ -350,7 +350,7 @@ if [ "$answer" != "yes" ]; then
 fi
 echo
 
-# ── 从 RELEASE.md 提取 v1.0.0 tag 消息 ───────────────────────────────────
+# ── 从 RELEASE.md 提取当前 tag 消息 ───────────────────────────────────────
 
 extract_tag_msg() {
   local release_md="$1" version="$2"
@@ -485,12 +485,12 @@ fi
 
 echo
 bold "══════════════════════════════════════════════════════════════════"
-green "v1.0.0 GA ceremony 完成！"
+green "v${ATTUNE_VERSION} GA ceremony 完成！"
 echo
 info "后续核查清单:"
-info "  [ ] GH Releases 有 v1.0.0 + desktop-v1.0.0 双 release page"
+info "  [ ] GH Releases 有 v${ATTUNE_VERSION} + desktop-v${ATTUNE_VERSION} 双 release page"
 info "  [ ] 5 平台产物全出（tarball + 安装包）"
-info "  [ ] attune-pro v1.0.0 tag 在 GitHub 可见"
+info "  [ ] attune-pro v${ATTUNE_PRO_VERSION} tag 在 GitHub 可见"
 info "  [ ] cloud ${CLOUD_TAG} tag push 成功"
 info "  [ ] 三仓 main 都已更新到 GA commit"
 echo

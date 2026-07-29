@@ -34,8 +34,18 @@ export type View =
   | 'marketplace'  // G3 (2026-05-01): PluginHub 插件市场
   | 'office'       // v0.7.1: Office helper (OCR + ASR transcription)
   | 'privacy'      // v1.0.6: Privacy dashboard (5 outbound points)
+  | 'quota'        // v1.0.7: cloud quota dashboard
+  | 'doc-intel'    // doc-intel: compare/summarize/chapters (T-10)
+  | 'writing'      // writing engine: draft/rewrite/outline/synthesis/cite/templates (W1-W6)
+  | 'skill-runner' // CAP-2: declarative skills runtime (compare→table 等)
+  | 'workbench'    // 行业场景直接入口（bypass chat-trigger）
+  | 'monitoring'   // info-monitoring: watch/digest/research/cross-source (spec 2026-06-19)
   | 'settings';
 export const currentView = signal<View>('chat');
+
+// 跳转 Settings 时指定初始 tab（如 ModelChip "更多设置" → 'ai'）；消费后 SettingsView 读一次
+export type SettingsTabId = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
+export const settingsInitialTab = signal<SettingsTabId | null>(null);
 
 export type Theme = 'light' | 'dark' | 'auto';
 export const theme = signal<Theme>(loadTheme());
@@ -59,7 +69,7 @@ export const connectionState = signal<ConnectionState>('online');
 // ── 业务级 ──────────────────────────────────────────────────────
 export const settings = signal<Record<string, unknown> | null>(null);
 export const hardware = signal<Record<string, unknown> | null>(null);
-export const ollamaStatus = signal<'checking' | 'ready' | 'missing'>('checking');
+export const localSchedulerStatus = signal<'checking' | 'ready' | 'missing'>('checking');
 
 // ── 会员状态 (调 /api/v1/member/state) ────────────────────────────
 export type MemberStateKind = 'logged_out' | 'free' | 'paid';
@@ -67,10 +77,14 @@ export type MemberSnapshot = {
   kind: MemberStateKind;
   account_id?: string | null;
   license_id?: string | null;
+  llm_quota_remaining?: number;
   is_logged_in: boolean;
   is_paid: boolean;
 };
 export const memberState = signal<MemberSnapshot | null>(null);
+// 会员场景 (vertical) — cloud 登录/激活时下发,纯展示文案 (不参与门禁,GAP-B)。
+// null = 未登录 / 未指定场景 / 老 cloud 不返回。MarketplaceView 据此显示"当前场景"。
+export const memberVertical = signal<string | null>(null);
 
 // SettingsLocks (调 /api/v1/member/locks) — 6 字段, 决定 UI 灰显
 export type LockState = 'editable' | 'locked';
@@ -130,15 +144,49 @@ export type AcpFlow = {
   final_value?: unknown;
 };
 
+// ── local scheduler live trace：chat 响应携带的本地任务状态（live-only） ──
+export type LocalSchedulerAdmission = {
+  task_name?: string;
+  model_id?: string;
+  service_class?: string;
+  context_tokens?: number;
+  max_output_tokens?: number;
+  reason?: string;
+  explicit_async?: boolean;
+};
+
+export type LocalSchedulerInfo = {
+  task?: string | null;
+  scheduled_as?: string | null;
+  job_id?: string | null;
+  status?: string | null;
+  phase?: string | null;
+  reason?: string | null;
+  eta_ms?: number | null;
+  model?: string | null;
+  service_class?: string | null;
+  device_used?: string | null;
+  latency_ms?: number | null;
+  queue_wait_ms?: number | null;
+  error?: unknown;
+  detail?: string | null;
+  admission?: LocalSchedulerAdmission;
+};
+
 export type Message = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   citations?: Array<{ item_id: string; title: string; relevance: number }>;
   acp_flow?: AcpFlow;
+  local_scheduler?: LocalSchedulerInfo;
   created_at: string;
 };
 export const messages = signal<Message[]>([]);
+
+// 最近一次 chat 发送失败/超时的用户原文 —— 非 null 时 ChatView 显示"重试"入口，
+// 重发成功或重新发送即清空。让用户在超时/网络故障后有恢复路径（不是死消息）。
+export const lastFailedSend = signal<string | null>(null);
 
 // ── Cost & Trigger Contract: LLM 调用费用估算（来自后端响应） ─────
 export type CostEstimate = {
@@ -214,7 +262,6 @@ export function dismissRecommendation(index: number): void {
 export const canChat = computed(
   () =>
     vaultState.value === 'unlocked' &&
-    ollamaStatus.value === 'ready' &&
     connectionState.value !== 'offline',
 );
 

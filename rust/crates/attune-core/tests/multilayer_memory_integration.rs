@@ -34,7 +34,14 @@ fn temp_store() -> (Store, tempfile::TempDir) {
 fn seed_episodic(store: &Store, dek: &Key32, hash: &str, summary: &str, win_start: i64) -> String {
     store
         .insert_memory(
-            dek, "episodic", win_start, win_start + DAY, &[hash.into()], summary, "m", win_start,
+            dek,
+            "episodic",
+            win_start,
+            win_start + DAY,
+            &[hash.into()],
+            summary,
+            "m",
+            win_start,
         )
         .unwrap();
     store
@@ -88,14 +95,18 @@ fn full_lifecycle_l2_to_l3_and_assembler_routing() {
     // L2: seed two clearly-separated topics, 6 episodic memories each.
     for i in 0..6 {
         seed_episodic(
-            &store, &dek, &format!("rust-{i}"),
+            &store,
+            &dek,
+            &format!("rust-{i}"),
             "用户研究了 Rust 所有权 借用 生命周期 并发模型",
             (i as i64) * DAY,
         );
     }
     for i in 0..6 {
         seed_episodic(
-            &store, &dek, &format!("cook-{i}"),
+            &store,
+            &dek,
+            &format!("cook-{i}"),
             "用户学习了 川菜 烹饪 火候 调味 刀工 技法",
             (10 + i as i64) * DAY,
         );
@@ -107,8 +118,12 @@ fn full_lifecycle_l2_to_l3_and_assembler_routing() {
     assert_eq!(idx.len(), 12);
 
     // A recall query retrieves an episodic memory by relevance.
-    let hits = search_memories(&store, &dek, &idx, &emb, "Rust 所有权", "episodic", None, 5).unwrap();
-    assert!(!hits.is_empty(), "episodic memory must be vector-retrievable");
+    let hits =
+        search_memories(&store, &dek, &idx, &emb, "Rust 所有权", "episodic", None, 5).unwrap();
+    assert!(
+        !hits.is_empty(),
+        "episodic memory must be vector-retrievable"
+    );
 
     // L2→L3: cluster + summarize. The semantic summary echoes the cluster's own
     // member text so that, under the deterministic token-hash mock embedder, the
@@ -138,13 +153,20 @@ fn full_lifecycle_l2_to_l3_and_assembler_routing() {
     // Tier-aware assembler: overview query → L3 semantic.
     let l0 = make_l0(5);
     let overview = assemble_context(
-        &store, &dek, &idx2, &emb,
+        &store,
+        &dek,
+        &idx2,
+        &emb,
         "总结 用户研究了 Rust 所有权 借用 生命周期 并发模型",
-        &l0, MemoryConfig::default(),
+        &l0,
+        MemoryConfig::default(),
     )
     .unwrap();
     assert_eq!(overview.shape, QueryShape::Overview);
-    assert_eq!(overview.tier_used, "L3", "overview query routes to semantic tier");
+    assert_eq!(
+        overview.tier_used, "L3",
+        "overview query routes to semantic tier"
+    );
 }
 
 #[test]
@@ -154,15 +176,25 @@ fn precise_query_stays_on_l0() {
     let emb = MockEmbeddingProvider::new(DIM);
     let mut idx = MemoryVectorIndex::new(DIM).unwrap();
     for i in 0..6 {
-        seed_episodic(&store, &dek, &format!("h-{i}"), "用户研究了 Rust 所有权", (i as i64) * DAY);
+        seed_episodic(
+            &store,
+            &dek,
+            &format!("h-{i}"),
+            "用户研究了 Rust 所有权",
+            (i as i64) * DAY,
+        );
     }
     embed_all(&store, &dek, &emb, &mut idx);
 
     let l0 = make_l0(5);
     let out = assemble_context(
-        &store, &dek, &idx, &emb,
+        &store,
+        &dek,
+        &idx,
+        &emb,
         "`MemoryVectorIndex::upsert` 的返回类型是什么 / 函数签名",
-        &l0, MemoryConfig::default(),
+        &l0,
+        MemoryConfig::default(),
     )
     .unwrap();
     assert_eq!(out.shape, QueryShape::Precise);
@@ -178,7 +210,10 @@ fn assembler_off_equals_l0_path() {
     let idx = MemoryVectorIndex::new(DIM).unwrap();
 
     let l0 = make_l0(4);
-    let off = MemoryConfig { tiered_assembler_enabled: false, memory_confidence: 0.70 };
+    let off = MemoryConfig {
+        tiered_assembler_enabled: false,
+        memory_confidence: 0.70,
+    };
     let out = assemble_context(&store, &dek, &idx, &emb, "总结一下我学了什么", &l0, off).unwrap();
     // Assembler off → byte-for-byte the L0 results.
     assert_eq!(out.tier_used, "L0");
@@ -204,22 +239,41 @@ fn cold_demotion_excludes_old_covered_episodic() {
     let fresh_id = seed_episodic(&store, &dek, "fresh", "用户研究了 tokio 调度", now - DAY);
     // A semantic memory covering the old period.
     store
-        .insert_semantic_memory(&dek, "topic", &["old".into()], "standing summary", "m", 0, DAY, 10 * DAY)
+        .insert_semantic_memory(
+            &dek,
+            "topic",
+            &["old".into()],
+            "standing summary",
+            "m",
+            0,
+            DAY,
+            10 * DAY,
+        )
         .unwrap();
     embed_all(&store, &dek, &emb, &mut idx);
 
     let demoted = store.demote_cold_memories(now, 180 * DAY).unwrap();
-    assert_eq!(demoted, 1, "only the old+covered episodic should be demoted");
+    assert_eq!(
+        demoted, 1,
+        "only the old+covered episodic should be demoted"
+    );
 
     // Hot retrieval excludes the cold memory.
     let hot = store.list_live_memories(&dek, "episodic", false).unwrap();
     let hot_ids: Vec<&str> = hot.iter().map(|m| m.id.as_str()).collect();
     assert!(hot_ids.contains(&fresh_id.as_str()));
-    assert!(!hot_ids.contains(&old_id.as_str()), "cold memory excluded from hot set");
+    assert!(
+        !hot_ids.contains(&old_id.as_str()),
+        "cold memory excluded from hot set"
+    );
 
     // Vector search over episodic also excludes it.
-    let hits = search_memories(&store, &dek, &idx, &emb, "Rust 所有权", "episodic", None, 5).unwrap();
-    assert!(hits.iter().all(|h| h.memory.id != old_id), "cold memory not vector-retrieved");
+    let hits =
+        search_memories(&store, &dek, &idx, &emb, "Rust 所有权", "episodic", None, 5).unwrap();
+    assert!(
+        hits.iter().all(|h| h.memory.id != old_id),
+        "cold memory not vector-retrieved"
+    );
 }
 
 #[test]
@@ -227,9 +281,15 @@ fn query_shape_classification_table() {
     // Recall — time words.
     assert_eq!(classify_query_shape("昨天的 rust 笔记"), QueryShape::Recall);
     // Overview — broad marker.
-    assert_eq!(classify_query_shape("总结我对算法的理解"), QueryShape::Overview);
+    assert_eq!(
+        classify_query_shape("总结我对算法的理解"),
+        QueryShape::Overview
+    );
     // Overview — short topic.
     assert_eq!(classify_query_shape("分布式系统"), QueryShape::Overview);
     // Precise — code identifier.
-    assert_eq!(classify_query_shape("`assemble_context` 怎么用"), QueryShape::Precise);
+    assert_eq!(
+        classify_query_shape("`assemble_context` 怎么用"),
+        QueryShape::Precise
+    );
 }

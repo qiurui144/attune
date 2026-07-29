@@ -183,10 +183,8 @@ pub fn entity_overlap_score(a: &[Entity], b: &[Entity]) -> f32 {
         return 0.0;
     }
 
-    let set_a: HashSet<(EntityKind, &str)> =
-        a.iter().map(|e| (e.kind, e.value.as_str())).collect();
-    let set_b: HashSet<(EntityKind, &str)> =
-        b.iter().map(|e| (e.kind, e.value.as_str())).collect();
+    let set_a: HashSet<(EntityKind, &str)> = a.iter().map(|e| (e.kind, e.value.as_str())).collect();
+    let set_b: HashSet<(EntityKind, &str)> = b.iter().map(|e| (e.kind, e.value.as_str())).collect();
 
     let inter = set_a.intersection(&set_b).count();
     let union = set_a.union(&set_b).count();
@@ -227,7 +225,10 @@ mod unit_tests {
         let text = "2024-03-15 张三借款 ¥10,000";
         let v = extract_entities(text);
         let kinds: Vec<EntityKind> = v.iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, vec![EntityKind::Date, EntityKind::Person, EntityKind::Money]);
+        assert_eq!(
+            kinds,
+            vec![EntityKind::Date, EntityKind::Person, EntityKind::Money]
+        );
     }
 
     #[test]

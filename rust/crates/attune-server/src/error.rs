@@ -36,7 +36,6 @@ pub enum AppError {
     // 类别由 IntoResponse 的 `code` 字段承载 (parts()). 这样旧 tuple route 迁移
     // 到 AppError 时 wire `error` 文本保持不变 (纯加性: 只多了 code 字段).
     // 类别信息在日志侧由 #[derive(Debug)] 的 variant 名保留.
-
     /// 400 Bad Request — 输入校验失败 / 参数错误 / 路径不合法.
     #[error("{0}")]
     BadRequest(String),
@@ -69,7 +68,7 @@ pub enum AppError {
     #[error("{0}")]
     TooManyRequests(String),
 
-    /// 502 Bad Gateway — 调上游服务 (Ollama / cloud accounts / plugin hub) 失败.
+    /// 502 Bad Gateway — 调上游服务 (scheduler / cloud accounts / plugin hub) 失败.
     #[error("{0}")]
     BadGateway(String),
 
@@ -100,6 +99,21 @@ impl AppError {
         AppError::Detailed { status, body }
     }
 
+    /// 公开取 (HTTP status, 人类可读 message) —— MCP 层把 AppError 映射成 json-rpc error
+    /// 时用 (不经 HTTP 响应)。`Detailed` 取其 body.error 字段, 其余取 Display。
+    pub fn status_and_message(&self) -> (StatusCode, String) {
+        if let AppError::Detailed { status, body } = self {
+            let msg = body
+                .get("error")
+                .and_then(|e| e.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("error ({})", status.as_u16()));
+            return (*status, msg);
+        }
+        let (status, _code) = self.parts();
+        (status, self.to_string())
+    }
+
     /// 将 AppError 映射到 HTTP status + 稳定 code 字符串 (客户端契约).
     /// `Detailed` 由 `into_response` 短路处理, 不经此函数 (此 arm 仅为穷尽性).
     fn parts(&self) -> (StatusCode, &'static str) {
@@ -114,7 +128,9 @@ impl AppError {
             AppError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),
             AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "too-many-requests"),
             AppError::BadGateway(_) => (StatusCode::BAD_GATEWAY, "bad-gateway"),
-            AppError::ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable"),
+            AppError::ServiceUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable")
+            }
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -167,12 +183,18 @@ impl From<attune_core::error::VaultError> for AppError {
             VaultError::Locked => AppError::Unauthorized("vault locked".into()),
             VaultError::Sealed => AppError::ServiceUnavailable("vault not initialized".into()),
             VaultError::InvalidPassword => AppError::Unauthorized("invalid password".into()),
-            VaultError::AlreadyInitialized => AppError::Conflict("vault already initialized".into()),
+            VaultError::AlreadyInitialized => {
+                AppError::Conflict("vault already initialized".into())
+            }
             VaultError::AlreadyUnlocked => AppError::Conflict("vault already unlocked".into()),
             VaultError::SessionExpired | VaultError::SessionInvalid => {
                 AppError::Unauthorized(e.to_string())
             }
             VaultError::InvalidInput(s) => AppError::BadRequest(s),
+            // F-17: an OutboundGate refusal is a user-policy block (privacy
+            // setting off / vault locked / L0-to-cloud), not a server fault →
+            // 403 Forbidden so the client can surface "you disabled this".
+            VaultError::OutboundBlocked(s) => AppError::Forbidden(s),
             _ => AppError::Internal(e.to_string()),
         }
     }
@@ -247,8 +269,8 @@ mod tests {
             "pending_embeddings": 12000,
             "retry_after_seconds": 30,
         });
-        let resp = AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, original.clone())
-            .into_response();
+        let resp =
+            AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, original.clone()).into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();

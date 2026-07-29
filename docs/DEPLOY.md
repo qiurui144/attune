@@ -8,27 +8,26 @@ attune 支持 3 种部署形态. 选择基于 form factor (per [ADR 0002](adr/00
 
 ### Linux (deb)
 
+> v1.0+ 起推荐走 APT 仓库（自动升级），见 [INSTALL.md](INSTALL.md) 与 [README](../README.md#-download) 的「系统包管理器」节。下方手动 .deb 流程仍受支持。
+
 ```bash
-# 下载最新 GA .deb
-wget https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune_0.6.3_amd64.deb
+# 从 Releases 页取最新 desktop-vX.Y.Z 的 .deb（VERSION 替换为实际版本号，如 1.2.0）
+VERSION=1.2.0
+wget https://github.com/qiurui144/attune/releases/download/desktop-v${VERSION}/Attune_${VERSION}_amd64.deb
 
 # 装
-sudo dpkg -i Attune_0.6.3_amd64.deb
+sudo dpkg -i Attune_${VERSION}_amd64.deb
 # 自动装依赖: curl / poppler-utils / libwebkit2gtk-4.1-0 / libgtk-3-0 / libayatana-appindicator3-1
 
 # 启 (桌面菜单 "Attune" 或命令行)
 attune-desktop
 ```
 
-post-install 自动准备 4 底座:
-- Embedding: bge-m3 via Ollama (你需手装 Ollama)
-- Reranker: lazy hf_hub (首搜下载 ~120 MB)
-- ASR: whisper-cli + large-v3-turbo Q5 (中文 WER 5-7%)
-- OCR: PP-OCRv5 mobile 21 MB
+post-install 只准备 Attune 本体与用户数据目录，不安装 AI worker 或模型权重。本地 embedding/rerank/OCR/ASR/LLM 统一通过 edge scheduler endpoint 接入；未配置 scheduler 时使用 cloud/BYOK 或基础全文检索降级。
 
 ### Windows
 
-下载 `Attune_0.6.3_x64-setup.exe` (NSIS) 或 `Attune_0.6.3_x64_en-US.msi` (企业).
+从 Releases 页取最新 `desktop-vX.Y.Z` 的 `Attune_<VERSION>_x64-setup.exe` (NSIS) 或 `Attune_<VERSION>_x64_en-US.msi` (企业); 或 `winget install qiurui144.Attune`.
 双击安装, 任务栏图标启动.
 
 ### macOS
@@ -44,10 +43,10 @@ cargo tauri build --bundles dmg
 
 ### Linux AppImage
 
-通用 Linux (非 Debian 系):
+通用 Linux (非 Debian 系), 从 Releases 页取最新 `desktop-vX.Y.Z` 的 AppImage:
 ```bash
-chmod +x Attune_0.6.3_amd64.AppImage
-./Attune_0.6.3_amd64.AppImage
+chmod +x Attune_<VERSION>_amd64.AppImage
+./Attune_<VERSION>_amd64.AppImage
 ```
 
 ## 2. Headless Server / NAS
@@ -57,8 +56,9 @@ chmod +x Attune_0.6.3_amd64.AppImage
 ### 安装
 
 ```bash
-# 下载 server tarball (4 平台)
-wget https://github.com/qiurui144/attune/releases/download/v0.6.3/attune-linux-x86_64.tar.gz
+# 下载 server tarball (取最新 vX.Y.Z, VERSION 替换为实际版本号, 如 1.2.0)
+VERSION=1.2.0
+wget https://github.com/qiurui144/attune/releases/download/v${VERSION}/attune-linux-x86_64.tar.gz
 tar xzf attune-linux-x86_64.tar.gz
 sudo install -m 755 attune-server-headless /usr/local/bin/
 sudo install -m 755 attune-cli /usr/local/bin/
@@ -101,24 +101,78 @@ attune 当前是 single-vault. NAS 多用户场景:
 - 每用户独立 vault.db (用户 ID 进 path: ~/attune-{uid}/vault.db)
 - 后端跑多 process port 隔离 (v0.7 候选: 单进程 多 vault 支持)
 
-## 3. K3 一体机 (RISC-V)
+## 3. Edge Scheduler 设备 (RISC-V / x86 / Windows)
 
 **目标用户**: 出厂预装, 零配置开机即用.
 
-K3 镜像 build pipeline 在 `rv-spine-triton` + `rv-llama-cpp` 项目, 此处仅描述
-attune 端集成. FormFactor 自动检测为 `K3Appliance`, LLM 默认走本地 Ollama (60 TOPS
-INT4 via SpacemiT IME).
+Scheduler 镜像 build pipeline 由 scheduler 项目维护, 此处仅描述 attune 端集成。FormFactor 自动检测为 `LocalSchedulerAppliance`，LLM/embedding/rerank/OCR/ASR 默认经 scheduler `:8090` 统一收口。
+
+### K3 / NAS riscv64 headless server deb
+
+K3/NAS Web 交付使用 headless server `.deb`，不是 Tauri 桌面包。Attune 包只交付
+Web/API/control plane：vault、知识库导入、上传、搜索、chat 路由、设置、导出、
+plugin/WASM runtime、隐私门禁和 systemd 服务。ORT、Sherpa、模型权重、RVV/IME
+worker、其它推理 runtime 和模型生命周期全部由 scheduler `.deb` 管理。
+
+普通用户一键构建 Attune 包：
+
+```bash
+bash scripts/package-riscv64-deb.sh
+```
+
+该入口默认使用 SpacemiT 私有编译链
+`/data/RV/rv-spacemit-toolchain/spacemit-toolchain-linux-glibc-x86_64-v1.2.2`，
+并调用底层 `scripts/release/build-riscv64-server-deb.sh`。高级调试时才直接使用
+底层脚本。
+
+安装到 K3/NAS：
+
+```bash
+sudo dpkg -i dist/release/riscv64-server-deb/attune-server_*_riscv64.deb
+sudo systemctl status attune-server --no-pager
+```
+
+默认监听 `0.0.0.0:18900`。安装后从局域网浏览器打开：
+
+```text
+http://<nas-ip>:18900
+```
+
+验收已安装包：
+
+```bash
+ATTUNE_K3_HOST=<nas-ip> \
+ATTUNE_K3_BASE_URL=http://<nas-ip>:18900 \
+ATTUNE_K3_SCHEDULER_URL=http://<nas-ip>:8090 \
+  bash scripts/release/test-k3-nas-web-demo.sh \
+    --deb dist/release/riscv64-server-deb/attune-server_*_riscv64.deb
+```
+
+K3/NAS gate 必须使用 K3/NAS 自己的文件系统路径做 `/api/v1/index/bind`，
+前端主机只能作为浏览器或 Playwright driver，不能把前端主机路径传给服务端。
+
+K3 上 RVV/IME 是否真的带来性能优化，不由 Attune `.deb` 的指令审计证明。
+`test-k3-nas-web-demo.sh` 在提供 scheduler URL 时会默认运行：
+
+```bash
+bash scripts/release/test-k3-rvv-runtime-gate.sh \
+  --scheduler-url http://<nas-ip>:8090
+```
+
+该 gate 会调用 scheduler contract、`/models`、`/capacity` 和
+`/data/RV/k3-scheduler/tools/worker_benchmark_gate.py`，并要求 scheduler 暴露
+RVV/IME/SpacemiT 加速元数据与 live latency 证据。若失败，应修 scheduler
+runtime/provider/model `.deb`，不要把 ORT、Sherpa 或模型 runtime 放回 Attune 包。
 
 ### 系统服务
 
-K3 镜像出厂 systemd unit `attune-k3.service` 启动, 含:
+Edge scheduler 镜像出厂 systemd unit 启动, 含:
 - attune-server-headless on :18900
-- ollama daemon (qwen2.5:3b 预装)
-- 推理服务 :8080 (SpacemiT EP, IME GPU offload)
+- scheduler service :8090 (模型生命周期、队列、硬件加速由 scheduler 管理)
 
 ### 网络
 
-K3 出厂 IP DHCP, 用户:
+local scheduler 出厂 IP DHCP, 用户:
 1. 局域网扫 mDNS `_attune._tcp.local`
 2. 浏览器 `attune.local:18900` 即用
 3. 第一次访问 wizard (无主密码), 设密码完成
@@ -127,7 +181,7 @@ K3 出厂 IP DHCP, 用户:
 
 A/B 双分区 + signed firmware, OTA 拉新版 image:
 ```bash
-attune-cli k3 upgrade  # 从 engi-stack.com/firmware/k3 拉最新
+attune-cli scheduler upgrade  # 从 engi-stack.com/firmware/edge-scheduler 拉最新（命令名以发行版为准）
 ```
 
 ## 4. Docker / GitHub Container Registry (ghcr.io)
@@ -140,10 +194,10 @@ attune-cli k3 upgrade  # 从 engi-stack.com/firmware/k3 拉最新
 
 ```bash
 # CLI（轻量，无 UI）
-docker pull ghcr.io/qiurui144/attune-cli:v1.0.0
+docker pull ghcr.io/qiurui144/attune-cli:v1.5.0
 
 # Headless server（含嵌入式 Web UI，端口 18900）
-docker pull ghcr.io/qiurui144/attune-server:v1.0.0
+docker pull ghcr.io/qiurui144/attune-server:v1.5.0
 
 # 或用 latest（跟随最新 GA）
 docker pull ghcr.io/qiurui144/attune-server:latest
@@ -153,39 +207,39 @@ docker pull ghcr.io/qiurui144/attune-server:latest
 
 ```bash
 # 最简启动（vault 数据存容器内，重建会丢失）
-docker run -d -p 18900:18900 ghcr.io/qiurui144/attune-server:v1.0.0
+docker run -d -p 18900:18900 ghcr.io/qiurui144/attune-server:v1.5.0
 
 # 推荐：挂载数据卷持久化 vault
 docker run -d \
   -p 18900:18900 \
   -v $HOME/.attune:/data \
   -e ATTUNE_DATA_DIR=/data \
-  ghcr.io/qiurui144/attune-server:v1.0.0
+  ghcr.io/qiurui144/attune-server:v1.5.0
 
 # 带 TLS（Let's Encrypt 证书）
 docker run -d \
   -p 18900:18900 \
   -v /etc/letsencrypt:/certs:ro \
   -v $HOME/.attune:/data \
-  ghcr.io/qiurui144/attune-server:v1.0.0 \
+  ghcr.io/qiurui144/attune-server:v1.5.0 \
   --tls-cert /certs/live/attune.example.com/fullchain.pem \
   --tls-key /certs/live/attune.example.com/privkey.pem
 ```
 
 ### 与 install pkg（.deb / .exe）的关系
 
-| 形态 | 用途 | UI | Ollama | 推荐场景 |
-|------|------|----|----|------|
-| `.deb` / `.msi` / AppImage | 桌面应用（含系统托盘） | ✅ Tauri WebView | 本机自动检测 | 笔电 / 工作站个人使用 |
-| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | 需宿主机 Ollama 或 K3 推理服务 | NAS / VPS / 团队共享 |
-| Docker `attune-cli` | 命令行工具（无 UI） | ❌ | ❌ | 脚本自动化 / CI 管道 |
+| 形态 | 用途 | UI | AI 执行路径 | 推荐场景 |
+|------|------|----|------------|------|
+| `.deb` / `.msi` / AppImage | 桌面应用（含系统托盘） | ✅ Tauri WebView | cloud/BYOK 或 edge scheduler | 笔电 / 工作站个人使用 |
+| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | cloud/BYOK 或宿主/远端 scheduler | NAS / VPS / 团队共享 |
+| Docker `attune-cli` | 命令行工具（无 UI） | ❌ | 按命令配置 | 脚本自动化 / CI 管道 |
 
-> Docker 镜像不含 Ollama、whisper.cpp 和 PP-OCR 底座模型。
-> 启动后在 Web UI Settings → AI 大脑 配置外部 Ollama 地址或云端 token。
+> Docker 镜像不含第三方 AI runtime 或模型权重。
+> 启动后在 Web UI Settings → AI 大脑配置 cloud/BYOK 或 edge scheduler 地址。
 
 ### 平台支持
 
-镜像构建矩阵：`linux/amd64` + `linux/arm64`（aarch64，支持 K3 / 树莓派 / NAS）。
+镜像构建矩阵：`linux/amd64` + `linux/arm64`（aarch64，支持 local scheduler / 树莓派 / NAS）。
 
 ## 5. attune-desktop-installers（企业批量分发）
 
@@ -199,28 +253,28 @@ Packages tab 可以看到（`ghcr.io/qiurui144/attune-desktop-installers`）。
 
 ```bash
 # 拉取指定版本
-docker pull ghcr.io/qiurui144/attune-desktop-installers:1.0.0
+docker pull ghcr.io/qiurui144/attune-desktop-installers:1.5.0
 
 # 查看镜像内所有 installer 文件
-docker run --rm ghcr.io/qiurui144/attune-desktop-installers:1.0.0 ls /installers/
+docker run --rm ghcr.io/qiurui144/attune-desktop-installers:1.5.0 ls /installers/
 
 # 提取 Linux .deb 到当前目录
 docker run --rm \
   -v "$PWD:/out" \
-  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
-  cp /installers/Attune_1.0.0_amd64.deb /out/
+  ghcr.io/qiurui144/attune-desktop-installers:1.5.0 \
+  cp /installers/Attune_1.5.0_amd64.deb /out/
 
 # 提取 Windows NSIS installer
 docker run --rm \
   -v "$PWD:/out" \
-  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
-  cp /installers/Attune_1.0.0_x64-setup.exe /out/
+  ghcr.io/qiurui144/attune-desktop-installers:1.5.0 \
+  cp /installers/Attune_1.5.0_x64-setup.exe /out/
 
 # 提取全部 installer（bash glob 写法）
 docker run --rm \
   -v "$PWD:/out" \
   --entrypoint sh \
-  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
+  ghcr.io/qiurui144/attune-desktop-installers:1.5.0 \
   -c "cp /installers/* /out/"
 ```
 
@@ -264,14 +318,14 @@ scp my-vault-2026-05.profile new-laptop:
 | 会员验证 | accounts.engi-stack.com 或 自部署 accounts URL | — |
 | LLM Gateway | gateway.engi-stack.com (Pro Membership) 或 BYOK | — |
 
-自部署用户 v0.6.3 起在 Settings → 会员 → "高级 · 自部署 cloud 后端" 配 3 URL.
+自部署用户在 Settings → 会员 → "高级 · 自部署 cloud 后端" 配 3 URL.
 
 ## 故障排查
 
 | 现象 | 检查 |
 |------|------|
 | `:18900` 启动失败 | 端口占用 / SSH tunnel 残留 (本次会话踩过, ss -tlpn 看) |
-| Wizard "Ollama 没装" | `curl -fsSL https://ollama.com/install.sh \| sh`, 然后 `ollama pull bge-m3` |
-| Chat "no LLM configured" | Settings → AI 大脑 → 配 cloud token 或选 Ollama |
+| Edge scheduler 探测失败 | `python3 scripts/probe-edge-scheduler-contract.py --base-url http://127.0.0.1:8090 --strict` |
+| Chat "no LLM configured" | Settings → AI 大脑 → 配 cloud/BYOK token 或 edge scheduler |
 | FTS 查询不命中新文件 | 后台 indexer 还在跑, 等几秒 (大 PDF 可能 OCR 慢) |
 | Plugin 装后未显示 | `POST /api/v1/plugins/reload` 或重启 daemon |

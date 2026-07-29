@@ -20,9 +20,7 @@ use std::collections::HashMap;
 
 use attune_core::crypto::Key32;
 use attune_core::embed::{EmbeddingProvider, MockEmbeddingProvider};
-use attune_core::memory::consolidation_agent::{
-    run_promotion_cycle, PromotionConfig,
-};
+use attune_core::memory::consolidation_agent::{run_promotion_cycle, PromotionConfig};
 use attune_core::memory::semantic::{apply_semantic_result, prepare_semantic_cycle};
 use attune_core::store::Store;
 
@@ -166,9 +164,7 @@ fn promotion_coexists_with_hdbscan_semantic_path_no_topic_key_collision() {
                 created_at,
                 created_at + DAY,
                 &hashes,
-                &format!(
-                    "用户研究了 Rust ownership 借用 生命周期 主题的第 {i} 段内容"
-                ),
+                &format!("用户研究了 Rust ownership 借用 生命周期 主题的第 {i} 段内容"),
                 "integration-seed",
                 created_at,
             )
@@ -198,7 +194,11 @@ fn promotion_coexists_with_hdbscan_semantic_path_no_topic_key_collision() {
         max_promotions_per_run: 50,
     };
     let r = run_promotion_cycle(&store, &dek, &cfg, NOW_SECS, "det").unwrap();
-    let agent_promoted = r.promoted.iter().filter(|p| p.semantic_id.is_some()).count();
+    let agent_promoted = r
+        .promoted
+        .iter()
+        .filter(|p| p.semantic_id.is_some())
+        .count();
     assert_eq!(agent_promoted, 6);
 
     // ── Path B: hdbscan path runs after, on the same episodic set.
@@ -277,7 +277,11 @@ fn promoted_l3_summary_decrypts_to_original_episodic_text() {
     let dek = Key32::generate();
 
     let original = "这是一段 UTF-8 摘要：含中英 mixed、emoji 🎯、以及 \"双引号\"。";
-    let hashes: Vec<String> = vec!["roundtrip-1".into(), "roundtrip-2".into(), "roundtrip-3".into()];
+    let hashes: Vec<String> = vec![
+        "roundtrip-1".into(),
+        "roundtrip-2".into(),
+        "roundtrip-3".into(),
+    ];
     let created_at = NOW_SECS - DAY;
     store
         .insert_memory(
@@ -303,7 +307,10 @@ fn promoted_l3_summary_decrypts_to_original_episodic_text() {
     };
     let r = run_promotion_cycle(&store, &dek, &cfg, NOW_SECS, "roundtrip-v1").unwrap();
     assert_eq!(
-        r.promoted.iter().filter(|p| p.semantic_id.is_some()).count(),
+        r.promoted
+            .iter()
+            .filter(|p| p.semantic_id.is_some())
+            .count(),
         1
     );
     let live = store.list_live_memories(&dek, "semantic", false).unwrap();

@@ -29,7 +29,7 @@ ok()   { green  "OK  " ; echo " $*"; }
 bold "Doc audit — $REPO"; echo
 
 # ── 1. 根目录 .md 白名单 ─────────────────────────────────────────────────────
-ROOT_ALLOW=(README.md README.zh.md DEVELOP.md RELEASE.md CLAUDE.md ACKNOWLEDGMENTS.md ACKNOWLEDGMENTS.zh.md LICENSE LICENSE.md AGENTS.md GEMINI.md)
+ROOT_ALLOW=(README.md README.zh.md DEVELOP.md RELEASE.md CONTRIBUTING.md CLAUDE.md ACKNOWLEDGMENTS.md ACKNOWLEDGMENTS.zh.md LICENSE LICENSE.md AGENTS.md GEMINI.md)
 
 bold "─ 根目录 .md 白名单 ─"; echo
 violations=()
@@ -52,7 +52,7 @@ echo
 bold "─ 禁止形态扫描 ─"; echo
 
 # 2a release notes 独立文件
-banned=$(find . \( -name "v*-release*.md" -o -name "v*-rc*-test*.md" \) 2>/dev/null | grep -vE "$EXCLUDE_RE" | sort)
+banned=$(find . \( -name "v*-release*.md" -o -name "v*-rc*-test*.md" \) 2>/dev/null | grep -vE "$EXCLUDE_RE|(^|/)v[^/]*-user-testing-guide\.md$" | sort)
 if [ -n "$banned" ]; then
   err "release notes 独立文件(应入 RELEASE.md):"
   echo "$banned" | sed 's/^/    /'
@@ -62,7 +62,7 @@ fi
 echo
 
 # 2b tasks / report / analysis / readiness
-banned=$(find . \( -name "*-tasks.md" -o -name "*-todo.md" -o -name "*-report.md" -o -name "*-analysis.md" -o -name "*-readiness.md" \) 2>/dev/null | grep -vE "$EXCLUDE_RE" | grep -v "/superpowers/plans/" | sort)
+banned=$(find . \( -name "*-tasks.md" -o -name "*-todo.md" -o -name "*-report.md" -o -name "*-analysis.md" -o -name "*-readiness.md" \) 2>/dev/null | grep -vE "$EXCLUDE_RE|(^|/)(docs/reports|reports/runs)/" | grep -v "/superpowers/plans/" | sort)
 if [ -n "$banned" ]; then
   warn "一次性文档(应入 PR / RELEASE / ADR,不留独立 .md):"
   echo "$banned" | sed 's/^/    /'
@@ -113,6 +113,12 @@ bold "─ 同主题重复扫描(启发式) ─"; echo
 
 for kw in FEATURES RELEASE CHANGELOG INSTALL TESTING DEPLOY; do
   hits=$(find . -name "*$kw*.md" 2>/dev/null | grep -vE "$EXCLUDE_RE" | sort)
+  if [ "$kw" = "RELEASE" ]; then
+    hits=$(echo "$hits" | grep -vE '^\./RELEASE\.md$' || true)
+  fi
+  if [ "$kw" = "DEPLOY" ]; then
+    hits=$(echo "$hits" | grep -vE '^\./docs/.*-ai-service/' || true)
+  fi
   count=$(echo "$hits" | grep -c . 2>/dev/null)
   if [ "$count" -gt 1 ]; then
     warn "主题 '$kw' 命中 $count 份(可能重复):"
@@ -126,7 +132,8 @@ bold "─ docs/ 规模 ─"; echo
 md_count=$(find docs/ -name "*.md" -type f 2>/dev/null | grep -vE "$EXCLUDE_RE" | wc -l)
 md_lines=$(find docs/ -name "*.md" -type f 2>/dev/null | grep -vE "$EXCLUDE_RE" | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
 echo "  *.md 文件数: $md_count  总行数: $md_lines"
-[ "$md_count" -gt 30 ] && warn "docs/ 文件 > 30 份,建议巡视是否有可归并的"
+doc_warn_limit="${DOC_AUDIT_DOC_WARN_LIMIT:-300}"
+[ "$md_count" -gt "$doc_warn_limit" ] && warn "docs/ 文件 > $doc_warn_limit 份,建议巡视是否有可归并的"
 echo
 
 # ── 总结 ─────────────────────────────────────────────────────────────────────

@@ -10,8 +10,8 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::routes::errors::{internal, vault_locked};
 use crate::error::AppResult;
+use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -67,9 +67,7 @@ pub async fn list(
 
 /// DELETE /api/v1/auto_bookmarks — 全清候选（含已 promote 的历史记录）
 /// 注意：不清 items 表 — 用户应另走 items.delete 删 promote 后的真实条目
-pub async fn delete(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn delete(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
     let n = vault

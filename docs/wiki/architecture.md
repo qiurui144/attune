@@ -1,20 +1,18 @@
 # Attune 架构
 
-## 双产品线
+## Rust 生产架构
 
 ```
-┌─────────────────────────────┐  ┌─────────────────────────────┐
-│  Python 原型线 (实验)         │  │  Rust 商用线 (生产)          │
-│  src/npu_webhook/           │  │  rust/                       │
-│  • FastAPI + ChromaDB       │  │  • Axum + rusqlite           │
-│  • 78 tests                 │  │  • 900+ tests                │
-│  • 快速迭代新 feature       │  │  • AES-256-GCM 加密 vault    │
-└─────────────────────────────┘  └─────────────────────────────┘
-                ↓ 验证后择优迁移
-                选 Rust 商用线 ship
+┌─────────────────────────────┐
+│  Rust 生产线                 │
+│  rust/                       │
+│  • Axum + rusqlite           │
+│  • tantivy + usearch         │
+│  • AES-256-GCM 加密 vault    │
+└─────────────────────────────┘
 ```
 
-设计取舍：Python 端验证算法 / 集成 / UX；Rust 端打包发版 / 加密 / 性能。
+新功能直接在 Rust workspace、嵌入式 Web UI、Chrome 扩展中实现和验证。
 
 ## Rust 后端模块（v0.7）
 
@@ -26,7 +24,7 @@ attune-core/
 ├── classifier/        # 维度分类（按 plugin 注册）
 ├── clusterer/         # HDBSCAN 聚类
 ├── crypto/            # Argon2id + AES-GCM
-├── embed/             # OllamaProvider + OrtEmbeddingProvider (Xenova/bge-m3 量化)
+├── embed/             # EmbeddingProvider + scheduler-native / legacy provider adapters
 ├── entities/          # 通用实体抽取（Person/Money/Date/Org）
 ├── infer/
 │   ├── embedding.rs   # ONNX bge-m3 推理
@@ -198,13 +196,45 @@ agent 可靠性通过三 Phase gate 强制保证，每个 law-pro agent 并入 d
 | Phase 2 | 每次 PR CI | all pass |
 | Phase 3 | LLM holdout eval（手动触发） | F1 = 0.9828 |
 
-## 模型矩阵（按硬件 tier）
+## 执行矩阵（按部署形态）
 
-| Tier | RAM | embedding | reranker | LLM |
-|------|-----|-----------|----------|-----|
-| Low | 4-8GB | bge-small (ORT) | base | qwen2.5:1.5b |
-| Mid | 8-16GB | bge-base (ORT) | base | qwen2.5:3b |
-| **High** | **16-32GB** | **bge-m3 (Ollama F16)** | **bge-reranker-base** | **deepseek-r1:14b** |
-| Flagship | 32+GB | bge-m3 + 自训 fine-tune | v2-m3 multilingual | qwen3.5:35b-a3b |
+| 形态 | embedding / rerank | OCR / ASR | LLM |
+|------|--------------------|-----------|-----|
+| 普通桌面 | 配置 provider；未配置时全文检索降级 | 未配置 scheduler 时降级 | Cloud/BYOK |
+| Edge scheduler | scheduler-native KB task | scheduler task | scheduler 或 cloud 溢出 |
+| 企业/服务器 | 统一 scheduler 或云 provider | 统一 scheduler | 网关/BYOK/scheduler |
 
-`ATTUNE_EMBEDDING_BACKEND=ollama` / `ATTUNE_CHAT_MODEL=<name>` 可手动覆盖。
+具体 RVV/AVX/CUDA/DirectML/ROCm worker 和模型生命周期由 scheduler contract 管理。
+
+## 长文本与本机 Scheduler 边界（2026-07-14）
+
+Attune 侧保持平台无关：K3/X100、Windows 高性能工作站和 Linux x86 服务器都走同一套
+scheduler contract。Attune 不直接调用 llama.cpp、ORT、OCR/ASR worker 或硬件指令集后端；
+它负责 vault、策略、索引、检索、上下文准入、引用和 UI 体验。
+
+```
+用户/API/UI
+   ↓
+Attune bind/search/chat
+   ├─ 后台目录扫描（background=true，不阻塞 UI）
+   ├─ SQLite WAL + BM25 + vector store
+   ├─ streaming ingest + metadata-only fallback
+   ├─ lexical fast path + hybrid retrieval + SRAS + ContextAdmission
+   └─ scheduler-native KB tasks
+          ↓
+   本机/边缘 scheduler
+   ├─ embedding / rerank / OCR / ASR / LLM workers
+   ├─ RVV / AVX / GPU / NPU 等平台优化
+   └─ 队列、模型驻留、prompt cache、硬件容量
+```
+
+长文本原则：
+
+- 不把整本手册塞进 LLM，即使提供方声称 1M 窗口也一样；用分区、混合检索、SRAS 和小证据包。
+- 大体量向量库构建默认后台运行；API 回归仍可走同步 bind，以便测量完整耗时。
+- PDF 文本层优先。PDF 页级 OCR 默认进入有界页面 OCR；可用
+  `ATTUNE_SCHEDULER_PDF_OCR_ENABLED=0` 显式关闭。
+- OCR/ASR 不可用时，Attune 记录 metadata-only fallback，不伪造正文；详细内容查询必须拒答或说明内容不可用。
+- 短关键词、型号、ATA 编号、路径/代码式标识符在 BM25/exact 已命中时跳过 scheduler query embedding，避免简单查询被后台批量向量构建拖慢。
+- 本机 scheduler embedding 默认 512 条任务批量，可配置到 2048；若 scheduler 报物理 batch 限制，Attune 自动拆分重试。
+- SQLite、扫描和检索优化必须是通用实现，不能写 K3 专用分支；平台指令集优化由 scheduler 和原生依赖构建产物承担。

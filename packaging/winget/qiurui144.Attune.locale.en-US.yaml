@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
 
 PackageIdentifier: qiurui144.Attune
-PackageVersion: 1.0.0
+PackageVersion: 1.5.0
 PackageLocale: en-US
 Publisher: qiurui144
 PublisherUrl: https://engi-stack.com
@@ -29,9 +29,9 @@ Tags:
   - privacy
   - local-first
 ReleaseNotes: |
-  v1.0.0 GA — first stable release.
+  v1.5.0 — current stable desktop release.
   See full release notes at:
-  https://github.com/qiurui144/attune/releases/tag/desktop-v1.0.0
-ReleaseNotesUrl: https://github.com/qiurui144/attune/releases/tag/desktop-v1.0.0
+  https://github.com/qiurui144/attune/releases/tag/desktop-v1.5.0
+ReleaseNotesUrl: https://github.com/qiurui144/attune/releases/tag/desktop-v1.5.0
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

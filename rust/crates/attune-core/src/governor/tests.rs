@@ -76,7 +76,11 @@ fn miss_then_hit_avoids_second_upstream_call() {
 
     let r2 = governed_chat(&provider, &m, &opts, Some(cache.as_ref()), None, None, None).unwrap();
     assert_eq!(r2.text, "hello world", "hit returns the cached text");
-    assert_eq!(r2.cache, CacheOutcome::Hit, "second identical call is a hit");
+    assert_eq!(
+        r2.cache,
+        CacheOutcome::Hit,
+        "second identical call is a hit"
+    );
     assert_eq!(
         provider.calls(),
         1,
@@ -239,7 +243,10 @@ fn governed_call_records_usage_event_to_store() {
         let s = store.lock().unwrap();
         s.usage_summary(0, i64::MAX).expect("usage summary")
     };
-    assert_eq!(summary.events, 1, "usage_events table has one row after flush");
+    assert_eq!(
+        summary.events, 1,
+        "usage_events table has one row after flush"
+    );
     assert!(summary.tokens_in >= 100, "recorded tokens_in from the miss");
 }
 
@@ -304,7 +311,10 @@ struct FailingProvider {
 }
 impl FailingProvider {
     fn new(err: crate::error::VaultError) -> Self {
-        Self { err: err_clone(&err), model: "qwen2.5:3b".to_string() }
+        Self {
+            err: err_clone(&err),
+            model: "qwen2.5:3b".to_string(),
+        }
     }
 }
 fn err_clone(e: &crate::error::VaultError) -> crate::error::VaultError {
@@ -357,7 +367,9 @@ fn upstream_failure_records_fail_outcome_to_telemetry() {
     assert!(res.is_err(), "a failing upstream must propagate Err");
 
     // ...AND it must have recorded a failure usage event for the agent×model.
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(agg.flush_now());
 
     let health = {
@@ -383,7 +395,11 @@ fn upstream_failure_records_fail_outcome_to_telemetry() {
         )
         .unwrap();
     assert_eq!(outcome, "fail");
-    assert_eq!(error_kind.as_deref(), Some("quota"), "rate-limit → quota error_kind");
+    assert_eq!(
+        error_kind.as_deref(),
+        Some("quota"),
+        "rate-limit → quota error_kind"
+    );
     // And reading it back as telemetry classifies as RateLimit.
     drop(s);
     assert_eq!(
@@ -414,7 +430,9 @@ fn upstream_success_records_ok_not_failure() {
         None,
     )
     .unwrap();
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
     rt.block_on(agg.flush_now());
     let health = {
         let s = store.lock().unwrap();

@@ -4,7 +4,7 @@
 # 服务器端云端部署: bash /data/company/cloud/cloud.sh en (已就位, 不在此脚本范围)
 #
 # 此脚本流程:
-# 1. 检查环境 (Rust toolchain / Ollama / poppler-utils / 网络)
+# 1. 检查环境 (Rust toolchain / edge scheduler or cloud LLM / poppler-utils / 网络)
 # 2. cargo build attune-server-headless + attune-cli (release)
 # 3. 装 systemd 用户服务 (可选: --systemd)
 # 4. 引导 attune setup (vault 初始化)
@@ -67,7 +67,11 @@ error() { echo -e "\033[31m[ERR ]\033[0m $*"; exit 1; }
 step "环境检查"
 command -v cargo >/dev/null || error "Rust toolchain 缺失. 装: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 command -v pdftoppm >/dev/null || warn "poppler-utils 缺失 (OCR 不可用). Ubuntu: sudo apt install poppler-utils"
-command -v ollama >/dev/null || warn "ollama 缺失 (本地 LLM 不可用). 装: curl -fsSL https://ollama.com/install.sh | sh"
+if [ -n "${ATTUNE_EDGE_SCHEDULER_URL:-${ATTUNE_LOCAL_SCHEDULER_BASE:-}}" ]; then
+  info "edge scheduler: ${ATTUNE_EDGE_SCHEDULER_URL:-${ATTUNE_LOCAL_SCHEDULER_BASE:-}}"
+else
+  warn "未配置 edge scheduler；本地 AI worker 由 scheduler 或自管 OpenAI-compatible 服务提供，云端 LLM 可在 wizard 中配置"
+fi
 info "Rust: $(rustc --version)"
 
 step "构建二进制"
@@ -79,6 +83,9 @@ if [ "$SKIP_BUILD" = false ]; then
 fi
 cp "$ATTUNE_ROOT/rust/target/release/attune" "$INSTALL_PREFIX/bin/attune"
 cp "$ATTUNE_ROOT/rust/target/release/attune-server-headless" "$INSTALL_PREFIX/bin/attune-server-headless"
+find "$ATTUNE_ROOT/rust/target/release" -maxdepth 1 -type f \
+  \( -name 'libsherpa-onnx-c-api.so*' -o -name 'libsherpa-onnx-c-api.dylib*' -o -name 'sherpa-onnx-c-api.dll' \) \
+  -exec cp {} "$INSTALL_PREFIX/bin/" \;
 info "✓ binaries installed to $INSTALL_PREFIX/bin/"
 info "  注意: 把 $INSTALL_PREFIX/bin 加入 PATH 如果没加"
 
@@ -117,6 +124,7 @@ ExecStart=$INSTALL_PREFIX/bin/attune-server-headless --host 127.0.0.1 --port 189
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=LD_LIBRARY_PATH=$INSTALL_PREFIX/bin
 
 [Install]
 WantedBy=default.target

@@ -1,0 +1,12 @@
+id: 07-reindex-recall
+description: 换 embedding 模型 (dim4→dim8) → reindex → stale=0 + 老记忆召回恢复
+reindex:
+  from_dim: 4
+  to_dim: 8
+  memories:
+    - { hash: r1, summary: graph traversal breadth first search, model: embed-dim4 }
+    - { hash: r2, summary: dynamic programming memoization tables, model: embed-dim4 }
+  recall_query: breadth first search
+  recall_min_hits: 1
+expected:
+  stale_after_reindex: 0

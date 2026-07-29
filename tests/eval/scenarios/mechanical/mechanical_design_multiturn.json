@@ -1,0 +1,35 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "mechanical_design_multiturn",
+  "domain": "mechanical",
+  "scenario_type": "multiturn",
+  "difficulty": "hard",
+  "corpus_id": "mechanical_design_handbook",
+  "turns": [
+    {
+      "turn_id": "initial_gear_transmission",
+      "message": "只基于机械设计手册，说明齿轮传动设计资料应该如何检索，并引用卷册来源。",
+      "answer_mode": "grounded_retrieval_path",
+      "requires_citations": true,
+      "expected_sources": ["mechanical_design_volume_3"],
+      "must_include": ["机械设计手册", "齿轮", "传动", "引用"],
+      "must_not_include": ["Airbus", "Boeing", "飞行", "工程签核结论"],
+      "latency_budget_ms": 60000
+    },
+    {
+      "turn_id": "source_continuity_followup",
+      "message": "继续基于上一轮引用的机械设计手册卷册，说明齿轮传动资料应继续关注哪些检索词或章节，不要切换到航空手册。",
+      "answer_mode": "source_continuity",
+      "requires_citations": true,
+      "expected_sources": ["mechanical_design_volume_3"],
+      "must_include": ["机械设计手册", "来源", "齿轮", "传动"],
+      "must_not_include": ["A320", "QRH", "FCOM", "Airbus", "Boeing"],
+      "latency_budget_ms": 60000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

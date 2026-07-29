@@ -7,11 +7,35 @@ use super::*;
 use crate::agents::flow::{run_flow, FlowSet, Payload};
 use crate::agents::registry::AgentRegistry;
 use crate::agents::scheduler::{Entitlement, Scheduler};
-use crate::llm::{LlmCallOptions, MockLlmProvider};
+use crate::llm::{LlmCallOptions, LlmProvider, MockLlmProvider};
 use crate::store::Store;
 use crate::usage::UsageAggregator;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+struct LocalTestProvider(MockLlmProvider);
+
+impl LlmProvider for LocalTestProvider {
+    fn chat(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> crate::error::Result<(String, crate::usage::TokenUsage)> {
+        self.0.chat(system, user)
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn model_name(&self) -> &str {
+        self.0.model_name()
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+}
 
 /// A registry with one LLM extractor → one deterministic damages agent (the
 /// defamation dedupe shape: extractor leads, det calc follows).
@@ -99,7 +123,9 @@ steps = ["extractor", "damages"]
     // ACP-3: the LLM step recorded a usage event tagged with the agent id.
     let events = usage.recent(16);
     assert!(
-        events.iter().any(|e| e.agent_id.as_deref() == Some("extractor")),
+        events
+            .iter()
+            .any(|e| e.agent_id.as_deref() == Some("extractor")),
         "extractor LLM call must record telemetry; got {events:?}"
     );
 }
@@ -122,9 +148,8 @@ on_step_fail = "partial"
     // Mock with NO pushed response → the extractor LLM call errors. The flow must
     // degrade (partial), never cascade-panic.
     let provider = MockLlmProvider::new("qwen2.5:3b");
-    let mut dispatch = |_a: &crate::agents::registry::AgentSpec, _i: &Payload| {
-        Ok(serde_json::json!({}))
-    };
+    let mut dispatch =
+        |_a: &crate::agents::registry::AgentSpec, _i: &Payload| Ok(serde_json::json!({}));
     let mut runner = GovernedStepRunner::new(
         &provider,
         None,
@@ -159,9 +184,8 @@ steps = ["damages"]
     .unwrap();
     let flow = flows.get("f").unwrap();
     let provider = MockLlmProvider::new("qwen2.5:3b");
-    let mut dispatch = |_a: &crate::agents::registry::AgentSpec, _i: &Payload| {
-        Err("binary crashed".to_string())
-    };
+    let mut dispatch =
+        |_a: &crate::agents::registry::AgentSpec, _i: &Payload| Err("binary crashed".to_string());
     let mut runner = GovernedStepRunner::new(
         &provider,
         None,
@@ -181,4 +205,60 @@ steps = ["damages"]
     );
     // Single non-optional deterministic step failed → partial (default), no panic.
     assert!(result.is_partial() || !result.is_complete());
+}
+
+#[test]
+fn governed_runner_never_ignores_local_cloud_schedule_boundary() {
+    let reg = defamation_chain_registry();
+    let agent = reg.get("extractor").unwrap();
+    let input = Payload::new("RawCaseText", serde_json::json!({"text": "case"}));
+
+    let cloud = MockLlmProvider::new("cloud-model");
+    cloud.push_response("{}");
+    let mut dispatch =
+        |_a: &crate::agents::registry::AgentSpec, _i: &Payload| Ok(serde_json::json!({}));
+    let mut cloud_runner = GovernedStepRunner::new(
+        &cloud,
+        None,
+        None,
+        LlmCallOptions::default(),
+        None,
+        &mut dispatch,
+    );
+    let err = cloud_runner
+        .run(
+            agent,
+            &ScheduleDecision::Local {
+                model: Some("qwen2.5:3b".into()),
+                degraded_from_cloud: true,
+            },
+            &input,
+        )
+        .unwrap_err();
+    assert!(err.message.contains("does not match"));
+    assert!(
+        cloud.call_log().is_empty(),
+        "cloud provider must not be called"
+    );
+
+    let local = LocalTestProvider(MockLlmProvider::new("local-model"));
+    local.0.push_response("{}");
+    let mut dispatch =
+        |_a: &crate::agents::registry::AgentSpec, _i: &Payload| Ok(serde_json::json!({}));
+    let mut local_runner = GovernedStepRunner::new(
+        &local,
+        None,
+        None,
+        LlmCallOptions::default(),
+        None,
+        &mut dispatch,
+    );
+    let err = local_runner
+        .run(agent, &ScheduleDecision::Cloud, &input)
+        .unwrap_err();
+    assert!(err.message.contains("does not match"));
+    assert!(
+        local.0.call_log().is_empty(),
+        "local provider must not be called"
+    );
 }

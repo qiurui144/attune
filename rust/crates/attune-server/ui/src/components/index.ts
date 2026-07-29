@@ -13,11 +13,17 @@ export type { InputProps } from './Input';
 export { Modal } from './Modal';
 export type { ModalProps } from './Modal';
 
+export { ConfirmModal, useConfirm, confirmDialog, ConfirmHost } from './ConfirmModal';
+export type { ConfirmModalProps, ConfirmOptions, UseConfirmResult } from './ConfirmModal';
+
 export { Drawer } from './Drawer';
 export type { DrawerProps } from './Drawer';
 
 export { ToastContainer, toast, dismissToast } from './Toast';
 export type { ToastKind, ToastItem } from './Toast';
+
+export { ExportButton } from './ExportButton';
+export type { ExportButtonProps } from './ExportButton';
 
 export { Skeleton } from './Skeleton';
 export type { SkeletonProps } from './Skeleton';
@@ -47,3 +53,7 @@ export type {
 
 export { PluginForm } from './PluginForm';
 export type { PluginFormProps } from './PluginForm';
+
+export { SuggestionsPanel } from './SuggestionsPanel';
+export { AccountsPanel } from './AccountsPanel';
+export { BrowserLoginPanel } from './BrowserLoginPanel';

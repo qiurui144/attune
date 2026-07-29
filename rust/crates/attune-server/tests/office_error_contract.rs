@@ -22,6 +22,12 @@ async fn wait_for_server(base: &str) {
 }
 
 async fn start_test_server() -> String {
+    // 这是错误码契约测试,不验证模型下载。vault/setup → init_search_engines 会同步
+    // ensure_models 拉 330MB embedding+reranker ONNX;在 CN(hf-mirror 已死)或离线 CI
+    // 上该阻塞下载无超时 → 测试永久 hang。设 HF_HUB_OFFLINE=1 让任何 ensure_models
+    // 立即返回 Err → embedding/reranker graceful degrade(回退 Ollama/cosine),不下载。
+    std::env::set_var("HF_HUB_OFFLINE", "1");
+
     let tmp = tempfile::TempDir::new().expect("tmp");
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
@@ -29,6 +35,9 @@ async fn start_test_server() -> String {
 
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open vault");
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
+    // office 路由需 durable job store(否则 unknown-job 返 503 而非 not-found);生产 boot
+    // 时安装,测试需显式补(同 office_concurrent_test)。
+    state.install_job_store();
     let router = attune_server::build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -79,7 +88,9 @@ async fn assert_error_envelope(resp: reqwest::Response, expected_status: u16, ex
     );
     // kebab-string sanity: lowercase + hyphens + no underscores/spaces
     assert!(
-        code_str.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+        code_str
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
         "code '{code_str}' is not kebab-case (lowercase + digits + hyphens only)"
     );
     assert!(
@@ -272,6 +283,9 @@ async fn all_error_codes_are_strict_kebab_case() {
             !code.contains('_') && !code.contains(' '),
             "code '{code}' contains forbidden char"
         );
-        assert!(!code.starts_with('-') && !code.ends_with('-'), "code '{code}' bad hyphen");
+        assert!(
+            !code.starts_with('-') && !code.ends_with('-'),
+            "code '{code}' bad hyphen"
+        );
     }
 }

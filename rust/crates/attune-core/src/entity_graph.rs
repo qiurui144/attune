@@ -56,12 +56,15 @@ impl EntityGraph {
 
     /// 加节点；若同 id 已存在，合并 item_ids（去重）。
     pub fn add_node(&mut self, node: EntityNode) {
-        let entry = self.nodes.entry(node.id.clone()).or_insert_with(|| EntityNode {
-            id: node.id.clone(),
-            kind: node.kind.clone(),
-            name: node.name.clone(),
-            item_ids: Vec::new(),
-        });
+        let entry = self
+            .nodes
+            .entry(node.id.clone())
+            .or_insert_with(|| EntityNode {
+                id: node.id.clone(),
+                kind: node.kind.clone(),
+                name: node.name.clone(),
+                item_ids: Vec::new(),
+            });
         for iid in &node.item_ids {
             if !entry.item_ids.contains(iid) {
                 entry.item_ids.push(iid.clone());
@@ -261,15 +264,24 @@ mod tests {
         let items = vec![
             (
                 "item1".to_string(),
-                vec![mk(EntityKind::Person, "张三", 0, 6), mk(EntityKind::Organization, "ACME 公司", 7, 17)],
+                vec![
+                    mk(EntityKind::Person, "张三", 0, 6),
+                    mk(EntityKind::Organization, "ACME 公司", 7, 17),
+                ],
             ),
             (
                 "item2".to_string(),
-                vec![mk(EntityKind::Person, "张三", 0, 6), mk(EntityKind::Person, "李四", 8, 14)],
+                vec![
+                    mk(EntityKind::Person, "张三", 0, 6),
+                    mk(EntityKind::Person, "李四", 8, 14),
+                ],
             ),
             (
                 "item3".to_string(),
-                vec![mk(EntityKind::Person, "李四", 0, 6), mk(EntityKind::Organization, "ACME 公司", 7, 17)],
+                vec![
+                    mk(EntityKind::Person, "李四", 0, 6),
+                    mk(EntityKind::Organization, "ACME 公司", 7, 17),
+                ],
             ),
         ];
 

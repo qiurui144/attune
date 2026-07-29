@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attune.eval.report.v1",
+  "title": "Attune Eval Report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "suite_id",
+    "run_id",
+    "target",
+    "summary",
+    "metrics",
+    "failures",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "attune.eval.report.v1"
+    },
+    "suite_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "target": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object",
+      "required": ["pass", "cases", "failures", "terminal_error_rate"]
+    },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "retrieval",
+        "citation",
+        "answer",
+        "summary",
+        "multiturn",
+        "performance",
+        "stability"
+      ],
+      "properties": {
+        "retrieval": {
+          "type": "object"
+        },
+        "citation": {
+          "type": "object"
+        },
+        "answer": {
+          "type": "object"
+        },
+        "summary": {
+          "type": "object"
+        },
+        "multiturn": {
+          "type": "object"
+        },
+        "performance": {
+          "type": "object"
+        },
+        "stability": {
+          "type": "object"
+        },
+        "frontend": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "failures": {
+      "type": "array"
+    },
+    "artifacts": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

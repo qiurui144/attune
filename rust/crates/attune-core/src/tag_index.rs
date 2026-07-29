@@ -57,7 +57,8 @@ impl TagIndex {
         }
 
         for pair in &pairs {
-            self.forward.entry(pair.clone())
+            self.forward
+                .entry(pair.clone())
                 .or_default()
                 .insert(item_id.to_string());
         }
@@ -119,7 +120,8 @@ impl TagIndex {
 
     /// 某维度的所有值 + count 直方图
     pub fn histogram(&self, dimension: &str) -> Vec<(String, usize)> {
-        let mut counts: Vec<(String, usize)> = self.forward
+        let mut counts: Vec<(String, usize)> = self
+            .forward
             .iter()
             .filter(|((dim, _), _)| dim == dimension)
             .map(|((_, val), set)| (val.clone(), set.len()))
@@ -187,7 +189,10 @@ mod tests {
         idx.upsert("b", &sample_tags("技术", "Python"));
         idx.upsert("c", &sample_tags("法律", "Rust"));
 
-        let filters = vec![("domain".into(), "技术".into()), ("topic".into(), "Rust".into())];
+        let filters = vec![
+            ("domain".into(), "技术".into()),
+            ("topic".into(), "Rust".into()),
+        ];
         let results = idx.query_and(&filters);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "a");
@@ -199,7 +204,10 @@ mod tests {
         idx.upsert("a", &sample_tags("技术", "Rust"));
         idx.upsert("b", &sample_tags("法律", "合同"));
 
-        let filters = vec![("domain".into(), "技术".into()), ("domain".into(), "法律".into())];
+        let filters = vec![
+            ("domain".into(), "技术".into()),
+            ("domain".into(), "法律".into()),
+        ];
         let mut results = idx.query_or(&filters);
         results.sort();
         assert_eq!(results, vec!["a".to_string(), "b".to_string()]);

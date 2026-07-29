@@ -14,6 +14,7 @@ import { useSignal } from '@preact/signals';
 import { Button, EmptyState, Modal, PluginForm, toast } from '../components';
 import { api } from '../store/api';
 import { t } from '../i18n';
+import { OrganizeWizard } from './OrganizeWizard';
 
 // ── 类型（与后端 routes/projects.rs ProjectListResponse 等对齐） ─────────────
 interface Project {
@@ -95,6 +96,18 @@ function matchedForms(plugins: PluginInfo[], kind: string): FormRef[] {
   return out;
 }
 
+function projectKindOptions(plugins: PluginInfo[]): string[] {
+  const kinds = new Set(['generic', 'collection', 'case', 'paper']);
+  for (const p of plugins) {
+    for (const agent of p.agents ?? []) {
+      for (const kind of agent.case_kinds ?? []) {
+        if (kind.trim()) kinds.add(kind.trim());
+      }
+    }
+  }
+  return [...kinds].sort((a, b) => a.localeCompare(b));
+}
+
 // ── 主视图 ──────────────────────────────────────────────────────────────────
 export function ProjectsView(): JSX.Element {
   const projects = useSignal<Project[]>([]);
@@ -104,11 +117,14 @@ export function ProjectsView(): JSX.Element {
   const newTitle = useSignal('');
   const newKind = useSignal('generic');
   const selectedId = useSignal<string | null>(null);
+  const creating = useSignal(false); // 并发防护：创建进行中禁用确认按钮，防快速双击多次 POST
   const files = useSignal<ProjectFile[]>([]);
   const timeline = useSignal<TimelineEntry[]>([]);
   const plugins = useSignal<PluginInfo[]>([]);
   // 当前打开的 plugin 表单（modal）
   const openForm = useSignal<FormRef | null>(null);
+  // 文件夹一键整理 wizard (Task 10)
+  const showOrganize = useSignal(false);
 
   const reload = async (): Promise<void> => {
     loading.value = true;
@@ -137,12 +153,14 @@ export function ProjectsView(): JSX.Element {
   }, []);
 
   const onCreate = async (): Promise<void> => {
+    if (creating.value) return; // 已有创建请求在飞，忽略重复点击
     const title = newTitle.value.trim();
     const kind = newKind.value.trim() || 'generic';
     if (!title) {
       toast('error', t('projects.toast.title_required'));
       return;
     }
+    creating.value = true;
     try {
       await api.post('/projects', { title, kind });
       newTitle.value = '';
@@ -154,6 +172,8 @@ export function ProjectsView(): JSX.Element {
       const msg = e instanceof Error ? e.message : String(e);
       error.value = msg;
       toast('error', t('projects.toast.create_failed', { message: msg }));
+    } finally {
+      creating.value = false;
     }
   };
 
@@ -187,6 +207,7 @@ export function ProjectsView(): JSX.Element {
       >
         <ProjectsHeader
           onCreate={() => (showCreate.value = true)}
+          onOrganize={() => (showOrganize.value = true)}
           onReload={() => void reload()}
           loading={loading.value}
         />
@@ -206,10 +227,17 @@ export function ProjectsView(): JSX.Element {
           <CreateProjectModal
             title={newTitle}
             kind={newKind}
+            plugins={plugins.value}
+            busy={creating.value}
             onCancel={() => (showCreate.value = false)}
             onConfirm={() => void onCreate()}
           />
         )}
+        <OrganizeWizard
+          open={showOrganize.value}
+          onClose={() => (showOrganize.value = false)}
+          onDone={() => void reload()}
+        />
       </div>
     );
   }
@@ -229,6 +257,7 @@ export function ProjectsView(): JSX.Element {
     >
       <ProjectsHeader
         onCreate={() => (showCreate.value = true)}
+        onOrganize={() => (showOrganize.value = true)}
         onReload={() => void reload()}
         loading={loading.value}
       />
@@ -307,6 +336,8 @@ export function ProjectsView(): JSX.Element {
         <CreateProjectModal
           title={newTitle}
           kind={newKind}
+          plugins={plugins.value}
+          busy={creating.value}
           onCancel={() => (showCreate.value = false)}
           onConfirm={() => void onCreate()}
         />
@@ -321,6 +352,12 @@ export function ProjectsView(): JSX.Element {
           />
         </Modal>
       )}
+
+      <OrganizeWizard
+        open={showOrganize.value}
+        onClose={() => (showOrganize.value = false)}
+        onDone={() => void reload()}
+      />
     </div>
   );
 }
@@ -329,10 +366,12 @@ export function ProjectsView(): JSX.Element {
 
 function ProjectsHeader({
   onCreate,
+  onOrganize,
   onReload,
   loading,
 }: {
   onCreate: () => void;
+  onOrganize: () => void;
   onReload: () => void;
   loading: boolean;
 }): JSX.Element {
@@ -350,6 +389,9 @@ function ProjectsHeader({
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
         <Button variant="primary" size="sm" onClick={onCreate}>
           {t('projects.create')}
+        </Button>
+        <Button variant="secondary" size="sm" onClick={onOrganize}>
+          {t('organize.entry')}
         </Button>
         <Button variant="secondary" size="sm" onClick={onReload} disabled={loading}>
           {loading ? t('common.loading') : t('items.refresh')}
@@ -600,14 +642,20 @@ function ProjectDetail({
 function CreateProjectModal({
   title,
   kind,
+  plugins,
+  busy,
   onCancel,
   onConfirm,
 }: {
   title: { value: string };
   kind: { value: string };
+  plugins: PluginInfo[];
+  busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }): JSX.Element {
+  const kindOptions = projectKindOptions(plugins);
+  const selectedKind = kindOptions.includes(kind.value) ? kind.value : '';
   return (
     <Modal open onClose={onCancel} title={t('projects.create.modal_title')}>
       <div
@@ -631,6 +679,19 @@ function CreateProjectModal({
         </label>
         <label style={labelStyle}>
           <span>{t('projects.field.kind')}</span>
+          <select
+            value={selectedKind}
+            onChange={(e) => {
+              const value = (e.currentTarget as HTMLSelectElement).value;
+              if (value) kind.value = value;
+            }}
+            style={inputStyle}
+          >
+            {kindOptions.map((option) => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+            <option value="">{t('projects.field.kind_custom')}</option>
+          </select>
           <input
             type="text"
             value={kind.value}
@@ -647,11 +708,11 @@ function CreateProjectModal({
             marginTop: 'var(--space-2)',
           }}
         >
-          <Button variant="secondary" size="sm" onClick={onCancel}>
+          <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" size="sm" onClick={onConfirm}>
-            {t('projects.empty.action')}
+          <Button variant="primary" size="sm" onClick={onConfirm} disabled={busy}>
+            {busy ? t('common.loading') : t('projects.empty.action')}
           </Button>
         </div>
       </div>

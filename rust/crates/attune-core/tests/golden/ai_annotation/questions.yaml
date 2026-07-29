@@ -1,0 +1,93 @@
+# Holdout corpus for ai_annotation_questions — human-authored GT.
+# Targets are the spans that genuinely invite a follow-up question / doubt:
+# unsupported assertions, ambiguous quantities, undefined terms, missing premises.
+# A faithful 🤔疑点 annotation attaches a question to these spans.
+# Precision controls: a fully specified, unambiguous note where there is nothing
+# legitimate to question.
+angle: questions
+cases:
+  - id: q-01-unsupported-claim
+    text: |
+      新版本上线后性能提升了 300%，用户满意度也大幅提高。报告没有给出测试环境、负载条件或对照基线。
+    targets:
+      - "性能提升了 300%"
+      - "没有给出测试环境、负载条件或对照基线"
+
+  - id: q-02-ambiguous-quantity
+    text: |
+      系统需要支持"大量"并发用户，响应要"足够快"。具体的并发数和延迟指标尚未确定。
+    targets:
+      - "支持\"大量\"并发用户"
+      - "响应要\"足够快\""
+
+  - id: q-03-undefined-term
+    text: |
+      方案采用先进的智能算法自动优化资源分配，但文档没有说明这个算法的原理或它优化的目标函数是什么。
+    targets:
+      - "先进的智能算法"
+      - "没有说明这个算法的原理"
+
+  - id: q-04-missing-premise
+    text: |
+      结论是应该立刻迁移到微服务架构，但没有说明当前单体架构遇到了什么具体瓶颈，也没有评估迁移成本。
+    targets:
+      - "立刻迁移到微服务架构"
+      - "没有说明当前单体架构遇到了什么具体瓶颈"
+
+  - id: q-05-overgeneralization
+    text: |
+      笔记写道所有的缓存问题都可以通过加大内存解决，这个说法过于绝对，没有区分缓存穿透、击穿和雪崩等不同场景。
+    targets:
+      - "所有的缓存问题都可以通过加大内存解决"
+
+  - id: q-06-no-source
+    text: |
+      据说这种饮食方式能显著降低患病风险，但没有引用任何研究来源或样本规模。
+    targets:
+      - "能显著降低患病风险"
+      - "没有引用任何研究来源或样本规模"
+
+  - id: q-07-vague-timeline
+    text: |
+      团队计划"尽快"完成重构并"近期"发布，但没有给出明确的里程碑或截止日期。
+    targets:
+      - "没有给出明确的里程碑或截止日期"
+
+  - id: q-08-conflated-cause
+    text: |
+      销量下降是因为竞品降价，所以我们也应该降价。这里把单一原因当成全部，没有考虑产品质量、渠道或季节因素。
+    targets:
+      - "销量下降是因为竞品降价"
+      - "没有考虑产品质量、渠道或季节因素"
+
+  - id: q-09-untested-assumption
+    text: |
+      方案假设用户都会主动开启新功能，因此没有设计任何引导流程。这个假设是否经过验证存疑。
+    targets:
+      - "假设用户都会主动开启新功能"
+      - "这个假设是否经过验证存疑"
+
+  - id: q-10-missing-edge-case
+    text: |
+      算法在正常数据上表现良好，但文档完全没有提到空输入、超长输入或并发访问时的行为。
+    targets:
+      - "完全没有提到空输入、超长输入或并发访问时的行为"
+
+  - id: q-11-circular-reasoning
+    text: |
+      我们的产品是最好的，因为它质量最高；而质量最高是因为它是最好的产品。这段论证存在循环论证。
+    targets:
+      - "存在循环论证"
+
+  # ── precision controls: fully specified, nothing to question ──
+  - id: q-12-benign-empty
+    text: |
+      水在标准大气压下的沸点是一百摄氏度，冰点是零摄氏度。这两个数值是温标的基准参考点。
+    targets: []
+    expect_empty: true
+
+  - id: q-13-benign-empty
+    text: |
+      一周有七天，分别是周一到周日。一年有十二个月，平年三百六十五天，闰年三百六十六天。
+    targets: []
+    expect_empty: true

@@ -50,14 +50,13 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
 
     // ─── phone ──────────────────────────────────────────────────────────
     // 中国手机号: 1[3-9]\d{9}; 带分隔符的座机: \d{3,4}[-\s]?\d{7,8}
-    let phone_re = regex::Regex::new(
-        r"(?:\+?86[- ]?)?(1[3-9]\d{9})|(\d{3,4})[-\s]?(\d{7,8})",
-    )
-    .unwrap();
+    let phone_re =
+        regex::Regex::new(r"(?:\+?86[- ]?)?(1[3-9]\d{9})|(\d{3,4})[-\s]?(\d{7,8})").unwrap();
     for (i, l) in lines.iter().enumerate() {
         if let Some(cap) = phone_re.captures(&l.text) {
             // 取最长的 capture group
-            let raw = cap.iter()
+            let raw = cap
+                .iter()
                 .skip(1)
                 .flatten()
                 .map(|m| m.as_str().to_string())
@@ -76,10 +75,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
     }
 
     // ─── email ──────────────────────────────────────────────────────────
-    let email_re = regex::Regex::new(
-        r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
-    )
-    .unwrap();
+    let email_re = regex::Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}").unwrap();
     for (i, l) in lines.iter().enumerate() {
         if let Some(m) = email_re.find(&l.text) {
             fields.email =
@@ -94,10 +90,34 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
 
     // ─── job_title ──────────────────────────────────────────────────────
     let title_keywords = [
-        "CEO", "CTO", "CFO", "COO", "CMO", "CIO", "VP", "President",
-        "Director", "Manager", "Engineer", "Architect", "Lead", "Head",
-        "总裁", "总经理", "总监", "经理", "主任", "主管", "组长",
-        "工程师", "架构师", "顾问", "副总", "副总裁", "副总经理", "董事长",
+        "CEO",
+        "CTO",
+        "CFO",
+        "COO",
+        "CMO",
+        "CIO",
+        "VP",
+        "President",
+        "Director",
+        "Manager",
+        "Engineer",
+        "Architect",
+        "Lead",
+        "Head",
+        "总裁",
+        "总经理",
+        "总监",
+        "经理",
+        "主任",
+        "主管",
+        "组长",
+        "工程师",
+        "架构师",
+        "顾问",
+        "副总",
+        "副总裁",
+        "副总经理",
+        "董事长",
     ];
     for (i, l) in lines.iter().enumerate() {
         if consumed.contains(&i) {
@@ -120,9 +140,25 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
 
     // ─── company ────────────────────────────────────────────────────────
     let company_keywords = [
-        "有限公司", "股份有限公司", "集团", "Ltd", "Ltd.", "Inc", "Inc.",
-        "Corp", "Corporation", "LLC", "GmbH", "Co.", "Company",
-        "科技", "信息", "咨询", "网络", "贸易", "实业",
+        "有限公司",
+        "股份有限公司",
+        "集团",
+        "Ltd",
+        "Ltd.",
+        "Inc",
+        "Inc.",
+        "Corp",
+        "Corporation",
+        "LLC",
+        "GmbH",
+        "Co.",
+        "Company",
+        "科技",
+        "信息",
+        "咨询",
+        "网络",
+        "贸易",
+        "实业",
     ];
     let mut best_company: Option<(usize, f32)> = None;
     for (i, l) in lines.iter().enumerate() {
@@ -151,8 +187,8 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
 
     // ─── address ────────────────────────────────────────────────────────
     let address_keywords = [
-        "路", "街", "号", "室", "楼", "栋", "区", "市", "省", "县", "镇", "村",
-        "Road", "Street", "Floor", "Suite", "Avenue", "Lane",
+        "路", "街", "号", "室", "楼", "栋", "区", "市", "省", "县", "镇", "村", "Road", "Street",
+        "Floor", "Suite", "Avenue", "Lane",
     ];
     for (i, l) in lines.iter().enumerate() {
         if consumed.contains(&i) {
@@ -235,7 +271,11 @@ mod tests {
 
     #[test]
     fn empty_returns_all_unrecognized() {
-        let StructuredFields::CardV1 { unrecognized_fields, .. } = extract(&[]) else {
+        let StructuredFields::CardV1 {
+            unrecognized_fields,
+            ..
+        } = extract(&[])
+        else {
             unreachable!()
         };
         assert_eq!(unrecognized_fields.len(), 6);
@@ -244,31 +284,36 @@ mod tests {
     #[test]
     fn extracts_phone_mobile() {
         let lines = vec![rl("电话: 13800138000", 0, 0, 30)];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.phone.value.as_deref(), Some("13800138000"));
     }
 
     #[test]
     fn extracts_phone_with_intl_prefix() {
         let lines = vec![rl("Tel: +86 13912345678", 0, 0, 30)];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.phone.value.as_deref(), Some("13912345678"));
     }
 
     #[test]
     fn extracts_email() {
         let lines = vec![rl("alice@example.com", 0, 0, 30)];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.email.value.as_deref(), Some("alice@example.com"));
     }
 
     #[test]
     fn extracts_job_title_chinese() {
-        let lines = vec![
-            rl("张三", 50, 10, 40),
-            rl("技术总监", 50, 50, 25),
-        ];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let lines = vec![rl("张三", 50, 10, 40), rl("技术总监", 50, 50, 25)];
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.job_title.value.as_deref(), Some("技术总监"));
     }
 
@@ -278,21 +323,27 @@ mod tests {
             rl("Alice Wong", 50, 10, 40),
             rl("Senior Engineer", 50, 50, 25),
         ];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.job_title.value.as_deref(), Some("Senior Engineer"));
     }
 
     #[test]
     fn extracts_company() {
         let lines = vec![rl("ABC 科技有限公司", 0, 0, 30)];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.company.value.as_deref(), Some("ABC 科技有限公司"));
     }
 
     #[test]
     fn extracts_address_requires_two_tokens() {
         let lines = vec![rl("北京市朝阳区建国路88号 SOHO 1座 3楼", 0, 0, 25)];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert!(fields.address.value.is_some());
         assert!(fields.address.value.as_ref().unwrap().contains("北京"));
     }
@@ -301,7 +352,12 @@ mod tests {
     fn address_rejects_single_token() {
         // 只含一个 "号" 不算地址 (可能是 "13 号文件")
         let lines = vec![rl("13 号文件", 0, 0, 25)];
-        let StructuredFields::CardV1 { fields, unrecognized_fields, .. } = extract(&lines) else {
+        let StructuredFields::CardV1 {
+            fields,
+            unrecognized_fields,
+            ..
+        } = extract(&lines)
+        else {
             unreachable!()
         };
         assert!(fields.address.value.is_none());
@@ -316,7 +372,9 @@ mod tests {
             rl("销售总监", 50, 70, 25),
             rl("ABC 有限公司", 50, 100, 25),
         ];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.name.value.as_deref(), Some("张三"));
     }
 
@@ -326,7 +384,9 @@ mod tests {
             rl("13800138000", 0, 5, 50), // 大字号但全数字, 应被 phone 吃掉
             rl("张三", 0, 60, 30),
         ];
-        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::CardV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.phone.value.as_deref(), Some("13800138000"));
         assert_eq!(fields.name.value.as_deref(), Some("张三"));
     }
@@ -341,16 +401,28 @@ mod tests {
             rl("+86 13912345678", 50, 160, 22),
             rl("100 Main Road, Suite 200, Beijing", 50, 190, 22),
         ];
-        let StructuredFields::CardV1 { fields, unrecognized_fields, .. } = extract(&lines) else {
+        let StructuredFields::CardV1 {
+            fields,
+            unrecognized_fields,
+            ..
+        } = extract(&lines)
+        else {
             unreachable!()
         };
         assert_eq!(fields.name.value.as_deref(), Some("Alice Wong"));
         assert_eq!(fields.job_title.value.as_deref(), Some("Senior Architect"));
-        assert!(fields.company.value.as_deref().unwrap().contains("ABC Tech Inc"));
+        assert!(fields
+            .company
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("ABC Tech Inc"));
         assert_eq!(fields.email.value.as_deref(), Some("alice@abc.com"));
         assert_eq!(fields.phone.value.as_deref(), Some("13912345678"));
         assert!(fields.address.value.is_some());
-        assert!(unrecognized_fields.is_empty(),
-            "all 6 fields should be recognized; got unrecognized={unrecognized_fields:?}");
+        assert!(
+            unrecognized_fields.is_empty(),
+            "all 6 fields should be recognized; got unrecognized={unrecognized_fields:?}"
+        );
     }
 }

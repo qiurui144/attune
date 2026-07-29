@@ -34,7 +34,11 @@ fn ocr_long_page_tiles_vs_full() {
         let t = std::time::Instant::now();
         match provider.extract_text_from_image(full_path) {
             Ok(text) => {
-                eprintln!("full OCR: {} chars in {:.1}s", text.len(), t.elapsed().as_secs_f64());
+                eprintln!(
+                    "full OCR: {} chars in {:.1}s",
+                    text.len(),
+                    t.elapsed().as_secs_f64()
+                );
                 if text.is_empty() {
                     eprintln!("  ★★★ CONFIRMED BUG: silent 0 chars on long page ★★★");
                 } else {
@@ -63,7 +67,12 @@ fn ocr_long_page_tiles_vs_full() {
             Ok(text) => {
                 let chars = text.chars().count();
                 total_tile_chars += chars;
-                eprintln!("  tile {}: {} chars in {:.1}s", i, chars, t.elapsed().as_secs_f64());
+                eprintln!(
+                    "  tile {}: {} chars in {:.1}s",
+                    i,
+                    chars,
+                    t.elapsed().as_secs_f64()
+                );
                 // save raw OCR text per tile for manual CER comparison
                 let out = format!("{}/tile-{}.txt", out_dir, i);
                 std::fs::write(&out, &text).ok();

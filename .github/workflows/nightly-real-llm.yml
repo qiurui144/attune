@@ -3,9 +3,22 @@ name: nightly-real-llm
 # ACP-2 orphan fix (B audit finding #3): oss_agent_real_llm_gate.rs was written
 # but absent from every attune workflow — the mock-0.99/real-0.09 class of bug
 # (per the law-pro defamation incident) could re-enter undetected for the OSS
-# memory_consolidation / self_evolving_skill agents. This workflow runs the two
+# memory_consolidation / self_evolving_skill agents. This workflow runs the OSS
 # #[ignore] real-LLM gates on a schedule against a REAL model, mirroring
 # attune-pro/.github/workflows/nightly-real-llm.yml.
+#
+# 2026-06-16 (W4 continuous-testing): doc_intel_real_llm_gate.rs joined this lane.
+# It is the OSS document-intelligence plugin's real-LLM gate (compare / deep_summary
+# / chapters). Its #[ignore] tests previously ran on no lane (the binary only
+# compiled in rust-test-core/HALF_A) — the identical orphan class, with the extra
+# risk that RELEASE v1.3.0 §9.2 claimed "deepseek 实测三 tier 全过 floor" with no
+# scheduled test substantiating it.
+#
+# 2026-06-19 (writing-engine W3-W6): writing_real_llm_gate.rs joined this lane —
+# the OSS writing engine's real-LLM gate (draft / rewrite / synthesis). It was the
+# same orphan class: the gate binary existed but ran on no scheduled lane, so its
+# grounding-precision / fact-consistency / fact-preservation floors had no nightly
+# substantiation (generation's defining risk is hallucination — spec §11 A).
 #
 # spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §9
 #       ("ACP-2 把 OSS real-LLM gate 接入 nightly CI（当前孤儿）")
@@ -75,10 +88,23 @@ jobs:
         working-directory: rust
         run: cargo build -p attune-core --release --tests
 
-      # ── Run the OSS real-LLM gate (the two #[ignore] tests) ──
+      # ── Run the OSS real-LLM gates (the #[ignore] tests) ──
+      # Two attune-core real-LLM binaries share this lane (both are #[ignore], so
+      # they run on NO push/PR — only here):
+      #   oss_agent_real_llm_gate    — memory_consolidation / self_evolving_skill agents
+      #   doc_intel_real_llm_gate    — doc-intelligence (compare / deep_summary / chapters),
+      #                                the OSS document-intelligence plugin's agents. Added
+      #                                2026-06-16: the binary compiles in rust-test-core
+      #                                (HALF_A) but its #[ignore] real-LLM tests ran on no
+      #                                lane — the same mock-0.99/real-0.09 orphan class this
+      #                                workflow exists to close (per the defamation incident
+      #                                + RELEASE v1.3.0 §9.2 "deepseek 实测" claim).
+      # Both use the same provider-agnostic env contract (ATTUNE_LLM_PROVIDER /
+      # ATTUNE_LLM_MODEL / require_llm panics if Ollama unreachable), so the
+      # "Ollama down = acceptable skip" detection below covers both.
       # inputs.model is workflow_dispatch (trusted) but still passed via env: per
       # GitHub Actions injection best practice — no untrusted input in run:.
-      - name: Run OSS real-LLM golden gate
+      - name: Run OSS real-LLM golden gates
         id: gate
         working-directory: rust
         env:
@@ -87,21 +113,26 @@ jobs:
         run: |
           set -o pipefail
           OUTPUT_FILE="$RUNNER_TEMP/oss-real-llm.log"
-          # Run only the two real-LLM gates by name; serial to share warm model.
-          if cargo test -p attune-core --release --test oss_agent_real_llm_gate \
-               -- real_llm --ignored --nocapture --test-threads=1 \
-               2>&1 | tee "$OUTPUT_FILE"; then
-            echo "result=passed" >> "$GITHUB_OUTPUT"
-          else
-            # Distinguish "Ollama down" (acceptable skip) from a real F1/accept drop.
-            if grep -q "Ollama not reachable" "$OUTPUT_FILE"; then
-              echo "result=skipped_no_ollama" >> "$GITHUB_OUTPUT"
-            else
-              echo "result=degraded" >> "$GITHUB_OUTPUT"
+          : > "$OUTPUT_FILE"
+          result=passed
+          # Run each real-LLM gate by name; serial (one binary at a time, single
+          # thread) to share the warm model and bound memory.
+          for t in oss_agent_real_llm_gate doc_intel_real_llm_gate ai_annotation_real_llm_gate monitoring_real_llm_gate writing_real_llm_gate compare_to_table_real_llm_gate; do
+            echo "=== $t ===" | tee -a "$OUTPUT_FILE"
+            if ! cargo test -p attune-core --release --test "$t" \
+                 -- real_llm --ignored --nocapture --test-threads=1 \
+                 2>&1 | tee -a "$OUTPUT_FILE"; then
+              result=degraded
             fi
+          done
+          # A run is an acceptable skip (not a degradation) only if NOTHING
+          # actually executed because the model was unreachable.
+          if [ "$result" = "degraded" ] && grep -qE "Ollama not reachable|not reachable on :11434" "$OUTPUT_FILE"; then
+            result=skipped_no_ollama
           fi
+          echo "result=$result" >> "$GITHUB_OUTPUT"
           # Extract per-agent RESULT lines for the summary / issue body.
-          SUMMARY=$(grep -E "RESULT:|real-LLM gate failed|need ≥ 4" "$OUTPUT_FILE" 2>/dev/null | tail -20 || true)
+          SUMMARY=$(grep -E "===|RESULT:|real-LLM gate failed|need ≥ 4|floor" "$OUTPUT_FILE" 2>/dev/null | tail -40 || true)
           {
             echo "summary<<SUMMARY_EOF"
             echo "$SUMMARY"

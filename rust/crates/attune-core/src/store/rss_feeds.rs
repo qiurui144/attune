@@ -180,8 +180,10 @@ impl Store {
 
     /// 删除一条订阅。entries 已落 `items` 表的不会被回收 —— 与 email 删账户语义一致。
     pub fn delete_rss_feed(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM rss_feeds WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM rss_feeds WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM indexed_files WHERE dir_id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 

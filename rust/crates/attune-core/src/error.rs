@@ -23,6 +23,12 @@ pub enum VaultError {
     #[error("device secret mismatch")]
     DeviceSecretMismatch,
 
+    /// G3① locked-mode staging area is at its hard cap (`STAGING_MAX_PENDING`).
+    /// Inbound documents are rejected with backpressure rather than filling the disk
+    /// of an unattended LOCKED device; the backlog drains on unlock.
+    #[error("staging full: too many pending locked-mode ingests")]
+    StagingFull,
+
     #[error("session expired")]
     SessionExpired,
 
@@ -44,6 +50,14 @@ pub enum VaultError {
     #[error("llm unavailable: {0}")]
     LlmUnavailable(String),
 
+    /// An [`crate::OutboundGate`] refused a network egress (disabled by the
+    /// user / vault locked / L0-tagged content to a cloud destination /
+    /// redactor unavailable). Distinct from `LlmUnavailable` so the server can
+    /// map it to 403 Forbidden (user-policy refusal), not 502/503 (upstream
+    /// failure).
+    #[error("outbound blocked: {0}")]
+    OutboundBlocked(String),
+
     #[error("classification failed: {0}")]
     Classification(String),
 
@@ -61,6 +75,19 @@ pub enum VaultError {
 
     #[error("model load error: {0}")]
     ModelLoad(String),
+
+    /// W1-B (cloud slice8 §5.6): an entitlement's plugin signing key is not in
+    /// the compile-time `OFFICIAL_PLUGIN_ANCHORS` allowlist. Install is refused
+    /// (fail-closed) — defends against a compromised accounts server substituting
+    /// an attacker pubkey. Payload = the off-allowlist signing_pubkey_hex.
+    #[error("anchor not pinned: {0}")]
+    AnchorNotPinned(String),
+
+    /// Cert-pin (cloud slice8 §3.2 / §7.1): the server's TLS leaf SPKI did not
+    /// match any entry in `ACCOUNTS_SPKI_PINS`. Connection is rejected — defends
+    /// against DNS-hijack / network MITM. Payload = the host that was pinned.
+    #[error("pin mismatch: {0}")]
+    PinMismatch(String),
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;
@@ -69,6 +96,14 @@ pub type Result<T> = std::result::Result<T, VaultError>;
 /// 内部 agent 返回 `AgentResult` 时,在 `crate::error::Result` 的 `?` 边界自动转,
 /// 调用方无感。`AgentError` 是 `#[non_exhaustive]`,catch-all arm 兜底未来新增变体
 /// (新增变体应在此显式补 arm —— 兜底仅防编译失败,不是放任不映射)。
+/// An OutboundGate refusal propagates as [`VaultError::OutboundBlocked`] so the
+/// `?` operator works at every egress call site and the server maps it to 403.
+impl From<crate::outbound_gate::OutboundError> for VaultError {
+    fn from(e: crate::outbound_gate::OutboundError) -> Self {
+        VaultError::OutboundBlocked(e.to_string())
+    }
+}
+
 impl From<attune_agent_sdk::AgentError> for VaultError {
     fn from(e: attune_agent_sdk::AgentError) -> Self {
         use attune_agent_sdk::AgentError as A;
@@ -89,8 +124,14 @@ mod tests {
 
     #[test]
     fn error_display_messages() {
-        assert_eq!(VaultError::Sealed.to_string(), "vault is sealed: run setup first");
-        assert_eq!(VaultError::Locked.to_string(), "vault is locked: unlock required");
+        assert_eq!(
+            VaultError::Sealed.to_string(),
+            "vault is sealed: run setup first"
+        );
+        assert_eq!(
+            VaultError::Locked.to_string(),
+            "vault is locked: unlock required"
+        );
         assert_eq!(VaultError::InvalidPassword.to_string(), "invalid password");
         assert_eq!(
             VaultError::DeviceSecretMissing("/path".into()).to_string(),
@@ -101,22 +142,52 @@ mod tests {
     #[test]
     fn error_display_all_static_variants() {
         // 锁定所有无参 variant 的 display 输出 (PR 改文案会破坏前端 error code 映射)
-        assert_eq!(VaultError::AlreadyUnlocked.to_string(), "vault is already unlocked");
-        assert_eq!(VaultError::AlreadyInitialized.to_string(), "vault is already initialized");
-        assert_eq!(VaultError::DeviceSecretMismatch.to_string(), "device secret mismatch");
+        assert_eq!(
+            VaultError::AlreadyUnlocked.to_string(),
+            "vault is already unlocked"
+        );
+        assert_eq!(
+            VaultError::AlreadyInitialized.to_string(),
+            "vault is already initialized"
+        );
+        assert_eq!(
+            VaultError::DeviceSecretMismatch.to_string(),
+            "device secret mismatch"
+        );
         assert_eq!(VaultError::SessionExpired.to_string(), "session expired");
         assert_eq!(VaultError::SessionInvalid.to_string(), "session invalid");
     }
 
     #[test]
     fn error_display_parameterized_variants() {
-        assert_eq!(VaultError::Crypto("decrypt failed".into()).to_string(), "crypto error: decrypt failed");
-        assert_eq!(VaultError::LlmUnavailable("timeout".into()).to_string(), "llm unavailable: timeout");
-        assert_eq!(VaultError::Classification("bad json".into()).to_string(), "classification failed: bad json");
-        assert_eq!(VaultError::Taxonomy("cycle".into()).to_string(), "taxonomy error: cycle");
-        assert_eq!(VaultError::NotFound("item-123".into()).to_string(), "not found: item-123");
-        assert_eq!(VaultError::InvalidInput("empty".into()).to_string(), "invalid input: empty");
-        assert_eq!(VaultError::ModelLoad("size".into()).to_string(), "model load error: size");
+        assert_eq!(
+            VaultError::Crypto("decrypt failed".into()).to_string(),
+            "crypto error: decrypt failed"
+        );
+        assert_eq!(
+            VaultError::LlmUnavailable("timeout".into()).to_string(),
+            "llm unavailable: timeout"
+        );
+        assert_eq!(
+            VaultError::Classification("bad json".into()).to_string(),
+            "classification failed: bad json"
+        );
+        assert_eq!(
+            VaultError::Taxonomy("cycle".into()).to_string(),
+            "taxonomy error: cycle"
+        );
+        assert_eq!(
+            VaultError::NotFound("item-123".into()).to_string(),
+            "not found: item-123"
+        );
+        assert_eq!(
+            VaultError::InvalidInput("empty".into()).to_string(),
+            "invalid input: empty"
+        );
+        assert_eq!(
+            VaultError::ModelLoad("size".into()).to_string(),
+            "model load error: size"
+        );
     }
 
     // From<io::Error> conversion
@@ -152,7 +223,11 @@ mod tests {
     #[test]
     fn result_alias_usable() {
         fn helper(ok: bool) -> Result<i32> {
-            if ok { Ok(42) } else { Err(VaultError::InvalidInput("nope".into())) }
+            if ok {
+                Ok(42)
+            } else {
+                Err(VaultError::InvalidInput("nope".into()))
+            }
         }
         assert_eq!(helper(true).unwrap(), 42);
         assert!(helper(false).is_err());

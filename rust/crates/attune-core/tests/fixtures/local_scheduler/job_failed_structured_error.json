@@ -1,0 +1,19 @@
+{
+  "job_id": "job_failed_structured",
+  "model": "llm-summary",
+  "task": "kb.query.ask",
+  "source": "kb_task",
+  "service_class": "realtime_answer",
+  "scheduled_as": "async",
+  "status": "failed",
+  "phase": "generate",
+  "outputs": {},
+  "latency_ms": 900.0,
+  "queue_wait_ms": 15.0,
+  "startup_state": "hot_resident",
+  "error": {
+    "code": "no_evidence",
+    "message": "no grounded evidence was available for this answer"
+  },
+  "detail": "scheduler_refusal_v1"
+}

@@ -34,11 +34,13 @@ https://feeds.feedburner.com/PaulGrahamEssays
 
 ## 增量同步
 
-Attune 基于 `pubDate` / `updated` 字段判断新文章：
+Attune 对 RSS/Atom 使用两层增量：
 
-- 每 **60 分钟**检查一次（可在 Settings 调整）
-- 已入库的 item 按 URL + content hash 去重，不重复处理
-- Feed 中的旧文章不会被二次入库
+- HTTP 条件请求：保存 ETag / Last-Modified，服务器返回 304 时不解析、不入库。
+- Entry tracking：每条 entry 用 `feed_id#guid` 作为 source-scoped 引用，`guid` 作为 marker；已处理 entry 直接跳过。
+- 内容 hash 是第二道防线：不同 feed 或重复转发的相同正文不会重复创建 item，但 source tracking 仍会落盘，避免下轮反复判断。
+
+默认每 **60 分钟**检查一次（可在 Settings 调整）。删除订阅只停止未来同步并清理该 feed 的增量 tracking；已经入库的知识 item 会保留。
 
 ## 常用 RSS 地址参考
 

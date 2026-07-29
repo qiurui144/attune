@@ -8,10 +8,11 @@
 //! 生命周期 (eager): spawn 后常驻, 每 30s 调 ping, 失败 N 次重启.
 
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -107,18 +108,20 @@ impl McpServer {
     }
 
     fn start_process(&self) -> Result<()> {
-        let mut cmd = Command::new(&self.config.command);
+        let mut cmd = command_no_window(&self.config.command);
         cmd.args(&self.config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(VaultError::Io)?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            VaultError::Io(std::io::Error::other("mcp child stdin unavailable"))
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            VaultError::Io(std::io::Error::other("mcp child stdout unavailable"))
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| VaultError::Io(std::io::Error::other("mcp child stdin unavailable")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| VaultError::Io(std::io::Error::other("mcp child stdout unavailable")))?;
 
         *self.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
         *self.stdin.lock().unwrap_or_else(|e| e.into_inner()) = Some(stdin);
@@ -160,13 +163,15 @@ impl McpServer {
         // id 校验: 响应必须匹配请求 id (即便 transaction 锁住, 仍是额外保险)
         if resp.id != id {
             return Err(VaultError::Io(std::io::Error::other(format!(
-                "mcp response id mismatch: req={id} resp={}", resp.id
+                "mcp response id mismatch: req={id} resp={}",
+                resp.id
             ))));
         }
 
         if let Some(err) = resp.error {
             return Err(VaultError::Io(std::io::Error::other(format!(
-                "mcp error code={}: {}", err.code, err.message
+                "mcp error code={}: {}",
+                err.code, err.message
             ))));
         }
         Ok(resp.result.unwrap_or(serde_json::Value::Null))
@@ -191,12 +196,10 @@ impl McpServer {
                 break; // header 段结束
             }
             if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
-                content_length = Some(
-                    len_str
-                        .trim()
-                        .parse()
-                        .map_err(|e| VaultError::Io(std::io::Error::other(format!("bad cl: {e}"))))?,
-                );
+                content_length =
+                    Some(len_str.trim().parse().map_err(|e| {
+                        VaultError::Io(std::io::Error::other(format!("bad cl: {e}")))
+                    })?);
             }
         }
         let len = content_length.ok_or_else(|| {
@@ -212,7 +215,10 @@ impl McpServer {
         match self.call_tool("ping", serde_json::json!({})) {
             Ok(_) => {
                 *self.failure_count.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-                *self.last_heartbeat.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                *self
+                    .last_heartbeat
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Instant::now();
                 Ok(())
             }
             Err(e) => {
@@ -362,7 +368,8 @@ mod tests {
 
     #[test]
     fn json_rpc_error_response_parses() {
-        let raw = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let raw =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
         let resp: JsonRpcResponse = serde_json::from_str(raw).expect("parse");
         let err = resp.error.expect("has error");
         assert_eq!(err.code, -32601);

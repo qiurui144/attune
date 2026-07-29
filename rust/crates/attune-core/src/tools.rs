@@ -385,7 +385,10 @@ mod tests {
         let spec = &specs[0];
         assert_eq!(spec.get("type").and_then(|v| v.as_str()), Some("function"));
         let func = spec.get("function").unwrap();
-        assert_eq!(func.get("name").and_then(|v| v.as_str()), Some("web_search"));
+        assert_eq!(
+            func.get("name").and_then(|v| v.as_str()),
+            Some("web_search")
+        );
         assert!(func.get("description").is_some());
         assert!(func.get("parameters").is_some());
     }
@@ -401,7 +404,10 @@ mod tests {
     #[tokio::test]
     async fn web_search_tool_invokes_mock_provider() {
         let t = WebSearchTool::new(mock_provider());
-        let out = t.invoke(json!({ "query": "rust async", "limit": 5 })).await.unwrap();
+        let out = t
+            .invoke(json!({ "query": "rust async", "limit": 5 }))
+            .await
+            .unwrap();
         let results = out.get("results").unwrap().as_array().unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(out.get("count").and_then(|v| v.as_u64()), Some(2));
@@ -427,12 +433,19 @@ mod tests {
         let t = FsReadTool::with_root(tmp.path().to_path_buf()).unwrap();
 
         // 绝对路径拒绝
-        let abs = if cfg!(windows) { "C:/etc/passwd" } else { "/etc/passwd" };
+        let abs = if cfg!(windows) {
+            "C:/etc/passwd"
+        } else {
+            "/etc/passwd"
+        };
         assert!(t.invoke(json!({ "path": abs })).await.is_err());
 
         // .. 拒绝
         assert!(t.invoke(json!({ "path": "../escape.txt" })).await.is_err());
-        assert!(t.invoke(json!({ "path": "sub/../../escape.txt" })).await.is_err());
+        assert!(t
+            .invoke(json!({ "path": "sub/../../escape.txt" }))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

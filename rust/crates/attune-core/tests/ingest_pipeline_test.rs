@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 
 use attune_core::crypto::Key32;
-use attune_core::ingest::{ingest_document, ingest_document_replacing, IngestOutcome, RawDocument, SourceKind};
+use attune_core::ingest::{
+    ingest_document, ingest_document_replacing, ingest_document_with_options, IngestOptions,
+    IngestOutcome, RawDocument, SourceKind,
+};
 use attune_core::store::Store;
 
 fn md_doc(source_ref: &str, body: &str) -> RawDocument {
@@ -26,11 +29,17 @@ fn md_doc(source_ref: &str, body: &str) -> RawDocument {
 fn first_ingest_returns_inserted_and_enqueues_two_levels() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let doc = md_doc("/tmp/a.md", "# Title\n\nSome body paragraph here.\n\n# Two\n\nMore body.");
+    let doc = md_doc(
+        "/tmp/a.md",
+        "# Title\n\nSome body paragraph here.\n\n# Two\n\nMore body.",
+    );
 
     let outcome = ingest_document(&store, &dek, &doc).unwrap();
     let item_id = match outcome {
-        IngestOutcome::Inserted { item_id, chunks_enqueued } => {
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => {
             assert!(chunks_enqueued >= 2, "L1 章节 + L2 段落块都应入队");
             item_id
         }
@@ -49,6 +58,139 @@ fn first_ingest_returns_inserted_and_enqueues_two_levels() {
 
     // breadcrumbs sidecar 必须写入。
     assert!(store.chunk_breadcrumb_count(&item_id).unwrap() >= 1);
+}
+
+#[test]
+fn ingest_options_control_chunking_levels_and_size() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let body = format!("# Dense\n\n{}", "x".repeat(450));
+    let doc = md_doc("/tmp/dense.md", &body);
+    let options = IngestOptions::with_profile(None)
+        .with_chunking(attune_core::chunker::ChunkingOptions::new(200, 0).with_levels(false, true));
+
+    let outcome = ingest_document_with_options(&store, &dek, &doc, &options).unwrap();
+    match outcome {
+        IngestOutcome::Inserted {
+            chunks_enqueued, ..
+        } => assert_eq!(chunks_enqueued, 3),
+        other => panic!("expected Inserted, got {other:?}"),
+    }
+    assert_eq!(store.count_embed_queue_by_level(1).unwrap(), 0);
+    assert_eq!(store.count_embed_queue_by_level(2).unwrap(), 3);
+}
+
+#[test]
+fn enqueue_content_embeddings_preserves_generic_structure_metadata() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let content = "\
+Table of Contents
+3.1 open_device ................ 7
+
+3 API Reference
+3.1 open_device
+Prototype: int open_device(void)
+Purpose: initialize the device.
+
+4 Operation Flow
+Step 1 Call open_device().
+start_transfer();
+";
+
+    let doc = md_doc("/tmp/controller-manual.txt", content);
+    let item_id = match ingest_document(&store, &dek, &doc).unwrap() {
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => {
+            assert!(chunks_enqueued >= 3);
+            item_id
+        }
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+
+    let chunks = store.peek_embed_queue_chunk_texts(&item_id).unwrap();
+    assert!(chunks.iter().any(|chunk| {
+        chunk.contains("[kind: ApiReference]") && chunk.contains("Prototype: int open_device")
+    }));
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk.contains("[section: 3 API Reference")));
+    assert!(chunks
+        .iter()
+        .any(|chunk| { chunk.contains("[kind: ProcedureStep]") && chunk.contains("Step 1") }));
+    assert!(chunks.iter().any(|chunk| {
+        chunk.contains("[kind: CommandBlock]") && chunk.contains("start_transfer")
+    }));
+}
+
+#[test]
+fn structured_ingest_packs_many_lines_into_bounded_chunks() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let mut content = String::from("3 API Reference\n3.1 Transfer APIs\n");
+    for idx in 0..200 {
+        content.push_str(&format!(
+            "Prototype: int transfer_api_{idx}(struct device *dev)\n"
+        ));
+    }
+
+    let doc = md_doc("/tmp/large-api-manual.txt", &content);
+    let options = IngestOptions::with_profile(None).with_chunking(
+        attune_core::chunker::ChunkingOptions::new(4096, 0).with_levels(false, true),
+    );
+    let (item_id, chunks_enqueued) =
+        match ingest_document_with_options(&store, &dek, &doc, &options).unwrap() {
+            IngestOutcome::Inserted {
+                item_id,
+                chunks_enqueued,
+                ..
+            } => (item_id, chunks_enqueued),
+            other => panic!("expected Inserted, got {other:?}"),
+        };
+
+    assert!(
+        chunks_enqueued < 20,
+        "structured ingest must pack same-section lines instead of queueing one chunk per line"
+    );
+    assert!(
+        store.pending_count_by_type("embed").unwrap() < 20,
+        "embed queue should stay bounded for one large API section"
+    );
+    let chunks = store.peek_embed_queue_chunk_texts(&item_id).unwrap();
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk.contains("[kind: ApiReference]")));
+}
+
+#[test]
+fn structured_ingest_falls_back_when_outline_would_explode_chunk_count() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let mut content = String::new();
+    for idx in 0..700 {
+        content.push_str(&format!(
+            "3.{idx} transfer_api_{idx}\nPrototype: int transfer_api_{idx}(void)\n"
+        ));
+    }
+
+    let doc = md_doc("/tmp/many-tiny-sections.txt", &content);
+    let options = IngestOptions::with_profile(None).with_chunking(
+        attune_core::chunker::ChunkingOptions::new(4096, 0).with_levels(false, true),
+    );
+    let chunks_enqueued = match ingest_document_with_options(&store, &dek, &doc, &options).unwrap()
+    {
+        IngestOutcome::Inserted {
+            chunks_enqueued, ..
+        } => chunks_enqueued,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+
+    assert!(
+        chunks_enqueued < 100,
+        "pathological outlines should fall back to legacy chunk budget"
+    );
 }
 
 #[test]
@@ -86,7 +228,9 @@ fn replacing_old_item_returns_updated() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    store.upsert_indexed_file(&dir_id, &doc_v1.source_ref, "hash-v1", &first_id).unwrap();
+    store
+        .upsert_indexed_file(&dir_id, &doc_v1.source_ref, "hash-v1", &first_id)
+        .unwrap();
 
     // caller 检测到 hash 变化后：软删旧 item + enqueue purge。
     store.delete_item(&first_id).unwrap();
@@ -97,7 +241,10 @@ fn replacing_old_item_returns_updated() {
     let doc_v2 = md_doc("/tmp/a.md", "# V2\n\ncompletely new body.");
     let second = ingest_document_replacing(&store, &dek, &doc_v2, &first_id).unwrap();
     match second {
-        IngestOutcome::Updated { item_id, old_item_id } => {
+        IngestOutcome::Updated {
+            item_id,
+            old_item_id,
+        } => {
             assert_ne!(item_id, old_item_id);
             assert_eq!(old_item_id, first_id);
         }
@@ -116,6 +263,53 @@ fn empty_content_returns_skipped() {
 }
 
 #[test]
+fn document_parse_failure_ingests_metadata_only_fallback() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let doc = RawDocument {
+        uri: "file:///tmp/Airbus/A320/Systems/A320-Hydraulic.pdf".into(),
+        title: String::new(),
+        content: b"%PDF-1.4\nnot a readable pdf body".to_vec(),
+        mime_hint: Some("application/pdf".into()),
+        source_kind: SourceKind::LocalFolder,
+        source_ref: "/tmp/Airbus/A320/Systems/A320-Hydraulic.pdf".into(),
+        modified_marker: None,
+        domain: None,
+        tags: None,
+        corpus_domain: Some("aviation".into()),
+        metadata: HashMap::new(),
+    };
+
+    let outcome = ingest_document_with_options(&store, &dek, &doc, &IngestOptions::default())
+        .expect("metadata fallback should keep the source searchable");
+    let item_id = match outcome {
+        IngestOutcome::Degraded {
+            item_id,
+            chunks_enqueued,
+            reason,
+        } => {
+            assert!(
+                chunks_enqueued >= 1,
+                "metadata-only fallback must enqueue at least one searchable chunk"
+            );
+            assert!(!reason.is_empty());
+            item_id
+        }
+        other => panic!("expected retryable Degraded metadata-only item, got {other:?}"),
+    };
+
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("metadata-only item exists");
+    assert!(item.title.contains("A320-Hydraulic"), "{}", item.title);
+    assert!(item.content.contains("metadata-only fallback"));
+    assert!(item.content.contains("A320 Hydraulic"));
+    assert!(item.content.contains("successful text extraction"));
+    assert_eq!(store.get_item_corpus_domain(&item_id).unwrap(), "aviation");
+}
+
+#[test]
 fn ingest_passes_through_domain_and_tags() {
     // 决策 1：RawDocument 的 domain / tags 必须透传给 insert_item，
     // 让入库 item 行带上来源域与用户标签（/api/v1/ingest 对外行为不变）。
@@ -129,10 +323,23 @@ fn ingest_passes_through_domain_and_tags() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
-    assert_eq!(item.domain.as_deref(), Some("blog.example.com"), "domain 必须透传");
-    let tags = store.get_tags_json(&dek, &item_id).unwrap().expect("tags stored");
-    assert!(tags.contains("rust") && tags.contains("ingest"), "tags 必须透传");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
+    assert_eq!(
+        item.domain.as_deref(),
+        Some("blog.example.com"),
+        "domain 必须透传"
+    );
+    let tags = store
+        .get_tags_json(&dek, &item_id)
+        .unwrap()
+        .expect("tags stored");
+    assert!(
+        tags.contains("rust") && tags.contains("ingest"),
+        "tags 必须透传"
+    );
 }
 
 #[test]
@@ -195,24 +402,42 @@ fn raw_title_takes_priority_over_parser_extracted_title() {
     let dek = Key32::generate();
 
     // Branch A: raw.title is non-empty — it must win over the markdown h1.
-    let mut doc_with_title = md_doc("/tmp/titled.md", "# Parser Title\n\ncontent body unique-alpha.");
+    let mut doc_with_title = md_doc(
+        "/tmp/titled.md",
+        "# Parser Title\n\ncontent body unique-alpha.",
+    );
     doc_with_title.title = "Explicit Raw Title".into();
     let id_a = match ingest_document(&store, &dek, &doc_with_title).unwrap() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    let item_a = store.get_item(&dek, &id_a).unwrap().expect("item must exist");
-    assert_eq!(item_a.title, "Explicit Raw Title", "raw.title must take priority");
+    let item_a = store
+        .get_item(&dek, &id_a)
+        .unwrap()
+        .expect("item must exist");
+    assert_eq!(
+        item_a.title, "Explicit Raw Title",
+        "raw.title must take priority"
+    );
 
     // Branch B: raw.title is empty — parser-extracted h1 is used as fallback.
     // Use distinct content so content_hash doesn't deduplicate against Branch A.
-    let doc_no_title = md_doc("/tmp/notitle.md", "# Parser Title\n\ncontent body unique-beta.");
+    let doc_no_title = md_doc(
+        "/tmp/notitle.md",
+        "# Parser Title\n\ncontent body unique-beta.",
+    );
     let id_b = match ingest_document(&store, &dek, &doc_no_title).unwrap() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    let item_b = store.get_item(&dek, &id_b).unwrap().expect("item must exist");
-    assert!(!item_b.title.is_empty(), "parser-extracted title must be used when raw.title is empty");
+    let item_b = store
+        .get_item(&dek, &id_b)
+        .unwrap()
+        .expect("item must exist");
+    assert!(
+        !item_b.title.is_empty(),
+        "parser-extracted title must be used when raw.title is empty"
+    );
 }
 
 #[test]
@@ -223,7 +448,10 @@ fn ingest_with_named_profile_inserts_text_doc_unchanged() {
     use attune_core::ingest::ingest_document_with_profile;
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let doc = md_doc("/tmp/scan.txt", "# Scan Result\n\nsome extracted text from scan.");
+    let doc = md_doc(
+        "/tmp/scan.txt",
+        "# Scan Result\n\nsome extracted text from scan.",
+    );
     let outcome = ingest_document_with_profile(&store, &dek, &doc, Some("screenshot")).unwrap();
     assert!(
         matches!(outcome, IngestOutcome::Inserted { .. }),
@@ -263,7 +491,10 @@ fn replacing_with_content_identical_to_third_party_item_inserts_new() {
 
     // 必须返回 Updated（新 item 入库），而非指向 third_party 的 Duplicate。
     match outcome {
-        IngestOutcome::Updated { item_id, old_item_id } => {
+        IngestOutcome::Updated {
+            item_id,
+            old_item_id,
+        } => {
             assert_eq!(old_item_id, old_id);
             assert_ne!(item_id, third_id, "不能复用第三方 item 的 id");
         }

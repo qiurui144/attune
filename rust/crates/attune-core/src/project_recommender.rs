@@ -90,7 +90,11 @@ pub fn recommend_for_file(
         }
     }
 
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(out)
 }
 
@@ -149,11 +153,8 @@ mod unit_tests {
     #[test]
     fn chat_keyword_multiple() {
         // 多关键词命中
-        let h = recommend_for_chat(
-            "这个客户的项目我们整理一下",
-            &["客户", "项目", "topic"],
-        )
-        .expect("hit");
+        let h = recommend_for_chat("这个客户的项目我们整理一下", &["客户", "项目", "topic"])
+            .expect("hit");
         assert!(h.matched_keywords.contains(&"客户".to_string()));
         assert!(h.matched_keywords.contains(&"项目".to_string()));
     }

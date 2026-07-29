@@ -123,7 +123,11 @@ pub fn normalize_url(raw: &str) -> Result<NormalizedRepo> {
     // 不构成 SSRF 面（无远程 fetch）。
     if parsed.scheme() == "file" {
         let p = parsed.path().trim_end_matches('/');
-        let repo = p.rsplit('/').next().unwrap_or("repo").trim_end_matches(".git");
+        let repo = p
+            .rsplit('/')
+            .next()
+            .unwrap_or("repo")
+            .trim_end_matches(".git");
         return Ok(NormalizedRepo {
             clone_url: trimmed.to_string(),
             host: "localhost".into(),
@@ -191,7 +195,10 @@ impl Git2Cloner {
         match token {
             // x-access-token 是 GitHub PAT over HTTPS 的惯例用户名；GitLab/Gitea
             // 也接受 `<token>@host` 形态。错误信息不回显此串（脱敏）。
-            Some(t) => format!("https://x-access-token:{t}@{}", repo.clone_url.trim_start_matches("https://")),
+            Some(t) => format!(
+                "https://x-access-token:{t}@{}",
+                repo.clone_url.trim_start_matches("https://")
+            ),
             None => repo.clone_url.clone(),
         }
     }
@@ -275,7 +282,10 @@ fn walk_and_collect(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
 
         // path traversal 防御（symlink 逃出工作树 / `..`）—— relpath 不得含 `..`。
-        if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             continue;
         }
 
@@ -333,6 +343,8 @@ pub struct GitConnector {
     cloner: Box<dyn GitCloner>,
     /// fetch 后回填的 HEAD commit（caller 取作游标）。
     last_commit: std::cell::RefCell<Option<String>>,
+    /// fetch 后回填的 tree 形态：true=全量，false=增量 diff。
+    last_full: std::cell::RefCell<Option<bool>>,
     /// fetch 后回填的删除列表（增量 D）。
     deleted: std::cell::RefCell<Vec<String>>,
 }
@@ -352,6 +364,7 @@ impl GitConnector {
             repo,
             cloner,
             last_commit: std::cell::RefCell::new(None),
+            last_full: std::cell::RefCell::new(None),
             deleted: std::cell::RefCell::new(Vec::new()),
         })
     }
@@ -371,6 +384,11 @@ impl GitConnector {
         self.last_commit.borrow_mut().take()
     }
 
+    /// fetch 后取 tree 形态：true=全量，false=增量 diff。
+    pub fn take_last_full(&self) -> Option<bool> {
+        self.last_full.borrow_mut().take()
+    }
+
     /// fetch 后取删除文件列表（增量 D）。
     pub fn take_deleted(&self) -> Vec<String> {
         std::mem::take(&mut *self.deleted.borrow_mut())
@@ -379,7 +397,10 @@ impl GitConnector {
     /// 编译 include/exclude glob matcher。include 空 → 默认知识类。
     fn build_globs(&self) -> Result<(GlobSet, GlobSet)> {
         let include_src: Vec<String> = if self.config.include_glob.is_empty() {
-            GitSourceConfig::DEFAULT_INCLUDE.iter().map(|s| s.to_string()).collect()
+            GitSourceConfig::DEFAULT_INCLUDE
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             self.config.include_glob.clone()
         };
@@ -432,9 +453,20 @@ impl SourceConnector for GitConnector {
     fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
         let tree = self.cloner.fetch(&self.repo, &self.config)?;
         *self.last_commit.borrow_mut() = Some(tree.commit_sha.clone());
-        *self.deleted.borrow_mut() = tree.deleted.clone();
+        *self.last_full.borrow_mut() = Some(tree.full);
 
         let (include, exclude) = self.build_globs()?;
+        let deleted_refs = tree
+            .deleted
+            .iter()
+            .filter(|rel| self.in_subdir(rel))
+            .filter(|rel| {
+                let path = Path::new(rel);
+                include.is_match(path) && !exclude.is_match(path)
+            })
+            .map(|rel| format!("{}/{}", self.repo.slug, rel))
+            .collect();
+        *self.deleted.borrow_mut() = deleted_refs;
         let mut emitted = 0u64;
 
         for (rel, bytes) in tree.files {
@@ -631,6 +663,27 @@ mod tests {
     }
 
     #[test]
+    fn connector_exposes_incremental_full_flag_and_deleted_source_refs() {
+        let tree = FetchedTree {
+            commit_sha: "feedface".into(),
+            files: vec![("changed.md".into(), b"# changed".to_vec())],
+            deleted: vec!["deleted.md".into(), "skip.bin".into()],
+            full: false,
+        };
+        let conn = GitConnector::with_cloner(
+            GitSourceConfig::new("https://github.com/o/r"),
+            Box::new(MockCloner { tree }),
+        )
+        .unwrap();
+
+        let docs = drain(&conn);
+
+        assert_eq!(docs.len(), 1);
+        assert_eq!(conn.take_last_full(), Some(false));
+        assert_eq!(conn.take_deleted(), vec!["o/r/deleted.md"]);
+    }
+
+    #[test]
     fn connector_subdir_limits_subtree() {
         let mut config = GitSourceConfig::new("https://github.com/o/r");
         config.subdir = Some("src".into());
@@ -653,10 +706,7 @@ mod tests {
     fn connector_respects_max_files_and_max_file_bytes() {
         let mut config = GitSourceConfig::new("https://github.com/o/r");
         config.max_files = 1;
-        let conn = mock_connector(
-            vec![("a.md", b"a"), ("b.md", b"b"), ("c.md", b"c")],
-            config,
-        );
+        let conn = mock_connector(vec![("a.md", b"a"), ("b.md", b"b"), ("c.md", b"c")], config);
         assert_eq!(drain(&conn).len(), 1, "max_files=1 截断");
 
         let mut config2 = GitSourceConfig::new("https://github.com/o/r");

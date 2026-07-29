@@ -5,7 +5,8 @@ attune plugin 系统让第三方/行业方扩展 attune 能力. 当前 4 个 att
 
 ## Plugin 形态
 
-每个 plugin 是一个目录或 .attpkg 压缩包, 包含:
+开发时每个 plugin 是一个目录；分发时打包为 `<plugin-id>-<version>.tar.gz`，并在
+包内携带 `plugin.sig`：
 
 ```
 my-plugin/
@@ -66,31 +67,41 @@ project_schema:
       type: date
 ```
 
-## Signing (CI 用)
+## Signing and packaging
 
-attune 强制 official-key 签名 (防 supply chain). 流程:
+远端官方包必须携带 Ed25519 `plugin.sig`，并由 PluginHub 返回 SHA-256 摘要。流程：
 
 ```bash
 # 1. 生成 Ed25519 私钥 (一次性, 离线安全存)
-attune-cli plugin keygen > my-key.priv
+attune plugin-keygen --out-priv my-key.priv
 
-# 2. 公钥 hex 嵌入 OFFICIAL_PUBLIC_KEYS (attune-core::plugin_sig)
-attune-cli plugin pubkey-hex my-key.priv
+# 2. 记录 stdout 的 PUBLIC_KEY, 嵌入 official anchor 或发布给用户白名单
 
-# 3. 打包 + 签名
-attune-cli plugin pack my-plugin/ --sign my-key.priv -o my-plugin-0.6.0.attpkg
+# 3. 写入 plugin.sig
+attune plugin-sign my-plugin/ --priv-file my-key.priv
+
+# 4. 本地校验 plugin.sig
+attune plugin-verify-sig my-plugin/ --pubkey <pubkey-hex>
+
+# 5. 打包为 PluginHub 分发包
+files=(plugin.yaml plugin.sig)
+for optional in prompt.md README.md bin forms capabilities builtin; do
+  [ -e "my-plugin/$optional" ] && files+=("$optional")
+done
+tar -C my-plugin -czf my-plugin-0.6.0.tar.gz "${files[@]}"
 ```
 
-`.attpkg` 是 zip 含 plugin 目录 + `signature.bin` (Ed25519 over content hash).
+`plugin.sig` 签名覆盖 `plugin.yaml` + `prompt.md` 的规范 digest；PluginHub 上传接口
+返回服务端计算的 `sha256` 与 `/api/v1/packages/<id>-<version>.tar.gz` 下载路径。
 
 ## Encryption (商业 plugin)
 
 付费 plugin 可加密 plugin.yaml + skills 实现:
 
 ```bash
-attune-cli plugin encrypt my-plugin.attpkg \
-  --password <license-key> \
-  -o my-plugin.attpkg.enc
+attune plugin-encrypt my-plugin/ \
+  --key <license-key> \
+  --delete-plain
 ```
 
 attune 装载时用 device-bound license key 解密 (per `plugin_encryption.rs`,
@@ -100,10 +111,10 @@ Argon2id + AES-GCM, OsRng nonce + salt).
 
 1. 用户在 marketplace UI 看到 plugin 卡 (来自 `pluginhub.url` 或本地 plugins/)
 2. 点 "安装" → POST /api/v1/marketplace/plugins/{id}/install
-3. attune-server 调 pluginhub HTTP 下载 .attpkg
-4. plugin_sig::verify 签名校验
+3. attune-server 调 pluginhub HTTP 下载 `.tar.gz` 包
+4. SHA-256 与 `plugin_sig::verify` 双校验
 5. (付费) plugin_encryption::decrypt_yaml 解密
-6. 写入 ~/.local/share/attune/plugins/{id}/
+6. 写入 `~/.local/share/attune/plugins/{id}/`
 7. state.plugin_registry.reload() 热载
 8. taxonomy / entities / skills / workflows 注册到 in-memory hub
 9. UI 实时显示 (无需重启)

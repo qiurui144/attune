@@ -1,4 +1,4 @@
-# Attune (Rust 商用线)
+# Attune Rust
 
 [English](README.md) · [中文](README.zh.md)
 
@@ -10,7 +10,7 @@ attune 是面向**任何领域个人知识工作者**的本地 AI 知识库（OS
 
 ## 此目录的内容
 
-这是 Rust 商用线源码。三大产品支柱（**主动进化** / **对话伙伴** / **混合智能**）的高层介绍见 [顶层 README](../README.zh.md#三大支柱rust-线)；具体实现细节见下方 [核心能力](#核心能力) 段，然后是安全模型、API 端点、构建指引、测试矩阵。
+这是 Attune 的 Rust 实现源码。三大产品支柱（**主动进化** / **对话伙伴** / **混合智能**）的高层介绍见 [顶层 README](../README.zh.md#三大支柱rust-线)；具体实现细节见下方 [核心能力](#核心能力) 段，然后是安全模型、API 端点、构建指引、测试矩阵。
 
 OSS × attune-pro 功能边界见 [`docs/oss-pro-strategy.zh.md`](../docs/oss-pro-strategy.zh.md)。
 
@@ -20,6 +20,16 @@ OSS × attune-pro 功能边界见 [`docs/oss-pro-strategy.zh.md`](../docs/oss-pr
 - 单二进制分发，零运行时依赖
 - 换设备通过加密导出/导入无损迁移
 - **你只付两样钱**：软件本身 + 你自己的 LLM token（如果你用云端 LLM）。无中间商、无搜索 API 订阅、无隐藏费用
+
+## v1.0 GA 以来的更新（当前：v1.2.0）
+
+下方核心能力描述的是 GA 核心。v1.0→v1.2 在其上叠加生产级治理与跨平台能力 —— 完整发布说明见 [`RELEASE.md`](RELEASE.md)，各能力 × 模块 × 技术栈映射见 [`DEVELOP.md` → 能力矩阵 × 技术栈选型](DEVELOP.md#能力矩阵--技术栈选型)：
+
+- **Agent Control Plane（ACP，v1.1.0）** — 中央 agent 注册表 + typed handoff、声明式 DAG flow 执行器、每 `agent×model` 失败 telemetry、cost-aware 调度器、workspace 级质量门（阈值只升不降）。
+- **跨平台 agent 分发（WASM，v1.2.0）** — 确定性 agent/skill 编到 `wasm32-wasip1`，内嵌 `wasmtime` 执行；一个签名 `.tar.gz` 插件包 + 一份 `.wasm` 即在 Windows / Linux / riscv64 全平台运行。WASM-safe 的 `attune-agent-sdk` leaf crate 让 `Agent` trait 零 native 依赖。
+- **GitConnector（v1.2.0）** — 从 Git 仓库导入知识库（GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht 的 HTTPS）：clone → glob 过滤 → 入库 → 跟随上游 commit；本地完成、零 LLM 导入路径、带 SSRF 防护。
+- **隐私出网门 OutboundGate + `PrivacyTier::L0`** — 每个网络 egress（LLM / Cloud / WebDAV / Web Search / Telemetry）统一经一处 gate 裁决 settings + PII 脱敏；标 L0 的内容拒绝任何云端 LLM 调用（`outbound_gate.rs`）。
+- **一键依赖部署** — Ollama readiness 检测 + 应用内一键 install/pull、底座模型一键 ensure、LM Studio 端点自动识别，无需碰终端。
 
 ## 核心能力
 
@@ -260,7 +270,7 @@ attune-server 启动时扫描 `~/.local/share/attune/plugins/`。每个子目录
 触发器注册表：file_added 事件匹配插件中 `trigger.on == 'file_added'` 的 workflow，
 逐个 spawn-and-run，跑完通过 WebSocket 推 workflow_complete。
 
-attune-pro 的 `.attunepkg` 安装包解压到该目录。空插件目录 = 空操作（不会触发 workflow）。
+attune-pro 的签名 `.tar.gz` 插件包解压到该目录。空插件目录 = 空操作（不会触发 workflow）。
 
 ### UI 通知（Sprint 1 Phase D）
 
@@ -443,7 +453,7 @@ rust/
 - **Phase 2a** ✅ Axum API Server + tantivy + usearch + RRF 混合搜索
 - **Phase 2b** ✅ 文件扫描 + Embedding 队列 + Upload + Index API
 - **搜索集成** ✅ AppState 持有 FulltextIndex/VectorIndex/Ollama，搜索全链路打通
-- **Chrome 兼容** ✅ 扩展使用 13 个 API 端点（对齐 Python 原型）；后端额外暴露 40+ 用于 Web UI / CLI / WebSocket
+- **Chrome 兼容** ✅ 扩展使用 `/api/v1/*` API；后端额外暴露 40+ 用于 Web UI / CLI / WebSocket
 - **Phase 3** ✅ NAS 模式 (TLS + Bearer) + 嵌入式 Web UI + Device Secret 迁移
 - **子系统 A** ✅ AI 自动分类 (qwen2.5 + HDBSCAN + 编程/法律插件 + 最小 UI 集成)
 - **子系统 B** ✅ 行为画像（搜索历史 + 点击追踪 + 热门统计）
@@ -468,7 +478,7 @@ Attune 双轨发版，共享同一份 Rust 后端代码：
 | 形态 | 二进制 | 适用场景 |
 |------|--------|---------|
 | **Attune Desktop** | `apps/attune-desktop`（Tauri 2 壳） | 笔电用户 — 双击 MSI / deb 安装，原生窗口 + 托盘 + 拖拽 |
-| **Attune Server**（headless） | `crates/attune-server/bin/headless.rs`（`attune-server-headless`） | K3 一体机 / NAS / 服务器 — `attune-server-headless --host 0.0.0.0 ...` |
+| **Attune Server**（headless） | `crates/attune-server/bin/headless.rs`（`attune-server-headless`） | 本地调度器设备 / NAS / 服务器 — `attune-server-headless --host 0.0.0.0 ...` |
 
 ### 本地构建
 
@@ -499,7 +509,6 @@ Apache License 2.0 —— 见仓库根目录 [LICENSE](../LICENSE)。覆盖：
 - `rust/crates/*`（attune-core / attune-server / attune-cli）
 - `extension/`（Chrome 扩展）
 - `rust/crates/attune-server/assets/`（嵌入式 Web UI）
-- `python/src/attune_python/`（Python 原型）
 - `plugins/free/*`（免费行业插件：编程、技术类）
 
 你可以自由 fork、修改、商用。Apache-2.0 包含专利授权条款（§3），使用者可放心。

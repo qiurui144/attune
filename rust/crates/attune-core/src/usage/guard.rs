@@ -40,12 +40,7 @@ pub struct UsageRecorderGuard {
 
 impl UsageRecorderGuard {
     /// Begin a usage measurement. The latency timer starts here.
-    pub fn new(
-        kind: UsageKind,
-        provider: &str,
-        model: &str,
-        recorder: RecordFn,
-    ) -> Self {
+    pub fn new(kind: UsageKind, provider: &str, model: &str, recorder: RecordFn) -> Self {
         Self {
             kind,
             provider: provider.into(),
@@ -74,20 +69,11 @@ impl UsageRecorderGuard {
     /// Finalize the measurement, invoke the recorder, and mark the guard as
     /// completed. Idempotent — calling more than once is a no-op (the recorder
     /// is consumed on the first call).
-    pub fn complete(
-        &mut self,
-        usage: TokenUsage,
-        cache: CacheOutcome,
-        outcome: CallOutcome,
-    ) {
+    pub fn complete(&mut self, usage: TokenUsage, cache: CacheOutcome, outcome: CallOutcome) {
         if self.completed {
             return;
         }
-        let latency_ms = self
-            .started
-            .elapsed()
-            .as_millis()
-            .min(u32::MAX as u128) as u32;
+        let latency_ms = self.started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         // estimate_cost_usd returns Option<f64>; pricing-unknown is internal
         // telemetry only and must not block the main call path (spec §7.1).
         let cost_usd = crate::cost::estimate_cost_usd(

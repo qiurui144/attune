@@ -78,6 +78,19 @@ journalctl --user-unit attune-desktop -f
 #   "update check failed: signature verification failed"
 ```
 
+### 1.5 客户端更新策略
+
+桌面端采用“通知优先、用户确认安装”的策略：
+
+- 启动后约 30 秒静默检查一次更新；只发出 `attune-update-status=available`
+  事件，不自动下载、不自动安装。
+- 设置页“应用更新”里的“检查并安装”由用户主动触发；命中新版本后下载并安装，
+  完成后进入 `ready` 状态，等待用户点击“重启以更新”。
+- 更新源可选“官方 GitHub”或“公司镜像”；公司镜像只改变 `latest.json` 拉取地址，
+  签名公钥仍来自 `tauri.conf.json`，验签失败则更新失败。
+- `ATTUNE_UPDATE_FEED_URL` 是运维强制覆盖项；设置后优先于 UI 更新源，并自动保留
+  GitHub 作为 fallback。
+
 ---
 
 ## 2. APT / RPM 软件源

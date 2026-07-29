@@ -5,7 +5,7 @@
 
 [package]
 name = "attune-desktop"
-version = "1.0.7"
+version = "1.5.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Attune 桌面应用（Tauri 2 shell + 内嵌 attune-server）"
@@ -20,16 +20,37 @@ tauri-plugin-single-instance = { version = "2" }
 tauri-plugin-updater = { version = "2" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
+dirs = "6"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 # serde / serde_json: tauri::generate_context! 宏展开需要它们 (false-positive on cargo-machete)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-attune-server = { path = "../../rust/crates/attune-server" }
+# default-features=false + desktop default 显式回填 3 个默认 → 默认包行为零变化;
+# openvino 变体 --no-default-features 时去掉 ort-bundled,改 ort-dynamic(见下)。
+attune-server = { path = "../../rust/crates/attune-server", default-features = false }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-default = ["custom-protocol"]
+default = ["custom-protocol", "ort-bundled", "asr-sensevoice", "wasm-runtime"]
+# ORT 链接模型链式透传(ort-bundled 默认;openvino 变体走 ort-dynamic + 去 asr-sensevoice)。
+ort-bundled = ["attune-server/ort-bundled"]
+ort-dynamic = ["attune-server/ort-dynamic"]
+asr-sensevoice = ["attune-server/asr-sensevoice"]
+wasm-runtime = ["attune-server/wasm-runtime"]
+# ── ONNX Runtime EP passthrough → attune-server → attune-core (默认全 OFF) ──
+# desktop-release workflow 为 GPU 变体包传 `cargo tauri build --features <ep>`,
+# 经此链式到 attune-core 的 ort/<ep>。默认 build 不开任一 EP = 纯 CPU 包(基础包不变)。
+# ORT 约束: directml 与 cuda 互斥 → 各自独立变体 artifact, 不在同一二进制共存。
+cuda = ["attune-server/cuda"]
+directml = ["attune-server/directml"]
+coreml = ["attune-server/coreml"]
+openvino = ["attune-server/openvino"]
+rocm = ["attune-server/rocm"]
+tensorrt = ["attune-server/tensorrt"]
+vitis = ["attune-server/vitis"]
 
 [package.metadata.cargo-machete]
 ignored = ["serde", "serde_json"]

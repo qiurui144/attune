@@ -1,0 +1,572 @@
+{
+  "_doc": "Long-text KB benchmark manifest for Chinese mechanical-design handbook PDFs. The source PDFs are Git LFS objects and require OCR for scanned pages.",
+  "_version": "2026-07-20",
+  "source_root": "/data/corpora/handbook-of-mechanical-design",
+  "source_root_env": "MECHANICAL_DESIGN_HANDBOOK_ROOT",
+  "source": {
+    "repo_url": "https://github.com/GEQfa/handbook-of-mechanical-design.git",
+    "web_url": "https://github.com/GEQfa/handbook-of-mechanical-design",
+    "commit": "86832fd643cb1f9cfa1188d242d34b62dd52e41f",
+    "license_file": null,
+    "lfs_required": true,
+    "safety_note": "Dataset is for retrieval, OCR, and grounded-answer benchmarking; answers must cite source pages and avoid unsupported design sign-off claims."
+  },
+  "selection": {
+    "generated_by": "scripts/build-mechanical-design-longtext-dataset.py",
+    "limit_docs": 5,
+    "documents_count": 5,
+    "queries_count": 10,
+    "total_selected_bytes": 302692419,
+    "known_size_documents": 5,
+    "materialize_command": "python3 scripts/build-mechanical-design-longtext-dataset.py --repo-dir /data/corpora/handbook-of-mechanical-design --materialize --limit-docs 5",
+    "profiles": {
+      "smoke": {
+        "documents": [
+          "mechanical_design_volume_1",
+          "mechanical_design_volume_2"
+        ],
+        "purpose": "fast Chinese PDF/LFS/OCR ingestion sanity check"
+      },
+      "edge_scheduler_30b": {
+        "documents": [
+          "mechanical_design_volume_1",
+          "mechanical_design_volume_2",
+          "mechanical_design_volume_3",
+          "mechanical_design_volume_4",
+          "mechanical_design_volume_5"
+        ],
+        "purpose": "all five volumes with OCR, vector generation, grounded chat, and multi-turn source continuity",
+        "max_retrieved_context_docs": 4,
+        "max_final_context_chunks": 12
+      },
+      "edge_scheduler_comprehensive": {
+        "documents": [
+          "mechanical_design_volume_1",
+          "mechanical_design_volume_2",
+          "mechanical_design_volume_3",
+          "mechanical_design_volume_4",
+          "mechanical_design_volume_5"
+        ],
+        "purpose": "full mechanical-design handbook E2E parallel to airplane GitHub corpus",
+        "max_retrieved_context_docs": 6,
+        "max_final_context_chunks": 18
+      },
+      "stress": {
+        "documents": [
+          "mechanical_design_volume_1",
+          "mechanical_design_volume_2",
+          "mechanical_design_volume_3",
+          "mechanical_design_volume_4",
+          "mechanical_design_volume_5"
+        ],
+        "purpose": "repeat chat, OCR-heavy PDFs, cross-volume retrieval pressure"
+      }
+    }
+  },
+  "coverage_dimensions": [
+    "git_lfs_materialization",
+    "chinese_scanned_pdf_ocr",
+    "table_formula_dense_pages",
+    "exact_volume_lookup",
+    "mechanical_component_topic_lookup",
+    "cross_volume_retrieval",
+    "mixed_difficulty_chat",
+    "multiturn_source_continuity",
+    "vector_generation_and_refresh"
+  ],
+  "web_e2e": {
+    "default_query_id": "mdh_gear_transmission_design",
+    "query_ids": [
+      "mdh_gear_transmission_design",
+      "mdh_cross_volume_shaft_bearing_transmission",
+      "mdh_table_formula_ocr_probe"
+    ],
+    "expected_surface": [
+      "indexed document visible in Items view",
+      "chat input accepts Chinese long-text KB query",
+      "assistant answer contains expected Chinese mechanical-design terms",
+      "citation chips are rendered",
+      "scheduler status is rendered when the edge scheduler path is used"
+    ]
+  },
+  "multiturn": {
+    "default_query_id": "mdh_gear_transmission_design",
+    "forbidden_followup_terms": [
+      "a320",
+      "airbus",
+      "boeing",
+      "qrh",
+      "fcom",
+      "飞机",
+      "飞行"
+    ],
+    "turns": [
+      {
+        "turn_id": "initial_grounded_answer",
+        "message_from_query": true
+      },
+      {
+        "turn_id": "history_source_continuity",
+        "message": "继续只基于上一轮引用的机械设计手册卷册回答：该来源属于哪一卷，主题是什么？不要切换到航空手册或其它资料。",
+        "expected_terms": [
+          "机械设计手册",
+          "第3卷",
+          "齿轮",
+          "传动"
+        ],
+        "reject_forbidden_sources": true
+      },
+      {
+        "turn_id": "hard_followup_retrieval_path",
+        "message": "在上一轮基础上，给出齿轮传动设计参数或强度校核资料的检索路径；只说明检索依据和引用来源，不给出工程签核结论。",
+        "expected_terms": [
+          "齿轮",
+          "传动",
+          "强度",
+          "引用"
+        ],
+        "reject_forbidden_sources": true
+      }
+    ]
+  },
+  "evaluation_targets": {
+    "vector_search": {
+      "hit_at_5_min": 0.8,
+      "recall_at_10_min": 0.75,
+      "mrr_at_10_min": 0.6,
+      "partition_hit_rate_min": 0.9,
+      "warm_p50_latency_ms_max": 1200,
+      "warm_p95_latency_ms_max": 3500
+    },
+    "rag_answer": {
+      "answer_accuracy_rate_min": 0.75,
+      "citation_hit_rate_min": 0.85,
+      "unsafe_operational_advice_rate_max": 0.0,
+      "edge_scheduler_30b_p95_latency_ms_max": 15000
+    },
+    "context_admission": {
+      "edge_scheduler_30b_max_context_documents": 4,
+      "edge_scheduler_30b_max_final_chunks": 12,
+      "edge_scheduler_comprehensive_max_context_documents": 6,
+      "edge_scheduler_comprehensive_max_final_chunks": 18
+    },
+    "stability": {
+      "repeat_chat_runs_min": 3,
+      "terminal_error_rate_max": 0.02,
+      "chat_latency_cv_max": 0.35
+    }
+  },
+  "documents": [
+    {
+      "id": "mechanical_design_volume_1",
+      "file": "机械设计手册 第六版 第1卷.PDF",
+      "title": "机械设计手册 第六版 第1卷",
+      "manufacturer": "机械工业出版社",
+      "aircraft": "not_applicable",
+      "manual_type": "HANDBOOK",
+      "volume": 1,
+      "size_bytes": 59401402,
+      "lfs_oid": "229084e447550280d68d56f64a857ecf3cbbb34827e92466453d87ed9de70e8e",
+      "long_text_tier": "xl",
+      "tags": [
+        "mechanical-design-handbook",
+        "chinese",
+        "pdf",
+        "ocr-required",
+        "volume-1",
+        "xl"
+      ],
+      "index_partition": {
+        "domain": "mechanical_design",
+        "language": "zh",
+        "manual_type": "handbook",
+        "volume": "1"
+      }
+    },
+    {
+      "id": "mechanical_design_volume_2",
+      "file": "机械设计手册 第六版 第2卷.PDF",
+      "title": "机械设计手册 第六版 第2卷",
+      "manufacturer": "机械工业出版社",
+      "aircraft": "not_applicable",
+      "manual_type": "HANDBOOK",
+      "volume": 2,
+      "size_bytes": 80796627,
+      "lfs_oid": "d28e7168fa6345e2f1126e359ddecef35f5dcc0cb979549579cdf996a0443534",
+      "long_text_tier": "xxl",
+      "tags": [
+        "mechanical-design-handbook",
+        "chinese",
+        "pdf",
+        "ocr-required",
+        "volume-2",
+        "xxl"
+      ],
+      "index_partition": {
+        "domain": "mechanical_design",
+        "language": "zh",
+        "manual_type": "handbook",
+        "volume": "2"
+      }
+    },
+    {
+      "id": "mechanical_design_volume_3",
+      "file": "-机械设计手册 第六版 第3卷.PDF",
+      "title": "机械设计手册 第六版 第3卷",
+      "manufacturer": "机械工业出版社",
+      "aircraft": "not_applicable",
+      "manual_type": "HANDBOOK",
+      "volume": 3,
+      "size_bytes": 43791161,
+      "lfs_oid": "797ae318ba3f18d13a86070d6cae3bc9245d0d783ee47e8e9aaeb3955fac6e4f",
+      "long_text_tier": "xl",
+      "tags": [
+        "mechanical-design-handbook",
+        "chinese",
+        "pdf",
+        "ocr-required",
+        "volume-3",
+        "xl"
+      ],
+      "index_partition": {
+        "domain": "mechanical_design",
+        "language": "zh",
+        "manual_type": "handbook",
+        "volume": "3"
+      }
+    },
+    {
+      "id": "mechanical_design_volume_4",
+      "file": "-机械设计手册 第六版 第4卷.PDF",
+      "title": "机械设计手册 第六版 第4卷",
+      "manufacturer": "机械工业出版社",
+      "aircraft": "not_applicable",
+      "manual_type": "HANDBOOK",
+      "volume": 4,
+      "size_bytes": 49879781,
+      "lfs_oid": "6f139eeda70d14fc031af3e5052a9e95b3476f64d1071ea00296bde0eb9b55db",
+      "long_text_tier": "xl",
+      "tags": [
+        "mechanical-design-handbook",
+        "chinese",
+        "pdf",
+        "ocr-required",
+        "volume-4",
+        "xl"
+      ],
+      "index_partition": {
+        "domain": "mechanical_design",
+        "language": "zh",
+        "manual_type": "handbook",
+        "volume": "4"
+      }
+    },
+    {
+      "id": "mechanical_design_volume_5",
+      "file": "-机械设计手册 第六版 第5卷.PDF",
+      "title": "机械设计手册 第六版 第5卷",
+      "manufacturer": "机械工业出版社",
+      "aircraft": "not_applicable",
+      "manual_type": "HANDBOOK",
+      "volume": 5,
+      "size_bytes": 68823448,
+      "lfs_oid": "a16180d726afb9cf047048b55b7015f3c3fd5b6b584b0a701b7dd639ac731b73",
+      "long_text_tier": "xl",
+      "tags": [
+        "mechanical-design-handbook",
+        "chinese",
+        "pdf",
+        "ocr-required",
+        "volume-5",
+        "xl"
+      ],
+      "index_partition": {
+        "domain": "mechanical_design",
+        "language": "zh",
+        "manual_type": "handbook",
+        "volume": "5"
+      }
+    }
+  ],
+  "queries": [
+    {
+      "id": "mdh_volume_1_overview",
+      "q": "机械设计手册第六版第1卷主要覆盖哪些基础设计资料、机械制图或工程材料内容？请给出引用。",
+      "query": "机械设计手册第六版第1卷主要覆盖哪些基础设计资料、机械制图或工程材料内容？请给出引用。",
+      "category": "volume_overview",
+      "difficulty": "easy",
+      "acceptable_hits": [
+        "mechanical_design_volume_1"
+      ],
+      "acceptable_files": [
+        "机械设计手册 第六版 第1卷.PDF"
+      ],
+      "expect_any": [
+        "第1卷",
+        "机械设计",
+        "材料",
+        "制图"
+      ],
+      "min_hit_in_top_k": 3,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume": "1"
+      }
+    },
+    {
+      "id": "mdh_volume_2_connection_spring_bearing",
+      "q": "查找机械设计手册中连接、紧固件、弹簧、轴承或轴类零件的资料，说明应优先引用哪一卷。",
+      "query": "查找机械设计手册中连接、紧固件、弹簧、轴承或轴类零件的资料，说明应优先引用哪一卷。",
+      "category": "component_lookup",
+      "difficulty": "easy",
+      "acceptable_hits": [
+        "mechanical_design_volume_2"
+      ],
+      "acceptable_files": [
+        "机械设计手册 第六版 第2卷.PDF"
+      ],
+      "expect_any": [
+        "第2卷",
+        "连接",
+        "紧固件",
+        "弹簧",
+        "轴承"
+      ],
+      "min_hit_in_top_k": 3,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume": "2"
+      }
+    },
+    {
+      "id": "mdh_gear_transmission_design",
+      "q": "齿轮传动设计参数、强度校核或传动选型资料应查机械设计手册第几卷？回答必须带引用。",
+      "query": "齿轮传动设计参数、强度校核或传动选型资料应查机械设计手册第几卷？回答必须带引用。",
+      "category": "topic_lookup",
+      "difficulty": "medium",
+      "acceptable_hits": [
+        "mechanical_design_volume_3"
+      ],
+      "acceptable_files": [
+        "-机械设计手册 第六版 第3卷.PDF"
+      ],
+      "expect_any": [
+        "第3卷",
+        "齿轮",
+        "传动",
+        "强度"
+      ],
+      "min_hit_in_top_k": 3,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume": "3"
+      }
+    },
+    {
+      "id": "mdh_belt_chain_vs_gear",
+      "q": "对比齿轮传动、带传动和链传动在选型检索时应查哪些资料，回答要区分主题并引用来源。",
+      "query": "对比齿轮传动、带传动和链传动在选型检索时应查哪些资料，回答要区分主题并引用来源。",
+      "category": "mixed_difficulty_chat",
+      "difficulty": "medium",
+      "acceptable_hits": [
+        "mechanical_design_volume_3"
+      ],
+      "acceptable_files": [
+        "-机械设计手册 第六版 第3卷.PDF"
+      ],
+      "expect_any": [
+        "齿轮",
+        "带传动",
+        "链传动",
+        "第3卷"
+      ],
+      "min_hit_in_top_k": 5,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume": "3"
+      }
+    },
+    {
+      "id": "mdh_hydraulic_pneumatic_lookup",
+      "q": "液压传动、气压传动、润滑或密封相关资料在机械设计手册中应查哪一卷？",
+      "query": "液压传动、气压传动、润滑或密封相关资料在机械设计手册中应查哪一卷？",
+      "category": "topic_lookup",
+      "difficulty": "medium",
+      "acceptable_hits": [
+        "mechanical_design_volume_4"
+      ],
+      "acceptable_files": [
+        "-机械设计手册 第六版 第4卷.PDF"
+      ],
+      "expect_any": [
+        "第4卷",
+        "液压",
+        "气压",
+        "润滑",
+        "密封"
+      ],
+      "min_hit_in_top_k": 5,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume": "4"
+      }
+    },
+    {
+      "id": "mdh_control_mechatronics_reliability",
+      "q": "机械控制、机电一体化、现代设计方法或可靠性设计应优先检索机械设计手册哪一卷？",
+      "query": "机械控制、机电一体化、现代设计方法或可靠性设计应优先检索机械设计手册哪一卷？",
+      "category": "topic_lookup",
+      "difficulty": "medium",
+      "acceptable_hits": [
+        "mechanical_design_volume_5"
+      ],
+      "acceptable_files": [
+        "-机械设计手册 第六版 第5卷.PDF"
+      ],
+      "expect_any": [
+        "第5卷",
+        "控制",
+        "机电",
+        "可靠性"
+      ],
+      "min_hit_in_top_k": 5,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume": "5"
+      }
+    },
+    {
+      "id": "mdh_cross_volume_shaft_bearing_transmission",
+      "q": "我要设计一套含轴、轴承和齿轮传动的机械系统，应该跨哪些卷检索？请分步骤说明并引用来源。",
+      "query": "我要设计一套含轴、轴承和齿轮传动的机械系统，应该跨哪些卷检索？请分步骤说明并引用来源。",
+      "category": "cross_document",
+      "difficulty": "hard",
+      "acceptable_hits": [
+        "mechanical_design_volume_2",
+        "mechanical_design_volume_3"
+      ],
+      "acceptable_files": [
+        "机械设计手册 第六版 第2卷.PDF",
+        "-机械设计手册 第六版 第3卷.PDF"
+      ],
+      "expect_any": [
+        "轴",
+        "轴承",
+        "齿轮",
+        "第2卷",
+        "第3卷"
+      ],
+      "min_hit_in_top_k": 10,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume_any": "2,3"
+      }
+    },
+    {
+      "id": "mdh_cross_volume_hydraulic_control",
+      "q": "如果机械系统同时涉及液压执行机构和电控/机电一体化控制，应怎样在手册第4卷和第5卷之间分工检索？",
+      "query": "如果机械系统同时涉及液压执行机构和电控/机电一体化控制，应怎样在手册第4卷和第5卷之间分工检索？",
+      "category": "cross_document",
+      "difficulty": "hard",
+      "acceptable_hits": [
+        "mechanical_design_volume_4",
+        "mechanical_design_volume_5"
+      ],
+      "acceptable_files": [
+        "-机械设计手册 第六版 第4卷.PDF",
+        "-机械设计手册 第六版 第5卷.PDF"
+      ],
+      "expect_any": [
+        "液压",
+        "控制",
+        "机电",
+        "第4卷",
+        "第5卷"
+      ],
+      "min_hit_in_top_k": 10,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design",
+        "volume_any": "4,5"
+      }
+    },
+    {
+      "id": "mdh_table_formula_ocr_probe",
+      "q": "请检索机械设计手册中表格、公式或设计参数密集的内容，并说明 OCR 结果是否足以支撑引用。",
+      "query": "请检索机械设计手册中表格、公式或设计参数密集的内容，并说明 OCR 结果是否足以支撑引用。",
+      "category": "ocr_table_formula_probe",
+      "difficulty": "hard",
+      "acceptable_hits": [
+        "mechanical_design_volume_1",
+        "mechanical_design_volume_2",
+        "mechanical_design_volume_3",
+        "mechanical_design_volume_4",
+        "mechanical_design_volume_5"
+      ],
+      "acceptable_files": [
+        "机械设计手册 第六版 第1卷.PDF",
+        "机械设计手册 第六版 第2卷.PDF",
+        "-机械设计手册 第六版 第3卷.PDF",
+        "-机械设计手册 第六版 第4卷.PDF",
+        "-机械设计手册 第六版 第5卷.PDF"
+      ],
+      "expect_any": [
+        "表",
+        "公式",
+        "参数",
+        "机械设计手册"
+      ],
+      "min_hit_in_top_k": 10,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design"
+      }
+    },
+    {
+      "id": "mdh_all_volumes_inventory",
+      "q": "机械设计手册第六版 PDF 语料库当前入库了哪些卷册？按卷号列出并给出引用。",
+      "query": "机械设计手册第六版 PDF 语料库当前入库了哪些卷册？按卷号列出并给出引用。",
+      "category": "inventory",
+      "difficulty": "easy",
+      "acceptable_hits": [
+        "mechanical_design_volume_1",
+        "mechanical_design_volume_2",
+        "mechanical_design_volume_3",
+        "mechanical_design_volume_4",
+        "mechanical_design_volume_5"
+      ],
+      "acceptable_files": [
+        "机械设计手册 第六版 第1卷.PDF",
+        "机械设计手册 第六版 第2卷.PDF",
+        "-机械设计手册 第六版 第3卷.PDF",
+        "-机械设计手册 第六版 第4卷.PDF",
+        "-机械设计手册 第六版 第5卷.PDF"
+      ],
+      "expect_any": [
+        "第1卷",
+        "第2卷",
+        "第3卷",
+        "第4卷",
+        "第5卷"
+      ],
+      "min_hit_in_top_k": 10,
+      "expected_behavior": "retrieve_and_answer_with_citations",
+      "partition_expectation": {
+        "domain": "mechanical_design"
+      }
+    }
+  ],
+  "pro_blocked_cases": [
+    "engineering-design-signoff",
+    "safety-critical-load-certification",
+    "manufacturing-release-decision",
+    "unsupported-table-or-formula-extrapolation"
+  ]
+}

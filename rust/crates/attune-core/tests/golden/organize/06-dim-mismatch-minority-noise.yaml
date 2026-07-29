@@ -1,0 +1,21 @@
+id: 06-dim-mismatch-minority-noise
+description: 多数 8 维 + 少数 4 维 (混入旧模型向量) → 少数派维度入 noise, mismatch 计数, 不丢点
+min_cluster_size: 5
+items:
+  - { id: a1, lobe: 0, title: kb one }
+  - { id: a2, lobe: 0, title: kb two }
+  - { id: a3, lobe: 0, title: kb three }
+  - { id: a4, lobe: 0, title: kb four }
+  - { id: a5, lobe: 0, title: kb five }
+  - { id: b1, lobe: 4, title: kb six }
+  - { id: b2, lobe: 4, title: kb seven }
+  - { id: b3, lobe: 4, title: kb eight }
+  - { id: b4, lobe: 4, title: kb nine }
+  - { id: b5, lobe: 4, title: kb ten }
+  - { id: oddball, lobe: 0, dim_override: 4, title: legacy model vector }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 1

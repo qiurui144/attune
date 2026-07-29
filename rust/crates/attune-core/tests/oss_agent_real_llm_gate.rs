@@ -65,11 +65,13 @@ const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5:3b";
 ///
 /// Per CLAUDE.md 红线:env var 注入 key,**禁止 print key**。
 fn require_llm() -> Box<dyn LlmProvider> {
-    let provider_kind = std::env::var("ATTUNE_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
+    let provider_kind =
+        std::env::var("ATTUNE_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
     match provider_kind.as_str() {
         "openai_compat" | "openai" => {
-            let endpoint = std::env::var("ATTUNE_LLM_ENDPOINT")
-                .expect("ATTUNE_LLM_ENDPOINT required for openai_compat (e.g. https://api.deepseek.com/v1)");
+            let endpoint = std::env::var("ATTUNE_LLM_ENDPOINT").expect(
+                "ATTUNE_LLM_ENDPOINT required for openai_compat (e.g. https://api.deepseek.com/v1)",
+            );
             let api_key = std::env::var("ATTUNE_LLM_API_KEY")
                 .expect("ATTUNE_LLM_API_KEY required for openai_compat");
             let model = std::env::var("ATTUNE_LLM_MODEL")
@@ -159,11 +161,11 @@ fn memory_real_inputs() -> Vec<ConsolidationBundle> {
                 "用户对比了交强险和商业险在事故赔偿里的优先顺序。",
             ],
         ),
-        // Bundle 4: K3 IME INT8 算子优化
+        // Bundle 4: local scheduler IME INT8 算子优化
         bundle_from_summaries(
             1_780_259_200,
             &[
-                "用户研究 SpacemiT K3 的 IME (Integer Matrix Engine) 自定义指令 vmadotu。",
+                "用户研究本地调度器的 IME (Integer Matrix Engine) 自定义指令 vmadotu。",
                 "用户对比了 IME INT8 (vmadotu) 和标准 RVV (vfmacc) 在 GEMM 上的吞吐差异:IME 在 256x256 矩阵上达 135 GOPS,RVV ~30 GOPS。",
                 "用户用 perf stat 测了 IME kernel 的 IPC,大约 1.2 vs 标量 0.4。",
                 "用户记录 IME 受限于跨 cluster TCM 争抢,8 线程反而比 4 线程慢。",
@@ -236,7 +238,11 @@ fn agent_memory_consolidation_real_llm() {
     let mut results: Vec<MemoryCaseResult> = Vec::new();
     for (i, bundle) in bundles.iter().enumerate() {
         let case_no = i + 1;
-        println!("\n[case {case_no}/5] window_start={} chunks={}", bundle.window_start, bundle.chunks.len());
+        println!(
+            "\n[case {case_no}/5] window_start={} chunks={}",
+            bundle.window_start,
+            bundle.chunks.len()
+        );
 
         let out = generate_one_episodic_memory(llm.as_ref(), bundle);
         match out {

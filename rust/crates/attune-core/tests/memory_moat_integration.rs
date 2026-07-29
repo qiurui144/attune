@@ -5,8 +5,8 @@
 use attune_core::crypto::Key32;
 use attune_core::index::FulltextIndex;
 use attune_core::reindex;
-use attune_core::store::Store;
 use attune_core::store::items::compute_content_hash;
+use attune_core::store::Store;
 use attune_core::vectors::VectorIndex;
 use tempfile::TempDir;
 
@@ -25,27 +25,54 @@ fn doc_lifecycle_signals_complete_flow() {
 
     // Step 1: upload — 仿 route 写 doc_create 信号
     let id = store
-        .insert_item(&dek, "Doc A", "# Heading\n\nbody with vintage keywords",
-                     None, "note", None, None)
+        .insert_item(
+            &dek,
+            "Doc A",
+            "# Heading\n\nbody with vintage keywords",
+            None,
+            "note",
+            None,
+            None,
+        )
         .unwrap();
-    store.record_signal_event("doc_create", &id, Some("Doc A")).unwrap();
+    store
+        .record_signal_event("doc_create", &id, Some("Doc A"))
+        .unwrap();
 
     // Step 2: update — content 变化触发 reindex_item + doc_update signal
-    let outcome = store.update_item(&dek, &id, None,
-        Some("# Heading\n\nbody with MODERN keywords")).unwrap();
+    let outcome = store
+        .update_item(
+            &dek,
+            &id,
+            None,
+            Some("# Heading\n\nbody with MODERN keywords"),
+        )
+        .unwrap();
     assert!(outcome.existed);
     assert!(outcome.content_changed, "新内容应触发 reindex");
 
-    let stats = reindex::reindex_item(&store, &mut vec, &ft, &id, "Doc A",
-        "# Heading\n\nbody with MODERN keywords", "note").unwrap();
+    let stats = reindex::reindex_item(
+        &store,
+        &mut vec,
+        &ft,
+        &id,
+        "Doc A",
+        "# Heading\n\nbody with MODERN keywords",
+        "note",
+    )
+    .unwrap();
     assert!(stats.chunks_enqueued > 0);
     store.record_signal_event("doc_update", &id, None).unwrap();
 
     // Step 3: annotation marker
-    store.record_signal_event("annotation_marker", &id, Some("⭐重点")).unwrap();
+    store
+        .record_signal_event("annotation_marker", &id, Some("⭐重点"))
+        .unwrap();
 
     // Step 4: chat citation hit
-    store.record_signal_event("citation_hit", &id, Some("用户问")).unwrap();
+    store
+        .record_signal_event("citation_hit", &id, Some("用户问"))
+        .unwrap();
 
     // Step 5: delete + purge
     let stats = reindex::purge_item_indexes(&store, &mut vec, &ft, &id).unwrap();
@@ -54,7 +81,13 @@ fn doc_lifecycle_signals_complete_flow() {
     store.record_signal_event("doc_delete", &id, None).unwrap();
 
     // 验证 5 类信号都写入了
-    for k in &["doc_create", "doc_update", "annotation_marker", "citation_hit", "doc_delete"] {
+    for k in &[
+        "doc_create",
+        "doc_update",
+        "annotation_marker",
+        "citation_hit",
+        "doc_delete",
+    ] {
         let c = store.count_unprocessed_signals_by_kind(k).unwrap();
         assert_eq!(c, 1, "kind={k} 应有 1 条未处理信号，实际 {c}");
     }
@@ -64,10 +97,18 @@ fn doc_lifecycle_signals_complete_flow() {
 fn evolver_only_consumes_search_miss_kind() {
     // evolver 只看 search_miss kind 不被 Phase B 信号污染
     let (_t, store, _v, _f, _d) = setup();
-    store.record_skill_signal("query without results", 0, false).unwrap();
-    store.record_signal_event("doc_update", "item_x", None).unwrap();
-    store.record_signal_event("citation_hit", "item_y", Some("user msg")).unwrap();
-    store.record_signal_event("annotation_marker", "item_z", Some("⭐")).unwrap();
+    store
+        .record_skill_signal("query without results", 0, false)
+        .unwrap();
+    store
+        .record_signal_event("doc_update", "item_x", None)
+        .unwrap();
+    store
+        .record_signal_event("citation_hit", "item_y", Some("user msg"))
+        .unwrap();
+    store
+        .record_signal_event("annotation_marker", "item_z", Some("⭐"))
+        .unwrap();
 
     // count 只数 search_miss
     let total = store.count_unprocessed_signals().unwrap();
@@ -79,43 +120,76 @@ fn evolver_only_consumes_search_miss_kind() {
     assert_eq!(sigs[0].query, "query without results");
 
     // by_kind 全谱可达
-    assert_eq!(store.count_unprocessed_signals_by_kind("search_miss").unwrap(), 1);
-    assert_eq!(store.count_unprocessed_signals_by_kind("doc_update").unwrap(), 1);
-    assert_eq!(store.count_unprocessed_signals_by_kind("citation_hit").unwrap(), 1);
-    assert_eq!(store.count_unprocessed_signals_by_kind("annotation_marker").unwrap(), 1);
+    assert_eq!(
+        store
+            .count_unprocessed_signals_by_kind("search_miss")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .count_unprocessed_signals_by_kind("doc_update")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .count_unprocessed_signals_by_kind("citation_hit")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .count_unprocessed_signals_by_kind("annotation_marker")
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
 fn signal_kind_rejects_typo() {
     let (_t, store, _v, _f, _d) = setup();
-    assert!(store.record_signal_event("doc_updaet", "item_x", None).is_err(),
-            "typo kind 必须报错");
+    assert!(
+        store
+            .record_signal_event("doc_updaet", "item_x", None)
+            .is_err(),
+        "typo kind 必须报错"
+    );
 }
 
 #[test]
 fn update_item_within_transaction_atomic() {
     // update_item 内 SQL 已包入事务，多轮 update 后 hash + BLOB 一致
     let (_t, store, _v, _f, dek) = setup();
-    let id = store.insert_item(&dek, "t", "v1", None, "note", None, None).unwrap();
+    let id = store
+        .insert_item(&dek, "t", "v1", None, "note", None, None)
+        .unwrap();
 
     for v in ["v2", "v3", "v4"].iter() {
         let outcome = store.update_item(&dek, &id, None, Some(v)).unwrap();
         assert!(outcome.content_changed);
         let stored_hash = store.get_content_hash(&id).unwrap().unwrap();
         let expected_hash = compute_content_hash(v);
-        assert_eq!(stored_hash, expected_hash,
-                   "事务保证 content + hash 同步更新 (v={v})");
+        assert_eq!(
+            stored_hash, expected_hash,
+            "事务保证 content + hash 同步更新 (v={v})"
+        );
     }
 }
 
 #[test]
 fn reindex_queue_action_validation_and_park() {
     let (_t, store, _v, _f, dek) = setup();
-    let id = store.insert_item(&dek, "t", "c", None, "note", None, None).unwrap();
+    let id = store
+        .insert_item(&dek, "t", "c", None, "note", None, None)
+        .unwrap();
 
     store.enqueue_reindex(&id, "purge").unwrap();
     store.enqueue_reindex(&id, "reindex").unwrap();
-    assert!(store.enqueue_reindex(&id, "bogus").is_err(), "typo action 必须报错");
+    assert!(
+        store.enqueue_reindex(&id, "bogus").is_err(),
+        "typo action 必须报错"
+    );
 
     let tasks = store.dequeue_reindex_tasks(10).unwrap();
     assert_eq!(tasks.len(), 2);
@@ -139,9 +213,13 @@ fn signal_event_with_truncated_query() {
     let (_t, store, _v, _f, _d) = setup();
     let long_msg: String = "x".repeat(2000);
     let truncated: String = long_msg.chars().take(512).collect();
-    store.record_signal_event("citation_hit", "item_a", Some(&truncated)).unwrap();
+    store
+        .record_signal_event("citation_hit", "item_a", Some(&truncated))
+        .unwrap();
 
-    let count = store.count_unprocessed_signals_by_kind("citation_hit").unwrap();
+    let count = store
+        .count_unprocessed_signals_by_kind("citation_hit")
+        .unwrap();
     assert_eq!(count, 1);
     // 验证写入的 query 不超过预期长度（caller 应负责截断）
     assert!(truncated.len() <= 512);
@@ -153,17 +231,43 @@ fn reindex_item_deletes_existing_vectors_precise_count() {
     // 先手工 add 3 个该 item 的向量 + 1 个别的 item 的，reindex 应只删自己的 3 个。
     use attune_core::vectors::VectorMeta;
     let (_t, store, mut vec, ft, dek) = setup();
-    let id = store.insert_item(&dek, "t", "# H\n\nbody", None, "note", None, None).unwrap();
-    let other = store.insert_item(&dek, "t2", "other", None, "note", None, None).unwrap();
+    let id = store
+        .insert_item(&dek, "t", "# H\n\nbody", None, "note", None, None)
+        .unwrap();
+    let other = store
+        .insert_item(&dek, "t2", "other", None, "note", None, None)
+        .unwrap();
 
     let v = vec![0.1f32; 1024];
     for i in 0..3 {
-        vec.add(&v, VectorMeta { item_id: id.clone(), chunk_idx: i, level: 2, section_idx: 0 }).unwrap();
+        vec.add(
+            &v,
+            VectorMeta {
+                item_id: id.clone(),
+                chunk_idx: i,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
     }
-    vec.add(&v, VectorMeta { item_id: other.clone(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+    vec.add(
+        &v,
+        VectorMeta {
+            item_id: other.clone(),
+            chunk_idx: 0,
+            level: 2,
+            section_idx: 0,
+        },
+    )
+    .unwrap();
 
-    let stats = reindex::reindex_item(&store, &mut vec, &ft, &id, "t", "# H\n\nbody", "note").unwrap();
-    assert_eq!(stats.vectors_deleted, 3, "只删自己 item 的 3 个向量，不碰别的 item");
+    let stats =
+        reindex::reindex_item(&store, &mut vec, &ft, &id, "t", "# H\n\nbody", "note").unwrap();
+    assert_eq!(
+        stats.vectors_deleted, 3,
+        "只删自己 item 的 3 个向量，不碰别的 item"
+    );
 }
 
 #[test]
@@ -171,7 +275,9 @@ fn reindex_item_skips_empty_sections() {
     // reindex.rs 空 section 跳过分支
     let (_t, store, mut vec, ft, dek) = setup();
     let content = "# H1\n\n   \n\n# H2\n\nreal content here";
-    let id = store.insert_item(&dek, "t", content, None, "note", None, None).unwrap();
+    let id = store
+        .insert_item(&dek, "t", content, None, "note", None, None)
+        .unwrap();
     let stats = reindex::reindex_item(&store, &mut vec, &ft, &id, "t", content, "note").unwrap();
     // 空白 section 不应入队，但非空 section 必有 chunk
     assert!(stats.chunks_enqueued >= 1, "非空 section 必产 chunk");
@@ -181,10 +287,20 @@ fn reindex_item_skips_empty_sections() {
 fn all_known_signal_kinds_accepted() {
     // 白名单 8 值全覆盖
     let (_t, store, _v, _f, _d) = setup();
-    for kind in ["search_miss", "doc_create", "doc_update", "doc_delete",
-                 "citation_hit", "annotation_marker", "click_through", "dwell"] {
-        assert!(store.record_signal_event(kind, "ref", None).is_ok(),
-                "白名单 kind={kind} 必须接受");
+    for kind in [
+        "search_miss",
+        "doc_create",
+        "doc_update",
+        "doc_delete",
+        "citation_hit",
+        "annotation_marker",
+        "click_through",
+        "dwell",
+    ] {
+        assert!(
+            store.record_signal_event(kind, "ref", None).is_ok(),
+            "白名单 kind={kind} 必须接受"
+        );
     }
 }
 
@@ -194,16 +310,30 @@ fn signal_ref_id_length_boundary() {
     let (_t, store, _v, _f, _d) = setup();
     let id_128 = "a".repeat(128);
     let id_129 = "a".repeat(129);
-    assert!(store.record_signal_event("doc_update", &id_128, None).is_ok(), "128 字符边界内");
-    assert!(store.record_signal_event("doc_update", &id_129, None).is_err(), "129 超界必拒");
+    assert!(
+        store
+            .record_signal_event("doc_update", &id_128, None)
+            .is_ok(),
+        "128 字符边界内"
+    );
+    assert!(
+        store
+            .record_signal_event("doc_update", &id_129, None)
+            .is_err(),
+        "129 超界必拒"
+    );
 }
 
 #[test]
 fn update_item_title_and_content_both_changed() {
     // title + content 同时传的组合分支
     let (_t, store, _v, _f, dek) = setup();
-    let id = store.insert_item(&dek, "OldTitle", "old body", None, "note", None, None).unwrap();
-    let outcome = store.update_item(&dek, &id, Some("NewTitle"), Some("new body")).unwrap();
+    let id = store
+        .insert_item(&dek, "OldTitle", "old body", None, "note", None, None)
+        .unwrap();
+    let outcome = store
+        .update_item(&dek, &id, Some("NewTitle"), Some("new body"))
+        .unwrap();
     assert!(outcome.existed);
     assert!(outcome.content_changed, "content 变了");
     let item = store.get_item(&dek, &id).unwrap().unwrap();
@@ -223,8 +353,12 @@ fn v07_migrations_idempotent_across_reopens() {
     // 第一次 open + 插数据
     let id = {
         let store = Store::open(&db_path).unwrap();
-        let id = store.insert_item(&dek, "t", "body", None, "note", None, None).unwrap();
-        store.record_signal_event("doc_create", &id, Some("t")).unwrap();
+        let id = store
+            .insert_item(&dek, "t", "body", None, "note", None, None)
+            .unwrap();
+        store
+            .record_signal_event("doc_create", &id, Some("t"))
+            .unwrap();
         store.enqueue_reindex(&id, "purge").unwrap();
         id
     };
@@ -239,8 +373,13 @@ fn v07_migrations_idempotent_across_reopens() {
         let h = store.get_content_hash(&id).unwrap().unwrap();
         assert_eq!(h.len(), 64, "round {round}: content_hash 是 SHA-256 hex");
         // skill_signals kind 列可查
-        assert_eq!(store.count_unprocessed_signals_by_kind("doc_create").unwrap(), 1,
-                   "round {round}: doc_create 信号仍在");
+        assert_eq!(
+            store
+                .count_unprocessed_signals_by_kind("doc_create")
+                .unwrap(),
+            1,
+            "round {round}: doc_create 信号仍在"
+        );
         // reindex_queue 表仍有任务
         let tasks = store.dequeue_reindex_tasks(10).unwrap();
         assert_eq!(tasks.len(), 1, "round {round}: reindex_queue 任务仍在");
@@ -253,7 +392,9 @@ fn open_memory_has_all_v07_schema() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
     // content_hash 路径可用
-    let id = store.insert_item(&dek, "t", "c", None, "note", None, None).unwrap();
+    let id = store
+        .insert_item(&dek, "t", "c", None, "note", None, None)
+        .unwrap();
     assert!(store.get_content_hash(&id).unwrap().is_some());
     // skill_signals kind 路径可用
     store.record_signal_event("doc_update", &id, None).unwrap();
@@ -266,7 +407,9 @@ fn open_memory_has_all_v07_schema() {
 fn content_hash_dedup_via_store_api() {
     // 验证 upload route 用的 find_item_by_content_hash 短路路径
     let (_t, store, _v, _f, dek) = setup();
-    let id = store.insert_item(&dek, "t", "DEDUP_PAYLOAD", None, "note", None, None).unwrap();
+    let id = store
+        .insert_item(&dek, "t", "DEDUP_PAYLOAD", None, "note", None, None)
+        .unwrap();
     let h = compute_content_hash("DEDUP_PAYLOAD");
     assert_eq!(store.find_item_by_content_hash(&h).unwrap(), Some(id));
 

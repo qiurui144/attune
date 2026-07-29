@@ -35,10 +35,16 @@ async fn start_test_server() -> (String, tokio::task::JoinHandle<()>) {
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+    // 空 $HOME = 空模型缓存;init_search_engines 同步 ensure_models 会触发 blocking
+    // hf-hub 下载(无超时 + 在 async handler 内 drop runtime → panic)。HF_HUB_OFFLINE
+    // 让未命中缓存直接 Err(graceful),不进网络路径(同 office_error_contract)。
+    std::env::set_var("HF_HUB_OFFLINE", "1");
 
-    let vault = attune_core::vault::Vault::open_memory(tmp.path())
-        .expect("open in-memory vault");
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
+    // office job 路由需 durable job store(否则 unknown-job 返 503 而非 404);生产 boot
+    // 时安装,测试需显式补(同 office_concurrent_test)。
+    state.install_job_store();
     let router = attune_server::build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -144,8 +144,15 @@ fn annotation_angle_plugins_have_label_prefix_and_color() {
 
     for p in reg.plugins() {
         if p.manifest.plugin_type == "annotation_angle" {
-            assert!(!p.manifest.label_prefix.is_empty(), "label_prefix missing for {}", p.manifest.id);
-            assert!(!p.manifest.default_color.is_empty(), "default_color missing");
+            assert!(
+                !p.manifest.label_prefix.is_empty(),
+                "label_prefix missing for {}",
+                p.manifest.id
+            );
+            assert!(
+                !p.manifest.default_color.is_empty(),
+                "default_color missing"
+            );
         }
     }
 }
@@ -158,7 +165,9 @@ fn rust_helper_matches_chat_keywords() {
     write_plugin(tmp.path(), "rust_helper", RUST_HELPER);
     let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
 
-    let m = reg.match_chat_trigger("如何用 Rust 实现 trait 多态?").expect("match");
+    let m = reg
+        .match_chat_trigger("如何用 Rust 实现 trait 多态?")
+        .expect("match");
     assert_eq!(m.plugin_id, "rust_helper");
     assert!(m.keyword_hits >= 2); // Rust + trait
 }
@@ -251,7 +260,11 @@ fn empty_oss_distribution_has_no_plugins() {
 fn corrupt_yaml_logged_but_others_still_load() {
     let tmp = TempDir::new().expect("tmp");
     write_plugin(tmp.path(), "rust_helper", RUST_HELPER);
-    write_plugin(tmp.path(), "corrupt", "id: corrupt\ntype:\n  - this\n  is: invalid_yaml::");
+    write_plugin(
+        tmp.path(),
+        "corrupt",
+        "id: corrupt\ntype:\n  - this\n  is: invalid_yaml::",
+    );
     let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
     // corrupt 进 errs, rust_helper 仍装
     assert_eq!(reg.plugins().count(), 1);

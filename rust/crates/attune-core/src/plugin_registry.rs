@@ -17,7 +17,7 @@
 //! ```
 //!
 //! 启动时 `PluginRegistry::scan(plugins_root)` 扫所有子目录加载。
-//! 商业插件包 (`.attunepkg`) 解压到 `~/.local/share/attune/plugins/<plugin_id>/`。
+//! 商业插件包 (`.tar.gz`) 解压到 `~/.local/share/attune/plugins/<plugin_id>/`。
 
 use crate::error::{Result, VaultError};
 use crate::plugin_loader::{LoadedPlugin, PiiPatternSpec};
@@ -47,10 +47,47 @@ pub struct ChatTriggerMatch {
     pub keyword_hits: usize,
 }
 
+/// 工作台「场景卡片」派生数据（一卡 = 一可独立 dispatch 的 agent）。
+///
+/// 全部从已加载 plugin.yaml 声明派生 —— 装插件即出卡,零 UI 硬编码 (spec §3.1)。
+/// label 回退链 `label → scenario → description → id` 保证永不出空卡 (spec §7)。
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct Scenario {
+    pub plugin_id: String,
+    pub plugin_label: String,
+    /// 插件类型(如 "industry") → 工作台分组依据。
+    pub plugin_type: String,
+    pub agent_id: String,
+    /// 卡片主标(回退链解析后,永不空)。
+    pub label: String,
+    /// 意图 hint(可空)。
+    pub intent: Option<String>,
+    /// 场景描述(可空; label 已含回退,故这里保留原始声明)。
+    pub scenario: Option<String>,
+    /// "free"(llm_tokens==0/未声明) | "cloud"(llm_tokens>0)。
+    pub cost_tier: &'static str,
+    pub llm_required: bool,
+    /// 关联的 case_kind(取首个;无则 None → 不绑 Project,如 tech-pro)。
+    pub case_kind: Option<String>,
+    pub has_form: bool,
+    /// 有表单时 → {plugin_id, form_id}(form_id = ui_component.id)。
+    pub form_ref: Option<ScenarioFormRef>,
+    pub output_modes: Option<crate::plugin_loader::AgentOutputModes>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct ScenarioFormRef {
+    pub plugin_id: String,
+    pub form_id: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PluginRegistry {
     plugins: HashMap<String, LoadedPlugin>,
     workflows: Vec<LoadedWorkflow>,
+    /// 每个已装 plugin 的**真实**签名信任级别(T9:scan 时跑真 `verify_with_whitelist`
+    /// 得来,非硬编码)。供列表路由暴露 `trust`(spec §5.1 / T10)。
+    trust: HashMap<String, crate::plugin_sig::Trust>,
 }
 
 impl PluginRegistry {
@@ -66,6 +103,34 @@ impl PluginRegistry {
         self.plugins.get(id)
     }
 
+    /// 已装 plugin 的真实信任级别(T9)。未知 plugin → None。
+    pub fn plugin_trust(&self, id: &str) -> Option<crate::plugin_sig::Trust> {
+        self.trust.get(id).copied()
+    }
+
+    /// 每个已装 plugin 声明的 skill-runtime skill yaml(`registers_skills`),连同
+    /// plugin id + 真实 trust 级别。供 server 的 `build_skill_registry` 把 pro 交付物
+    /// skill 注册进 `SkillRegistry` —— 注册前 server 还需按 settings 过滤 disabled。
+    ///
+    /// 只 yield 真正声明了 `registers_skills` 的 plugin(其余 yaml 列表为空,自然不贡献)。
+    /// OSS 裸装 → plugins 空 → 返空 Vec。
+    pub fn plugin_registered_skills(&self) -> Vec<(&str, crate::plugin_sig::Trust, &[String])> {
+        let mut out = Vec::new();
+        for p in self.plugins.values() {
+            if p.registered_skill_yamls.is_empty() {
+                continue;
+            }
+            let id = p.manifest.id.as_str();
+            let trust = self
+                .trust
+                .get(id)
+                .copied()
+                .unwrap_or(crate::plugin_sig::Trust::Unsigned);
+            out.push((id, trust, p.registered_skill_yamls.as_slice()));
+        }
+        out
+    }
+
     pub fn workflows(&self) -> &[LoadedWorkflow] {
         &self.workflows
     }
@@ -79,8 +144,13 @@ impl PluginRegistry {
     }
 
     /// 按 plugin_type 过滤已加载 plugin
-    pub fn plugins_by_type<'a>(&'a self, ptype: &'a str) -> impl Iterator<Item = &'a LoadedPlugin> + 'a {
-        self.plugins.values().filter(move |p| p.manifest.plugin_type == ptype)
+    pub fn plugins_by_type<'a>(
+        &'a self,
+        ptype: &'a str,
+    ) -> impl Iterator<Item = &'a LoadedPlugin> + 'a {
+        self.plugins
+            .values()
+            .filter(move |p| p.manifest.plugin_type == ptype)
     }
 
     /// v0.6 新增：聚合所有 plugin 的 PII 正则（按 name 去重；同名仅保留第一个）。
@@ -101,6 +171,28 @@ impl PluginRegistry {
             for spec in &p.manifest.pii_patterns {
                 if seen.insert(spec.name.as_str()) {
                     out.push(spec);
+                }
+            }
+        }
+        out
+    }
+
+    /// INT-2 doc_privacy pro 写入端：聚合所有已装 plugin 声明的行业机密词
+    /// (`confidential_keywords`)，去重后返回。注入 attune doc_privacy classifier 的
+    /// 机密词集 —— 含任一行业标记的文档导出 fail-closed 拦截。
+    ///
+    /// **OSS 边界**：OSS classifier 只内置通用机密词；行业词由 pro 插件经 plugin.yaml
+    /// `confidential_keywords:` 注入。OSS 裸装 → plugins 空 → 返空 Vec → classifier
+    /// 仅通用集（无行业泄漏）。复用 [`all_pii_patterns`] 同款插件发现机制。
+    pub fn all_confidential_keywords(&self) -> Vec<String> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for p in self.plugins.values() {
+            for kw in &p.manifest.confidential_keywords {
+                let s = kw.trim();
+                if !s.is_empty() && seen.insert(s.to_string()) {
+                    out.push(s.to_string());
                 }
             }
         }
@@ -132,6 +224,56 @@ impl PluginRegistry {
             }
         }
         out
+    }
+
+    /// S4b MU-5：按 domain 分组聚合各 vertical plugin 的 chat_trigger.project_keywords。
+    ///
+    /// 用途：`search::detect_query_domain` 的 **唯一** 关键词来源。OSS attune-core
+    /// 不再硬编码 legal/medical/patent/tech 行业词表（per oss-pro-strategy §4.3 —
+    /// 行业 domain detection 属于 attune-pro 能力）。每个 vertical plugin 用其
+    /// manifest `category`（如 `legal` / `medical` / `patent` / `tech`）声明自己的
+    /// domain，并在 `chat_trigger.project_keywords` 提供该 domain 的特征词。
+    ///
+    /// domain 字符串需与 ingest 阶段写入 item 的 `corpus_domain` 对齐
+    /// （`apply_cross_domain_penalty` 比对的是 `corpus_domain`）。
+    ///
+    /// 跳过规则：`category` 为空 或 无 `chat_trigger` 或 `project_keywords` 为空的
+    /// plugin 不贡献条目。同 domain 多 plugin 的 keywords 合并去重。
+    ///
+    /// OSS 裸装 → plugins 空 → 返空 Vec → `detect_query_domain` 返 None → 不应用
+    /// cross-domain penalty（generic ranking，graceful degrade）。
+    pub fn all_chat_trigger_keywords_by_domain(&self) -> Vec<(String, Vec<&str>)> {
+        use std::collections::HashSet;
+        // 保持 plugins 迭代序的稳定 domain 顺序（同分 domain 命中按首见序优先）。
+        let mut order: Vec<String> = Vec::new();
+        let mut by_domain: HashMap<String, (HashSet<&str>, Vec<&str>)> = HashMap::new();
+        for p in self.plugins.values() {
+            let domain = p.manifest.category.trim();
+            if domain.is_empty() {
+                continue;
+            }
+            let Some(ct) = p.manifest.chat_trigger.as_ref() else {
+                continue;
+            };
+            if ct.project_keywords.is_empty() {
+                continue;
+            }
+            let entry = by_domain.entry(domain.to_string()).or_insert_with(|| {
+                order.push(domain.to_string());
+                (HashSet::new(), Vec::new())
+            });
+            for kw in &ct.project_keywords {
+                let s = kw.as_str();
+                if !s.is_empty() && entry.0.insert(s) {
+                    entry.1.push(s);
+                }
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|d| by_domain.remove(&d).map(|(_, kws)| (d, kws)))
+            .filter(|(_, kws)| !kws.is_empty())
+            .collect()
     }
 
     /// 列出所有 plugin 的全部 skills (附带 plugin_id)
@@ -167,6 +309,17 @@ impl PluginRegistry {
         out
     }
 
+    /// List every declarative RAG profile contributed by installed plugins.
+    pub fn list_rag_profiles(&self) -> Vec<(&str, &crate::plugin_loader::RagProfileSpec)> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            for profile in &p.manifest.rag_profiles {
+                out.push((pid.as_str(), profile));
+            }
+        }
+        out
+    }
+
     /// 按 case_kind 过滤 agents (调用方按业务场景选 kind, 拿到该 kind 下的 agents)
     pub fn agents_by_case_kind(&self, kind: &str) -> Vec<(&str, &crate::plugin_loader::AgentSpec)> {
         self.list_agents()
@@ -182,6 +335,67 @@ impl PluginRegistry {
         for p in self.plugins.values() {
             for k in &p.manifest.registers_case_kinds {
                 out.push(k);
+            }
+        }
+        out
+    }
+
+    /// 派生工作台「场景卡片」清单 —— 遍历所有已装 plugin 的 agents (spec §3.1)。
+    ///
+    /// 每个**非 library** runtime 的 agent 派生一张卡; `runtime: library` 的 agent
+    /// (如 law-pro interest_calculator) 是内部工具,不可独立 dispatch → 跳过 (spec §3.5)。
+    /// label 回退链 `label → scenario → description → id`,永不出空卡 (spec §7)。
+    /// has_form 来自 ui_components(`target: agent:<id>`)。OSS 裸装无 plugin → 空 Vec。
+    pub fn all_scenarios(&self) -> Vec<Scenario> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            let m = &p.manifest;
+            let plugin_label = if m.name.is_empty() {
+                pid.clone()
+            } else {
+                m.name.clone()
+            };
+            for a in &m.agents {
+                // library runtime 不暴露独立 binary → 不出卡(与 agents.rs dispatch gate 一致)。
+                if a.runtime == "library" {
+                    continue;
+                }
+                let label = a
+                    .label
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or(a.scenario.as_deref().filter(|s| !s.is_empty()))
+                    .or(Some(a.description.as_str()).filter(|s| !s.is_empty()))
+                    .unwrap_or(a.id.as_str())
+                    .to_string();
+
+                let llm_required = a.cost.llm_tokens.unwrap_or(0) > 0;
+                let cost_tier = if llm_required { "cloud" } else { "free" };
+
+                // ui_component 以 `target: agent:<id>` 关联 agent → 表单引用。
+                let form_ref = m.ui_components.iter().find_map(|c| {
+                    let target = c.target.strip_prefix("agent:").unwrap_or(c.target.as_str());
+                    (target == a.id).then(|| ScenarioFormRef {
+                        plugin_id: pid.clone(),
+                        form_id: c.id.clone(),
+                    })
+                });
+
+                out.push(Scenario {
+                    plugin_id: pid.clone(),
+                    plugin_label: plugin_label.clone(),
+                    plugin_type: m.plugin_type.clone(),
+                    agent_id: a.id.clone(),
+                    label,
+                    intent: a.intent.clone().filter(|s| !s.is_empty()),
+                    scenario: a.scenario.clone().filter(|s| !s.is_empty()),
+                    cost_tier,
+                    llm_required,
+                    case_kind: a.case_kinds.first().cloned(),
+                    has_form: form_ref.is_some(),
+                    form_ref,
+                    output_modes: a.output_modes.clone(),
+                });
             }
         }
         out
@@ -203,14 +417,18 @@ impl PluginRegistry {
         use regex::Regex;
         let mut best: Option<ChatTriggerMatch> = None;
         for (plugin_id, p) in &self.plugins {
-            let Some(ct) = p.manifest.chat_trigger.as_ref() else { continue };
+            let Some(ct) = p.manifest.chat_trigger.as_ref() else {
+                continue;
+            };
             if !ct.enabled {
                 continue;
             }
 
             // 否决检查
             let excluded = ct.exclude_patterns.iter().any(|pat| {
-                Regex::new(pat).map(|r| r.is_match(user_msg)).unwrap_or(false)
+                Regex::new(pat)
+                    .map(|r| r.is_match(user_msg))
+                    .unwrap_or(false)
             });
             if excluded {
                 continue;
@@ -218,11 +436,17 @@ impl PluginRegistry {
 
             // pattern 命中
             let pattern_hit = ct.patterns.iter().any(|pat| {
-                Regex::new(pat).map(|r| r.is_match(user_msg)).unwrap_or(false)
+                Regex::new(pat)
+                    .map(|r| r.is_match(user_msg))
+                    .unwrap_or(false)
             });
 
             // keywords 命中数
-            let kw_hits = ct.keywords.iter().filter(|kw| user_msg.contains(kw.as_str())).count();
+            let kw_hits = ct
+                .keywords
+                .iter()
+                .filter(|kw| user_msg.contains(kw.as_str()))
+                .count();
             let kw_match = kw_hits >= ct.min_keyword_match.max(1);
 
             if pattern_hit || kw_match {
@@ -233,7 +457,11 @@ impl PluginRegistry {
                     needs_confirm: ct.needs_confirm,
                     keyword_hits: kw_hits,
                 };
-                if best.as_ref().map(|b| m.priority > b.priority).unwrap_or(true) {
+                if best
+                    .as_ref()
+                    .map(|b| m.priority > b.priority)
+                    .unwrap_or(true)
+                {
                     best = Some(m);
                 }
             }
@@ -244,19 +472,107 @@ impl PluginRegistry {
     /// 扫描 plugins_root, 自动解密 paid plugin (如提供 key) — 后续扩展用.
     ///
     /// 调用方典型: 在 attune-server 启动时, 从用户 license 拿 decrypt_key 透传.
-    pub fn scan_with_key(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, decrypt_key)
+    pub fn scan_with_key(
+        plugins_root: &Path,
+        decrypt_key: Option<&[u8]>,
+    ) -> Result<(Self, Vec<String>)> {
+        // 默认 trust_mode = Off(load-all,保持现有行为);trust 标签来自**真实**验签。
+        // 按 trust_mode 过滤的 server 路径走 [`scan_with_trust`](T11 settings 注入 mode)。
+        Self::scan_impl(
+            plugins_root,
+            decrypt_key,
+            None,
+            crate::plugin_sig::TrustMode::Off,
+            &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
+    }
+
+    /// 扫描 plugins_root, 对每个 plugin 目录按目录名查找对应解密 key。
+    ///
+    /// 商业插件安装约定是 `plugins/<plugin_id>/`;加密 manifest(`plugin.yaml.enc`)
+    /// 在解析前无法知道 manifest id,所以这里用目录名作为本机 entitlement key 的索引。
+    pub fn scan_with_keys(
+        plugins_root: &Path,
+        decrypt_keys: &HashMap<String, Vec<u8>>,
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(
+            plugins_root,
+            None,
+            Some(decrypt_keys),
+            crate::plugin_sig::TrustMode::Off,
+            &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
+    }
+
+    /// Scan plugins using per-plugin decrypt keys plus the configured signature
+    /// trust gate. This is the production path for unlocked desktop/server
+    /// runtimes: encrypted commercial plugins can load, while `plugin_trust_mode`
+    /// and `plugin_trusted_pubkeys` still decide whether a plugin is trusted
+    /// enough to be available.
+    pub fn scan_with_keys_and_trust(
+        plugins_root: &Path,
+        decrypt_keys: &HashMap<String, Vec<u8>>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(
+            plugins_root,
+            None,
+            Some(decrypt_keys),
+            mode,
+            user_pubkeys,
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
     }
 
     /// 扫描 plugins_root 下每个一级子目录作为一个 plugin。
-    /// 每个 plugin dir 必须有 `plugin.yaml`；可选 `workflows/*.yaml` 和 `capabilities/<cap_id>/plugin.yaml`。
+    /// 每个 plugin dir 必须有 `plugin.yaml`;可选 `workflows/*.yaml` 和 `capabilities/<cap_id>/plugin.yaml`。
     ///
     /// **best-effort 加载** — 单个 plugin 失败不影响其他。返回错误数量供 caller 决定是否告警。
     pub fn scan(plugins_root: &Path) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, None)
+        Self::scan_impl(
+            plugins_root,
+            None,
+            None,
+            crate::plugin_sig::TrustMode::Off,
+            &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
     }
 
-    fn scan_impl(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
+    /// T9:按真实签名验证 + `trust_mode` 三态门过滤扫描。每个 plugin dir 跑
+    /// [`crate::plugin_sig::verify_with_whitelist`](官方公钥 + 用户白名单)得到真实
+    /// [`crate::plugin_sig::SigOutcome`],经 [`crate::plugin_sig::gate`] 判定 —— `Reject`
+    /// → skip + errors(`[<code>] <id>`);`Allow`/`AllowWarn` → 以**真实** [`Trust`] 装载
+    /// (杜绝硬编码)。`user_pubkeys` = settings `plugin_trusted_pubkeys`(T11)。
+    pub fn scan_with_trust(
+        plugins_root: &Path,
+        decrypt_key: Option<&[u8]>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(
+            plugins_root,
+            decrypt_key,
+            None,
+            mode,
+            user_pubkeys,
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
+    }
+
+    /// 内核。`official_keys` 可注入(测试走 Official 路径 —— 内嵌 anchor const 无私钥)。
+    fn scan_impl(
+        plugins_root: &Path,
+        decrypt_key: Option<&[u8]>,
+        decrypt_keys: Option<&HashMap<String, Vec<u8>>>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+        official_keys: &[&str],
+    ) -> Result<(Self, Vec<String>)> {
+        use crate::plugin_sig::{gate, verify_with_whitelist, SigOutcome, Trust, TrustDecision};
         let mut reg = Self::new();
         let mut errors: Vec<String> = Vec::new();
 
@@ -273,10 +589,32 @@ impl PluginRegistry {
             let plugin_yaml = path.join("plugin.yaml");
             let plugin_yaml_enc = path.join("plugin.yaml.enc");
             if plugin_yaml.exists() || plugin_yaml_enc.exists() {
-                // 装到 plugins/ 目录的 plugin 视为用户已通过 attune-cli plugin-install 装载
-                // (CLI 已校验签名 + 解密). server 装载时给 Some("Trusted"), 不再二次拒绝.
-                // 真实加密 paid plugin 在 scan 中**当前不解密** — 调用方按需扩展.
-                match LoadedPlugin::from_dir_with_key(&path, decrypt_key, Some("Trusted")) {
+                // T9: run REAL signature verification. The outcome drives both the
+                // trust label passed to from_dir_with_key (no hardcoded Trust) AND the
+                // three-state gate (mode) that decides whether to load at all.
+                let outcome = verify_with_whitelist(&path, official_keys, user_pubkeys)
+                    .unwrap_or(SigOutcome::Unsigned);
+                let real_trust: Trust = outcome.trust();
+                // dir name (for the reject error message) — best-effort.
+                let dir_name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                match gate(outcome, mode) {
+                    TrustDecision::Reject(code) => {
+                        errors.push(format!(
+                            "[{code}] {dir_name}: rejected by trust_mode={mode:?}"
+                        ));
+                        continue;
+                    }
+                    TrustDecision::Allow | TrustDecision::AllowWarn(_) => {}
+                }
+                let plugin_decrypt_key = decrypt_keys
+                    .and_then(|keys| keys.get(&dir_name))
+                    .map(|key| key.as_slice())
+                    .or(decrypt_key);
+                match LoadedPlugin::from_dir_with_key(&path, plugin_decrypt_key, Some(real_trust)) {
                     Ok(p) => {
                         let pid = p.manifest.id.clone();
                         // 跨平台分发 version gate (spec §10): min_attune_version 高于当前 →
@@ -293,13 +631,12 @@ impl PluginRegistry {
                                     continue;
                                 }
                                 Err(e) => {
-                                    errors.push(format!(
-                                        "[invalid-min-version] {pid}: {e}"
-                                    ));
+                                    errors.push(format!("[invalid-min-version] {pid}: {e}"));
                                     continue;
                                 }
                             }
                         }
+                        reg.trust.insert(pid.clone(), real_trust);
                         reg.plugins.insert(pid.clone(), p);
                         // 扫该 plugin 下的 workflows/
                         let wf_dir = path.join("workflows");
@@ -310,10 +647,12 @@ impl PluginRegistry {
                                     if wfp.extension().and_then(|s| s.to_str()) == Some("yaml") {
                                         match std::fs::read_to_string(&wfp) {
                                             Ok(yaml) => match parse_workflow_yaml(&yaml) {
-                                                Ok(workflow) => reg.workflows.push(LoadedWorkflow {
-                                                    plugin_id: pid.clone(),
-                                                    workflow,
-                                                }),
+                                                Ok(workflow) => {
+                                                    reg.workflows.push(LoadedWorkflow {
+                                                        plugin_id: pid.clone(),
+                                                        workflow,
+                                                    })
+                                                }
                                                 Err(e) => errors.push(format!(
                                                     "{}: workflow yaml parse: {}",
                                                     wfp.display(),
@@ -339,7 +678,10 @@ impl PluginRegistry {
                                     if cap_path.is_dir() && cap_path.join("plugin.yaml").exists() {
                                         match LoadedPlugin::from_dir(&cap_path) {
                                             Ok(cap_plugin) => {
-                                                reg.plugins.insert(cap_plugin.manifest.id.clone(), cap_plugin);
+                                                reg.plugins.insert(
+                                                    cap_plugin.manifest.id.clone(),
+                                                    cap_plugin,
+                                                );
                                             }
                                             Err(e) => errors.push(format!(
                                                 "{}: capability load: {}",
@@ -362,9 +704,32 @@ impl PluginRegistry {
 
     /// 默认 plugin 目录：`~/.local/share/attune/plugins/`（Linux/macOS）/ `%APPDATA%\attune\plugins\`（Windows）
     pub fn default_plugins_dir() -> Result<std::path::PathBuf> {
-        let data = dirs::data_local_dir()
-            .ok_or_else(|| VaultError::InvalidInput("cannot resolve user data dir".into()))?;
-        Ok(data.join("attune").join("plugins"))
+        // Route through platform::data_dir() (not raw dirs::data_local_dir) so the
+        // thread-local test override + npu-vault legacy migration apply consistently
+        // with the rest of attune. Production path is byte-identical to the old
+        // dirs::data_local_dir()/attune/plugins; tests can pin a temp dir via
+        // platform::set_dir_override_for_test (which XDG_DATA_HOME cannot do on Windows).
+        Ok(crate::platform::data_dir().join("plugins"))
+    }
+
+    /// Test-only: scan with an INJECTED official-keys list so a test can drive the
+    /// `Trust::Official` path (the baked anchor const has no private key to sign with).
+    #[cfg(test)]
+    fn scan_with_injected_official(
+        plugins_root: &Path,
+        decrypt_keys: Option<&HashMap<String, Vec<u8>>>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+        official_keys: &[&str],
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(
+            plugins_root,
+            None,
+            decrypt_keys,
+            mode,
+            user_pubkeys,
+            official_keys,
+        )
     }
 }
 
@@ -409,6 +774,41 @@ version: "1.0.0"
         assert!(errs.is_empty());
     }
 
+    #[test]
+    fn scan_with_keys_loads_encrypted_manifest_by_plugin_dir() {
+        let tmp = TempDir::new().expect("tmp");
+        let dir = tmp.path().join("law-pro");
+        fs::create_dir_all(&dir).expect("mkdir encrypted plugin");
+        let yaml = r#"
+id: law-pro
+name: 加密插件
+type: industry
+version: "1.0.0"
+"#;
+        let encrypted =
+            crate::plugin_encryption::encrypt_yaml(yaml.as_bytes(), b"device-bound-key")
+                .expect("encrypt plugin yaml");
+        fs::write(dir.join("plugin.yaml.enc"), encrypted).expect("write encrypted manifest");
+
+        let (without_key, without_key_errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(
+            without_key.get_plugin("law-pro").is_none(),
+            "encrypted plugin must not load without the local entitlement key"
+        );
+        assert!(
+            without_key_errs
+                .iter()
+                .any(|e| e.contains("no decrypt_key provided")),
+            "missing key should be surfaced as a scan warning, got {without_key_errs:?}"
+        );
+
+        let mut keys = HashMap::new();
+        keys.insert("law-pro".to_string(), b"device-bound-key".to_vec());
+        let (with_key, errs) = PluginRegistry::scan_with_keys(tmp.path(), &keys).expect("scan");
+        assert!(errs.is_empty(), "scan with key should be clean: {errs:?}");
+        assert!(with_key.get_plugin("law-pro").is_some());
+    }
+
     // ── 跨平台分发 version gate (spec §10) ──
 
     #[test]
@@ -426,9 +826,13 @@ min_attune_version: "99.0.0"
 "#,
         );
         let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
-        assert!(reg.get_plugin("future-plugin").is_none(), "incompatible plugin must be skipped");
         assert!(
-            errs.iter().any(|e| e.starts_with("[incompatible]") && e.contains("future-plugin")),
+            reg.get_plugin("future-plugin").is_none(),
+            "incompatible plugin must be skipped"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.starts_with("[incompatible]") && e.contains("future-plugin")),
             "expected [incompatible] warning, got {errs:?}"
         );
     }
@@ -448,7 +852,10 @@ min_attune_version: "0.0.1"
 "#,
         );
         let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
-        assert!(reg.get_plugin("compat-plugin").is_some(), "satisfiable min must load");
+        assert!(
+            reg.get_plugin("compat-plugin").is_some(),
+            "satisfiable min must load"
+        );
         assert!(errs.is_empty(), "no warning expected, got {errs:?}");
     }
 
@@ -486,7 +893,10 @@ min_attune_version: "not-a-semver"
 "#,
         );
         let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
-        assert!(reg.get_plugin("bad-version-plugin").is_none(), "invalid min must skip");
+        assert!(
+            reg.get_plugin("bad-version-plugin").is_none(),
+            "invalid min must skip"
+        );
         assert!(
             errs.iter().any(|e| e.starts_with("[invalid-min-version]") && e.contains("bad-version-plugin")),
             "expected [invalid-min-version] warning, got {errs:?}"
@@ -585,6 +995,56 @@ pii_patterns:
         assert!(names.contains("medical_record_no"));
     }
 
+    // ── INT-2: confidential_keywords pro 写入端聚合 ──
+
+    #[test]
+    fn confidential_keywords_empty_oss_default() {
+        // OSS 裸装无 plugin → 行业机密词为空 → classifier 仅通用集（无行业泄漏）。
+        let reg = PluginRegistry::new();
+        assert!(reg.all_confidential_keywords().is_empty());
+    }
+
+    #[test]
+    fn confidential_keywords_aggregated_and_deduped() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+confidential_keywords:
+  - 案卷密
+  - 不公开审理
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "medical-pro",
+            r#"
+id: medical-pro
+name: 医生插件
+type: industry
+version: "1.0.0"
+confidential_keywords:
+  - 病历
+  - 案卷密
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {:?}", errs);
+        let kws = reg.all_confidential_keywords();
+        let unique: std::collections::HashSet<&str> = kws.iter().map(|s| s.as_str()).collect();
+        // 案卷密 在两个 plugin 中, 只应出现一次 → 3 unique (案卷密/不公开审理/病历)
+        assert_eq!(unique.len(), 3, "deduped industry markers: {:?}", kws);
+        assert_eq!(kws.len(), unique.len(), "no duplicates");
+        assert!(kws.iter().any(|s| s == "案卷密"));
+        assert!(kws.iter().any(|s| s == "病历"));
+        assert!(kws.iter().any(|s| s == "不公开审理"));
+    }
+
     #[test]
     fn scan_corrupt_workflow_yaml_records_error_but_keeps_others() {
         let tmp = TempDir::new().expect("tmp");
@@ -633,7 +1093,11 @@ steps:
         // 这是 oss-pro-strategy v2 §4.3 边界规则的代码层验证.
         let reg = PluginRegistry::new();
         let kws = reg.all_chat_trigger_project_keywords();
-        assert!(kws.is_empty(), "OSS-only registry must have no keywords, got: {:?}", kws);
+        assert!(
+            kws.is_empty(),
+            "OSS-only registry must have no keywords, got: {:?}",
+            kws
+        );
     }
 
     #[test]
@@ -682,13 +1146,158 @@ chat_trigger:
         let kws = reg.all_chat_trigger_project_keywords();
         // dedupe: "案件" 在两个 plugin 中, 只应出现一次
         let unique: std::collections::HashSet<&str> = kws.iter().copied().collect();
-        assert_eq!(unique.len(), 5, "5 unique keywords (诉讼/合同/案件/专利/申请), got: {:?}", kws);
+        assert_eq!(
+            unique.len(),
+            5,
+            "5 unique keywords (诉讼/合同/案件/专利/申请), got: {:?}",
+            kws
+        );
         assert!(kws.contains(&"案件"));
         assert!(kws.contains(&"诉讼"));
         assert!(kws.contains(&"专利"));
         assert!(kws.contains(&"申请"));
         // dedupe 验证: 总长度 == unique 大小
         assert_eq!(kws.len(), unique.len(), "no duplicates allowed");
+    }
+
+    // ── S4b MU-5 (R8): all_chat_trigger_keywords_by_domain — search domain 词表来源 ──
+
+    #[test]
+    fn keywords_by_domain_empty_oss_default() {
+        // OSS 裸装无 plugin → 空 → detect_query_domain 永远 None（generic ranking）。
+        // oss-pro-strategy §4.3：行业 domain detection 不在 OSS attune-core。
+        let reg = PluginRegistry::new();
+        assert!(reg.all_chat_trigger_keywords_by_domain().is_empty());
+    }
+
+    #[test]
+    fn keywords_by_domain_grouped_by_category() {
+        // vertical plugin 用 category 声明 domain，project_keywords 提供该 domain 特征词。
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+category: legal
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 诉讼
+    - 合同
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "med-pro",
+            r#"
+id: med-pro
+name: 医疗插件
+type: industry
+category: medical
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 病历
+    - 处方
+"#,
+        );
+        // 无 category 的 plugin 不贡献条目（即使有 project_keywords）。
+        write_plugin_dir(
+            tmp.path(),
+            "nocat",
+            r#"
+id: nocat
+name: 无分类
+type: skill
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 应被忽略
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {:?}", errs);
+
+        let by_domain = reg.all_chat_trigger_keywords_by_domain();
+        let domains: std::collections::HashSet<&str> =
+            by_domain.iter().map(|(d, _)| d.as_str()).collect();
+        assert_eq!(
+            domains.len(),
+            2,
+            "只有 legal/medical 两 domain，nocat 被跳过: {:?}",
+            by_domain
+        );
+        assert!(domains.contains("legal"));
+        assert!(domains.contains("medical"));
+        assert!(!domains.contains(""), "空 category 不得成为 domain");
+
+        let legal_kws: Vec<&str> = by_domain
+            .iter()
+            .find(|(d, _)| d == "legal")
+            .map(|(_, kws)| kws.clone())
+            .expect("legal domain present");
+        assert!(legal_kws.contains(&"诉讼"));
+        assert!(legal_kws.contains(&"合同"));
+        assert!(!legal_kws.contains(&"应被忽略"));
+    }
+
+    #[test]
+    fn keywords_by_domain_merges_and_dedups_same_category() {
+        // 同 category 多 plugin → keywords 合并去重。
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-a",
+            r#"
+id: law-a
+name: A
+type: industry
+category: legal
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 诉讼
+    - 合同
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "law-b",
+            r#"
+id: law-b
+name: B
+type: industry
+category: legal
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 合同
+    - 赔偿
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {:?}", errs);
+
+        let by_domain = reg.all_chat_trigger_keywords_by_domain();
+        assert_eq!(
+            by_domain.len(),
+            1,
+            "合并为单个 legal domain: {:?}",
+            by_domain
+        );
+        let (dom, kws) = &by_domain[0];
+        assert_eq!(dom, "legal");
+        let unique: std::collections::HashSet<&str> = kws.iter().copied().collect();
+        assert_eq!(unique.len(), kws.len(), "no dup within domain: {:?}", kws);
+        assert_eq!(unique, ["诉讼", "合同", "赔偿"].into_iter().collect());
     }
 
     #[test]
@@ -738,7 +1347,9 @@ chat_trigger:
         let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
 
         // 命中 1 个关键词 → match (min_keyword_match=1)
-        let m = reg.match_chat_trigger("我想问问任其坤应付多少利息").expect("match");
+        let m = reg
+            .match_chat_trigger("我想问问任其坤应付多少利息")
+            .expect("match");
         assert_eq!(m.plugin_id, "law-pro");
         assert_eq!(m.priority, 10);
         assert!(m.keyword_hits >= 2); // "应付" + "利息"
@@ -910,7 +1521,7 @@ mcp_servers:
         assert_eq!(mcps.len(), 1);
         assert_eq!(mcps[0].1.id, "lpr_history");
         assert_eq!(mcps[0].1.transport, "stdio");
-        assert_eq!(mcps[0].1.lifecycle, "eager");  // 默认值
+        assert_eq!(mcps[0].1.lifecycle, "eager"); // 默认值
         assert_eq!(mcps[0].1.heartbeat_interval_seconds, 30);
     }
 
@@ -992,5 +1603,384 @@ chat_trigger:
         assert!(reg.match_chat_trigger("利息怎么算").is_some());
         // 含 exclude pattern → 否决
         assert!(reg.match_chat_trigger("利息税应该咨询税务师").is_none());
+    }
+
+    // ── T9: registry runs REAL signature verification + trust_mode gate ───────
+
+    use ed25519_dalek::SigningKey;
+
+    /// Write a plugin dir and SIGN it with `signer` (writes plugin.sig).
+    fn write_signed_plugin(root: &Path, id: &str, signer: &SigningKey) -> std::path::PathBuf {
+        let dir = write_plugin_dir(
+            root,
+            id,
+            &format!("id: {id}\nname: P\ntype: industry\nversion: \"1.0.0\"\n"),
+        );
+        crate::plugin_sig::sign_plugin(&dir, &signer.to_bytes()).expect("sign");
+        dir
+    }
+
+    #[test]
+    fn registry_scan_runs_real_verify_official() {
+        // An official-signed plugin → real verify yields Trust::Official (NOT a
+        // hardcoded label). Inject the test key as the official allowlist.
+        let tmp = TempDir::new().unwrap();
+        let signer = SigningKey::from_bytes(&[7u8; 32]);
+        let official_hex = hex::encode(signer.verifying_key().to_bytes());
+        write_signed_plugin(tmp.path(), "off-plug", &signer);
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            None,
+            crate::plugin_sig::TrustMode::Strict,
+            &[],
+            &[&official_hex],
+        )
+        .unwrap();
+        assert!(
+            errs.is_empty(),
+            "official plugin must load in strict, got: {errs:?}"
+        );
+        assert_eq!(
+            reg.plugin_trust("off-plug"),
+            Some(crate::plugin_sig::Trust::Official)
+        );
+    }
+
+    #[test]
+    fn registry_scan_tampered_rejected_in_warn() {
+        // A plugin signed by a key NOT in the official allowlist and NOT whitelisted →
+        // SigOutcome::Invalid → gate rejects in warn (tampered ≠ unsigned).
+        let tmp = TempDir::new().unwrap();
+        let attacker = SigningKey::from_bytes(&[9u8; 32]);
+        let official = SigningKey::from_bytes(&[7u8; 32]);
+        let official_hex = hex::encode(official.verifying_key().to_bytes());
+        write_signed_plugin(tmp.path(), "tampered-plug", &attacker);
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            None,
+            crate::plugin_sig::TrustMode::Warn,
+            &[],
+            &[&official_hex],
+        )
+        .unwrap();
+        assert!(
+            reg.get_plugin("tampered-plug").is_none(),
+            "invalid sig must be rejected in warn"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("plugin-sig-invalid")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn unsigned_dir_rejected_in_strict() {
+        // Hand-copied unsigned plugin dir (no plugin.sig) → strict rejects at scan.
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "unsigned-plug",
+            "id: unsigned-plug\nname: U\ntype: industry\nversion: \"1.0.0\"\n",
+        );
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            None,
+            crate::plugin_sig::TrustMode::Strict,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            reg.get_plugin("unsigned-plug").is_none(),
+            "unsigned rejected in strict"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("plugin-unsigned-strict")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn unsigned_dir_loads_with_real_unsigned_trust_in_warn() {
+        // In warn, an unsigned plugin loads but with the REAL Trust::Unsigned label
+        // (not a hardcoded Official/ThirdParty).
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "u2",
+            "id: u2\nname: U\ntype: industry\nversion: \"1.0.0\"\n",
+        );
+        let (reg, _errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            None,
+            crate::plugin_sig::TrustMode::Warn,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            reg.plugin_trust("u2"),
+            Some(crate::plugin_sig::Trust::Unsigned)
+        );
+    }
+
+    /// T12 §10 grandfather regression: an already-installed UNSIGNED plugin must still
+    /// LOAD after the trust-chain upgrade when trust_mode = warn (the default), carrying
+    /// the real Trust::Unsigned (yellow-badge) metadata — existing users are NOT broken
+    /// by the new signature enforcement. (Strict would reject it; warn grandfathers it.)
+    #[test]
+    fn grandfather_unsigned_loads_in_warn() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "legacy-unsigned",
+            "id: legacy-unsigned\nname: Legacy\ntype: industry\nversion: \"1.0.0\"\n",
+        );
+        let (reg, _errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            None,
+            crate::plugin_sig::TrustMode::Warn,
+            &[],
+            &[],
+        )
+        .unwrap();
+        // Loaded (grandfathered) AND labelled with the real unsigned trust (yellow badge).
+        assert!(
+            reg.get_plugin("legacy-unsigned").is_some(),
+            "warn must grandfather an unsigned plugin"
+        );
+        assert_eq!(
+            reg.plugin_trust("legacy-unsigned"),
+            Some(crate::plugin_sig::Trust::Unsigned)
+        );
+    }
+
+    #[test]
+    fn whitelisted_pubkey_yields_thirdparty_trust() {
+        // A user-whitelisted (non-official) signer → Trust::ThirdParty (real verify).
+        let tmp = TempDir::new().unwrap();
+        let dev = SigningKey::from_bytes(&[13u8; 32]);
+        let dev_hex = hex::encode(dev.verifying_key().to_bytes());
+        write_signed_plugin(tmp.path(), "tp-plug", &dev);
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            None,
+            crate::plugin_sig::TrustMode::Strict,
+            &[dev_hex],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            errs.is_empty(),
+            "whitelisted third-party loads in strict, got: {errs:?}"
+        );
+        assert_eq!(
+            reg.plugin_trust("tp-plug"),
+            Some(crate::plugin_sig::Trust::ThirdParty)
+        );
+    }
+
+    #[test]
+    fn default_scan_labels_real_unsigned_not_hardcoded() {
+        // The public scan() (mode=Off) now labels an unsigned plugin as the REAL
+        // Trust::Unsigned — proving the hardcoded Trust::ThirdParty is gone.
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "p",
+            "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n",
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        assert_eq!(
+            reg.plugin_trust("p"),
+            Some(crate::plugin_sig::Trust::Unsigned)
+        );
+    }
+
+    // ── all_scenarios() 派生 (spec §9 单元下限 ≥6) ───────────────────────────
+
+    /// 一个 plugin 含多 agent + 一个 ui_component 表单 → 派生正确的卡片清单:
+    /// scenario 主标 / cost_tier / has_form / form_ref / case_kind 全对。
+    #[test]
+    fn all_scenarios_derives_card_fields() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: civil_loan_agent
+    description: "民事借贷"
+    intent: 核算 compute
+    scenario: "借贷本息计算"
+    output_modes: { default: structured, supports: [structured] }
+    case_kinds: [civil-loan]
+    runtime: rust_binary
+    binary: bin/agent_civil_loan
+    cost: { llm_tokens: 0, cpu_seconds: 1 }
+  - id: fact_extractor_agent
+    description: "事实抽取"
+    intent: 抽取 extract
+    scenario: "证据事实抽取"
+    case_kinds: [civil-loan]
+    runtime: rust_binary
+    binary: bin/agent_fact_extract
+    cost: { llm_tokens: 2000 }
+ui_components:
+  - id: civil_loan
+    target: agent:civil_loan_agent
+    html: forms/civil_loan.yaml
+    description: 借贷表单
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 2, "two non-library agents → two cards");
+
+        let loan = scenarios
+            .iter()
+            .find(|s| s.agent_id == "civil_loan_agent")
+            .unwrap();
+        assert_eq!(loan.label, "借贷本息计算", "label 取 scenario");
+        assert_eq!(loan.plugin_label, "律师助手");
+        assert_eq!(loan.cost_tier, "free");
+        assert!(!loan.llm_required);
+        assert_eq!(loan.case_kind.as_deref(), Some("civil-loan"));
+        assert!(loan.has_form);
+        assert_eq!(loan.form_ref.as_ref().unwrap().form_id, "civil_loan");
+
+        let fact = scenarios
+            .iter()
+            .find(|s| s.agent_id == "fact_extractor_agent")
+            .unwrap();
+        assert_eq!(fact.cost_tier, "cloud", "llm_tokens>0 → cloud");
+        assert!(fact.llm_required);
+        assert!(!fact.has_form, "no ui_component for this agent");
+    }
+
+    /// runtime: library 的 agent (内部工具) 不出卡 (spec §3.5)。
+    #[test]
+    fn all_scenarios_skips_library_runtime() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: interest_calculator
+    description: "内部本息计算库"
+    runtime: library
+  - id: civil_loan_agent
+    scenario: "借贷本息计算"
+    runtime: rust_binary
+    binary: bin/x
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 1, "library runtime agent 不出卡");
+        assert_eq!(scenarios[0].agent_id, "civil_loan_agent");
+    }
+
+    /// label 回退链: scenario 缺 → description → id (spec §7,永不空卡)。
+    #[test]
+    fn all_scenarios_label_fallback_chain() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "medical-pro",
+            r#"
+id: medical-pro
+name: 医疗助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: a_with_desc
+    description: "医学术语规范化"
+    runtime: subprocess
+  - id: a_bare
+    runtime: subprocess
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        let desc = scenarios
+            .iter()
+            .find(|s| s.agent_id == "a_with_desc")
+            .unwrap();
+        assert_eq!(
+            desc.label, "医学术语规范化",
+            "缺 scenario → 回退 description"
+        );
+        let bare = scenarios.iter().find(|s| s.agent_id == "a_bare").unwrap();
+        assert_eq!(bare.label, "a_bare", "全缺 → 回退 agent_id");
+    }
+
+    /// 无 case_kind 的 agent (如 tech-pro) 仍出卡,case_kind = None。
+    #[test]
+    fn all_scenarios_agent_without_case_kind() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "tech-pro",
+            r#"
+id: tech-pro
+name: 工程助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: code-reviewer
+    description: "代码自动审查"
+    runtime: in_process
+    cost: {}
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(
+            scenarios[0].case_kind, None,
+            "无 case_kind → None,不绑 Project"
+        );
+        assert_eq!(scenarios[0].cost_tier, "free", "未声明 llm_tokens → free");
+    }
+
+    /// OSS 裸装无 plugin → 空 Vec (工作台空态)。
+    #[test]
+    fn all_scenarios_empty_when_no_plugins() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        assert!(reg.all_scenarios().is_empty());
+    }
+
+    /// 多 plugin → 卡片聚合,各带正确 plugin_id / plugin_type 分组依据。
+    #[test]
+    fn all_scenarios_aggregates_multiple_plugins() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            "id: law-pro\nname: 律师\ntype: industry\nversion: \"1.0.0\"\nagents:\n  - id: a1\n    scenario: 场景1\n    runtime: rust_binary\n    binary: bin/x\n",
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "patent-pro",
+            "id: patent-pro\nname: 专利\ntype: industry\nversion: \"1.0.0\"\nagents:\n  - id: b1\n    scenario: 场景2\n    runtime: rust_binary\n    binary: bin/y\n",
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 2);
+        let law = scenarios.iter().find(|s| s.plugin_id == "law-pro").unwrap();
+        assert_eq!(law.plugin_label, "律师");
+        assert_eq!(law.plugin_type, "industry");
+        assert!(scenarios.iter().any(|s| s.plugin_id == "patent-pro"));
     }
 }

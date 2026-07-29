@@ -1,0 +1,30 @@
+{
+  "schema_version": "attune.eval.corpus.v1",
+  "corpus_id": "generated_ten_thousand_docs",
+  "domain": "mixed_enterprise",
+  "license": "generated-test-fixture",
+  "source": {
+    "type": "generated",
+    "generator": "scripts/eval/generate-scale-corpus.py",
+    "command": "python3 scripts/eval/generate-scale-corpus.py --documents 10000 --domains networking,security,product,finance,mechanical --out <workspace>"
+  },
+  "scale": {
+    "tier": "T3",
+    "documents": 10000,
+    "bytes": 30000000,
+    "expected_chunks": 100000,
+    "ocr_ratio": 0.0,
+    "languages": ["zh", "en"]
+  },
+  "profiles": {
+    "scale_ten_thousand": {
+      "documents": ["generated:10000"],
+      "purpose": "ten-thousand-document mixed enterprise NAS scale and release regression"
+    }
+  },
+  "indexing": {
+    "parser_modes": ["markdown", "text"],
+    "max_pending_seconds": 3600,
+    "delete_rescan_required": true
+  }
+}

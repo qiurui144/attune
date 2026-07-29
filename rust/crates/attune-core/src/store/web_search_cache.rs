@@ -97,9 +97,7 @@ impl Store {
 
     /// 显式清空（用户在 Settings 点 "清空 web 缓存"）。返回删除条数。
     pub fn clear_web_search_cache(&self) -> Result<usize> {
-        let n = self
-            .conn
-            .execute("DELETE FROM web_search_cache", [])?;
+        let n = self.conn.execute("DELETE FROM web_search_cache", [])?;
         Ok(n)
     }
 
@@ -209,8 +207,14 @@ mod tests {
                 1000,
             )
             .unwrap();
-        let a = store.get_web_search_cached(&dek, "query A", 1500).unwrap().unwrap();
-        let b = store.get_web_search_cached(&dek, "query B", 1500).unwrap().unwrap();
+        let a = store
+            .get_web_search_cached(&dek, "query A", 1500)
+            .unwrap()
+            .unwrap();
+        let b = store
+            .get_web_search_cached(&dek, "query B", 1500)
+            .unwrap()
+            .unwrap();
         assert_eq!(a[0].title, "Rust ownership");
         assert_eq!(b[0].title, "B 专属");
         assert_eq!(store.web_search_cache_count().unwrap(), 2);
@@ -233,10 +237,17 @@ mod tests {
         store
             .put_web_search_cached(&dek, "q", &new_results, DEFAULT_TTL_SECS, 2000)
             .unwrap();
-        let hit = store.get_web_search_cached(&dek, "q", 3000).unwrap().unwrap();
+        let hit = store
+            .get_web_search_cached(&dek, "q", 3000)
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.len(), 1, "覆盖后只剩 1 条");
         assert_eq!(hit[0].title, "新结果");
-        assert_eq!(store.web_search_cache_count().unwrap(), 1, "PRIMARY KEY 保证不重复");
+        assert_eq!(
+            store.web_search_cache_count().unwrap(),
+            1,
+            "PRIMARY KEY 保证不重复"
+        );
     }
 
     #[test]
@@ -256,7 +267,10 @@ mod tests {
             )
             .unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
-        assert!(!raw_str.contains("Rust ownership"), "标题应加密，不出现在原始 blob 中");
+        assert!(
+            !raw_str.contains("Rust ownership"),
+            "标题应加密，不出现在原始 blob 中"
+        );
     }
 
     #[test]
@@ -303,9 +317,15 @@ mod tests {
     fn clear_returns_deleted_count() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        store.put_web_search_cached(&dek, "a", &sample_results(), DEFAULT_TTL_SECS, 1000).unwrap();
-        store.put_web_search_cached(&dek, "b", &sample_results(), DEFAULT_TTL_SECS, 1000).unwrap();
-        store.put_web_search_cached(&dek, "c", &sample_results(), DEFAULT_TTL_SECS, 1000).unwrap();
+        store
+            .put_web_search_cached(&dek, "a", &sample_results(), DEFAULT_TTL_SECS, 1000)
+            .unwrap();
+        store
+            .put_web_search_cached(&dek, "b", &sample_results(), DEFAULT_TTL_SECS, 1000)
+            .unwrap();
+        store
+            .put_web_search_cached(&dek, "c", &sample_results(), DEFAULT_TTL_SECS, 1000)
+            .unwrap();
         let n = store.clear_web_search_cache().unwrap();
         assert_eq!(n, 3);
         assert_eq!(store.web_search_cache_count().unwrap(), 0);

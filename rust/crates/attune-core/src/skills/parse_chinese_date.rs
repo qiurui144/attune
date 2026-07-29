@@ -242,7 +242,10 @@ mod tests {
 
     #[test]
     fn leap_year_validated() {
-        assert_eq!(parse_first("2024年2月29日").map(|d| d.iso).as_deref(), Some("2024-02-29"));
+        assert_eq!(
+            parse_first("2024年2月29日").map(|d| d.iso).as_deref(),
+            Some("2024-02-29")
+        );
         assert!(parse_first("2023年2月29日").is_none()); // 2023 非闰年
     }
 }

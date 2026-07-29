@@ -1,8 +1,8 @@
+use crate::error::{AppError, AppResult};
+use crate::state::SharedState;
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
-use crate::error::{AppError, AppResult};
-use crate::state::SharedState;
 
 #[derive(Deserialize)]
 pub struct ClickRequest {
@@ -15,13 +15,17 @@ pub async fn log_click(
     State(state): State<SharedState>,
     Json(body): Json<ClickRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let dek = vault
         .dek_db()
         .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
-    vault.store().log_click(&dek, &body.query, &body.item_id)
+    vault
+        .store()
+        .log_click(&dek, &body.query, &body.item_id)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
@@ -32,40 +36,49 @@ pub struct HistoryQuery {
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
-fn default_limit() -> usize { 20 }
+fn default_limit() -> usize {
+    20
+}
 
 /// GET /api/v1/behavior/history — 最近搜索历史
 pub async fn history(
     State(state): State<SharedState>,
     Query(params): Query<HistoryQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let dek = vault
         .dek_db()
         .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     let limit = params.limit.min(200);
-    let history = vault.store().recent_searches(&dek, limit)
+    let history = vault
+        .store()
+        .recent_searches(&dek, limit)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({"history": history})))
 }
 
 /// GET /api/v1/behavior/popular — 最常点击的条目
-pub async fn popular(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+pub async fn popular(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let _ = vault
         .dek_db()
         .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
-    let popular = vault.store().popular_items(20)
+    let popular = vault
+        .store()
+        .popular_items(20)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let list: Vec<serde_json::Value> = popular.into_iter()
+    let list: Vec<serde_json::Value> = popular
+        .into_iter()
         .map(|(id, count)| serde_json::json!({"item_id": id, "click_count": count}))
         .collect();
 

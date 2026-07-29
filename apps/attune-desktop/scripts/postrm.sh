@@ -3,17 +3,37 @@
 # attune Linux package post-remove hook
 # 触发：apt remove (action=remove or rpm equivalent) 或 apt purge (action=purge)
 #
-# remove → 仅清 binary，保留用户数据 + Ollama（默认 apt 行为）
+# remove → 仅清 binary，保留用户数据 + 第三方 runtime（默认 apt 行为）
 # purge  → 用户主动清完整状态：删 ~/.local/share/attune（用户数据）
-#          但 **依然不动 Ollama**（独立软件，可能其他应用在用）
+#          但 **依然不动第三方 runtime**（独立软件，可能其他应用在用）
 #
 
 set -e
 LOG_TAG="attune-postrm"
 log() { logger -t "$LOG_TAG" -- "$1"; printf '[attune-postrm] %s\n' "$1"; }
 
+remove_autostart_file() {
+  HOME_DIR="$1"
+  FILE="$HOME_DIR/.config/autostart/attune.desktop"
+  if [ -f "$FILE" ] && grep -q 'Name=Attune' "$FILE" 2>/dev/null; then
+    log "removing autostart file $FILE"
+    rm -f "$FILE" || true
+  fi
+}
+
+remove_known_autostart_files() {
+  remove_autostart_file "${HOME:-/root}"
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    if [ -n "$USER_HOME" ]; then
+      remove_autostart_file "$USER_HOME"
+    fi
+  fi
+}
+
 ACTION="${1:-remove}"
 log "action=$ACTION"
+remove_known_autostart_files
 
 case "$ACTION" in
   purge)
@@ -21,10 +41,11 @@ case "$ACTION" in
     # 仅清系统级缓存
     log "purge requested. NOT removing ~/.local/share/attune (user data preserved by design)."
     log "to fully wipe: rm -rf ~/.local/share/attune ~/.config/npu-vault"
-    log "to remove Ollama: 'sudo systemctl disable --now ollama' + 'sudo rm /usr/local/bin/ollama' (separate decision)"
+    log "third-party AI runtimes are not removed by Attune (separate decision)"
     ;;
   remove)
-    log "remove complete (data + Ollama preserved)"
+    log "remove complete (data + third-party runtimes preserved)"
+    log "per-user autostart files are preserved unless disabled in Attune before uninstall: ~/.config/autostart/attune.desktop"
     ;;
   *)
     # upgrade / failed-upgrade / disappear — 都是 dpkg/rpm 内部状态，不做实际清理

@@ -3,15 +3,17 @@
  * 列出 hub 上对当前 license 可见的插件 + 支持启动 trial / 安装。
  *
  * Backend: /api/v1/marketplace/plugins (GET) + /install (POST)
- * 默认走内嵌 Mock provider（4 个 attune-pro vertical plugin）；
- * 用户在 Settings 配 pluginhub.url + license_key 后切真 hub.engi-stack.com。
+ * 未配置会员时走离线目录；用户在 Settings 登录或配置授权码后切真 PluginHub。
  */
 
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { api } from '../store/api';
 import { toast } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { t } from '../i18n';
+import { currentView, memberVertical, settingsInitialTab } from '../store/signals';
+import { verticalLabel } from '../hooks/useMember';
 
 interface PluginListing {
   id: string;
@@ -33,6 +35,7 @@ interface ListResponse {
   upgrade_url: string;
   plugins: PluginListing[];
   provider: string;
+  installed_versions?: Record<string, string>;
 }
 
 interface InstallResponse {
@@ -41,7 +44,6 @@ interface InstallResponse {
   version: string;
   trial_started?: string;
   trial_expires?: string;
-  download_url: string;
 }
 
 /** plan id → 本地化标签；未知 plan 原样返回 */
@@ -52,11 +54,33 @@ function planLabel(plan: string): string {
   return plan;
 }
 
+function providerLabel(provider: string): string {
+  if (provider === 'mock') return t('market.provider.offline');
+  if (provider === 'real-hub') return t('market.provider.official');
+  return provider;
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = a.split(/[.-]/).map((p) => Number.parseInt(p, 10));
+  const right = b.split(/[.-]/).map((p) => Number.parseInt(p, 10));
+  const len = Math.max(left.length, right.length);
+  for (let i = 0; i < len; i += 1) {
+    const av = Number.isFinite(left[i]) ? left[i] : 0;
+    const bv = Number.isFinite(right[i]) ? right[i] : 0;
+    if (av !== bv) return av > bv ? 1 : -1;
+  }
+  return a.localeCompare(b);
+}
+
 export function MarketplaceView(): JSX.Element {
   const [data, setData] = useState<ListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState<string | null>(null);
+  const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [category, setCategory] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   async function load() {
     setLoading(true);
@@ -74,6 +98,19 @@ export function MarketplaceView(): JSX.Element {
   useEffect(() => {
     void load();
   }, []);
+
+  function openMemberSettings(): void {
+    settingsInitialTab.value = 'member';
+    currentView.value = 'settings';
+  }
+
+  function openUpgrade(): void {
+    if (data?.upgrade_url) {
+      window.open(data.upgrade_url, '_blank', 'noopener');
+      return;
+    }
+    openMemberSettings();
+  }
 
   async function install(plugin: PluginListing) {
     setInstalling(plugin.id);
@@ -108,11 +145,33 @@ export function MarketplaceView(): JSX.Element {
             url: data?.upgrade_url ?? '',
           }),
         );
+      } else if (msg.includes('pluginhub_not_configured')) {
+        toast('error', t('market.toast.pluginhub_not_configured'));
       } else {
         toast('error', t('market.toast.install_failed', { message: msg }));
       }
     } finally {
       setInstalling(null);
+    }
+  }
+
+  async function uninstall(plugin: PluginListing) {
+    const ok = await confirmDialog({
+      title: t('confirm.title.uninstallPlugin'),
+      message: t('market.confirm.uninstall', { name: plugin.name }),
+      danger: true,
+    });
+    if (!ok) return;
+    setUninstalling(plugin.id);
+    try {
+      await api.delete(`/plugins/${encodeURIComponent(plugin.id)}`);
+      toast('success', t('market.toast.uninstalled', { name: plugin.name }));
+      await load();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast('error', t('market.toast.uninstall_failed', { message: msg }));
+    } finally {
+      setUninstalling(null);
     }
   }
 
@@ -137,35 +196,75 @@ export function MarketplaceView(): JSX.Element {
     );
   }
 
+  const installedVersions = data.installed_versions ?? {};
+  const categories = Array.from(new Set(data.plugins.map((p) => p.category).filter(Boolean))).sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredPlugins = data.plugins.filter((p) => {
+    const installedVersion = installedVersions[p.id];
+    const updateAvailable = Boolean(installedVersion && compareVersions(p.latest_version, installedVersion) > 0);
+    if (category !== 'all' && p.category !== category) return false;
+    if (statusFilter === 'available' && !p.available) return false;
+    if (statusFilter === 'installed' && !installedVersion) return false;
+    if (statusFilter === 'updates' && !updateAvailable) return false;
+    if (!normalizedQuery) return true;
+    const haystack = [p.id, p.name, p.category, p.description, ...p.tags].join(' ').toLowerCase();
+    return haystack.includes(normalizedQuery);
+  });
+
   return (
-    <div style={{ padding: 'var(--space-5)', maxWidth: 1200, margin: '0 auto' }}>
+    <div style={{ padding: 'var(--space-6)', maxWidth: 1200, margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-5)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <div>
           <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>{t('market.title')}</h1>
           <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
             {t('market.current_plan')}<strong>{planLabel(data.user_plan)}</strong>
             {' · '}
-            {t('market.provider')}<code>{data.provider}</code>
+            {t('market.provider')}<code>{providerLabel(data.provider)}</code>
             {' · '}
             {t('market.hub_version', { version: data.hub_version })}
           </div>
+          {/* GAP-B: cloud 下发的会员场景 (vertical) — 纯展示文案,不参与门禁。 */}
+          {memberVertical.value && (
+            <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
+              {t('market.current_vertical', { vertical: verticalLabel(memberVertical.value) })}
+            </div>
+          )}
         </div>
         {data.user_plan === 'individual' && (
-          <a
-            href={data.upgrade_url}
-            target="_blank"
-            rel="noopener"
+          <button
+            type="button"
+            onClick={openUpgrade}
             style={{
               padding: 'var(--space-2) var(--space-3)',
               background: 'var(--color-accent)',
               color: 'white',
+              border: 'none',
               borderRadius: 'var(--radius-sm)',
-              textDecoration: 'none',
               fontSize: 'var(--text-sm)',
+              cursor: 'pointer',
             }}
           >
             {t('market.upgrade_to_pro')}
-          </a>
+          </button>
+        )}
+        {data.provider === 'mock' && (
+          <button
+            type="button"
+            onClick={openMemberSettings}
+            style={{
+              padding: 'var(--space-2) var(--space-3)',
+              background: 'transparent',
+              color: 'var(--color-accent)',
+              border: '1px solid var(--color-accent)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--text-sm)',
+              cursor: 'pointer',
+            }}
+          >
+            {t('market.configure_member')}
+          </button>
         )}
       </header>
 
@@ -176,8 +275,79 @@ export function MarketplaceView(): JSX.Element {
           {t('market.empty.after')}
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 'var(--space-4)' }}>
-          {data.plugins.map((p) => (
+        <>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))',
+              gap: 'var(--space-3)',
+              marginBottom: 'var(--space-4)',
+              alignItems: 'center',
+            }}
+          >
+            <input
+              value={query}
+              onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+              placeholder={t('market.search.placeholder')}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                padding: 'var(--space-2)',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <select
+              value={category}
+              onChange={(e) => setCategory((e.target as HTMLSelectElement).value)}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                padding: 'var(--space-2)',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            >
+              <option value="all">{t('market.filter.category_all')}</option>
+              {categories.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter((e.target as HTMLSelectElement).value)}
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                padding: 'var(--space-2)',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            >
+              <option value="all">{t('market.filter.status_all')}</option>
+              <option value="available">{t('market.filter.available')}</option>
+              <option value="installed">{t('market.filter.installed')}</option>
+              <option value="updates">{t('market.filter.updates')}</option>
+            </select>
+          </div>
+
+          {filteredPlugins.length === 0 ? (
+            <div style={{ color: 'var(--color-text-secondary)' }}>{t('market.filter.empty')}</div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 320px), 1fr))', gap: 'var(--space-4)' }}>
+          {filteredPlugins.map((p) => {
+            const installedVersion = installedVersions[p.id];
+            const updateAvailable = Boolean(installedVersion && compareVersions(p.latest_version, installedVersion) > 0);
+            return (
             <article
               key={p.id}
               style={{
@@ -196,6 +366,13 @@ export function MarketplaceView(): JSX.Element {
                   <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', marginTop: 'var(--space-1)' }}>
                     {p.id} · v{p.latest_version} · {p.category}
                   </div>
+                  {installedVersion && (
+                    <div style={{ fontSize: 'var(--text-xs)', color: updateAvailable ? 'var(--color-warning)' : 'var(--color-success)', marginTop: 'var(--space-1)' }}>
+                      {updateAvailable
+                        ? t('market.update_available', { current: installedVersion, latest: p.latest_version })
+                        : t('market.installed_version', { version: installedVersion })}
+                    </div>
+                  )}
                 </div>
                 <span
                   style={{
@@ -250,7 +427,13 @@ export function MarketplaceView(): JSX.Element {
                       opacity: installing === p.id ? 0.6 : 1,
                     }}
                   >
-                    {installing === p.id ? t('market.installing') : t('market.install')}
+                    {installing === p.id
+                      ? t('market.installing')
+                      : updateAvailable
+                        ? t('market.update')
+                        : installedVersion
+                          ? t('market.reinstall')
+                          : t('market.install')}
                   </button>
                 ) : p.trial_available ? (
                   <button
@@ -272,10 +455,9 @@ export function MarketplaceView(): JSX.Element {
                       : t('market.trial', { days: p.trial_days })}
                   </button>
                 ) : (
-                  <a
-                    href={data.upgrade_url}
-                    target="_blank"
-                    rel="noopener"
+                  <button
+                    type="button"
+                    onClick={openMemberSettings}
                     style={{
                       flex: 1,
                       padding: 'var(--space-2)',
@@ -283,17 +465,40 @@ export function MarketplaceView(): JSX.Element {
                       color: 'var(--color-text)',
                       border: '1px solid var(--color-border)',
                       borderRadius: 'var(--radius-sm)',
-                      textDecoration: 'none',
                       textAlign: 'center',
+                      cursor: 'pointer',
                     }}
                   >
                     {t('market.upgrade_required')}
-                  </a>
+                  </button>
+                )}
+                {installedVersion && (
+                  <button
+                    type="button"
+                    onClick={() => void uninstall(p)}
+                    disabled={uninstalling === p.id}
+                    style={{
+                      flex: 1,
+                      padding: 'var(--space-2)',
+                      background: 'var(--color-bg)',
+                      color: 'var(--color-error)',
+                      border: '1px solid var(--color-error)',
+                      borderRadius: 'var(--radius-sm)',
+                      textAlign: 'center',
+                      cursor: uninstalling === p.id ? 'wait' : 'pointer',
+                      opacity: uninstalling === p.id ? 0.6 : 1,
+                    }}
+                  >
+                    {uninstalling === p.id ? t('market.uninstalling') : t('market.uninstall')}
+                  </button>
                 )}
               </div>
             </article>
-          ))}
-        </div>
+            );
+          })}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

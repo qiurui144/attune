@@ -18,7 +18,7 @@ CI 正常运行的常规 GA 不走本流程,见 §自动化路径.
 GA tag `desktop-vX.Y.Z` 推到上游后,人工 trigger:
 
 ```
-GitHub → Actions → "winget" → Run workflow → tag = desktop-v1.0.0
+GitHub → Actions → "winget" → Run workflow → tag = desktop-v1.5.0
 ```
 
 Workflow 内部:
@@ -39,7 +39,7 @@ git clone https://github.com/qiurui144/winget-pkgs.git
 cd winget-pkgs
 git remote add upstream https://github.com/microsoft/winget-pkgs.git
 git fetch upstream
-git checkout -b add-qiurui144-attune-1.0.0 upstream/master
+git checkout -b add-qiurui144-attune-1.5.0 upstream/master
 ```
 
 ### Step 2:复制 manifest 到正确路径
@@ -47,11 +47,11 @@ git checkout -b add-qiurui144-attune-1.0.0 upstream/master
 WinGet 仓库目录结构:`manifests/<first-letter-lowercase>/<Publisher>/<PackageName>/<Version>/`
 
 ```bash
-mkdir -p manifests/q/qiurui144/Attune/1.0.0
+mkdir -p manifests/q/qiurui144/Attune/1.5.0
 cp /data/company/project/attune/packaging/winget/qiurui144.Attune.yaml \
    /data/company/project/attune/packaging/winget/qiurui144.Attune.installer.yaml \
    /data/company/project/attune/packaging/winget/qiurui144.Attune.locale.en-US.yaml \
-   manifests/q/qiurui144/Attune/1.0.0/
+   manifests/q/qiurui144/Attune/1.5.0/
 ```
 
 ### Step 3:重算 SHA256
@@ -61,7 +61,7 @@ cp /data/company/project/attune/packaging/winget/qiurui144.Attune.yaml \
 ```bash
 # 下载实际 release asset
 curl -L -o /tmp/attune-setup.exe \
-  https://github.com/qiurui144/attune/releases/download/desktop-v1.0.0/Attune_1.0.0_x64-setup.exe
+  https://github.com/qiurui144/attune/releases/download/desktop-v1.5.0/Attune_1.5.0_x64-setup.exe
 
 # 计算 SHA256
 sha256sum /tmp/attune-setup.exe
@@ -80,25 +80,25 @@ Get-FileHash -Algorithm SHA256 attune-setup.exe
 可选但强烈推荐 — 用 WinGet sandbox 验证 manifest 合法性:
 
 ```powershell
-winget validate --manifest manifests\q\qiurui144\Attune\1.0.0
+winget validate --manifest manifests\q\qiurui144\Attune\1.5.0
 ```
 
 如果有 winget Sandbox 可以本地试装:
 
 ```powershell
-.\Tools\SandboxTest.ps1 manifests\q\qiurui144\Attune\1.0.0
+.\Tools\SandboxTest.ps1 manifests\q\qiurui144\Attune\1.5.0
 ```
 
 ### Step 5:提交 PR
 
 ```bash
-git add manifests/q/qiurui144/Attune/1.0.0/
-git commit -m "Add qiurui144.Attune version 1.0.0"
-git push origin add-qiurui144-attune-1.0.0
+git add manifests/q/qiurui144/Attune/1.5.0/
+git commit -m "Add qiurui144.Attune version 1.5.0"
+git push origin add-qiurui144-attune-1.5.0
 ```
 
 在 GitHub web 上开 PR:
-- Title: `Add qiurui144.Attune version 1.0.0`
+- Title: `Add qiurui144.Attune version 1.5.0`
 - Body: 简述软件 + 链接 release notes
 
 ### Step 6:等待审核

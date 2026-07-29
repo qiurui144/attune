@@ -36,8 +36,16 @@ use serde::Serialize;
 /// `knowledge` for the legacy shape; this fn replaces that inline `json!{}`
 /// so the new keys live alongside the old.
 pub fn build_citation(k: &serde_json::Value) -> serde_json::Value {
-    let item_id = k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let item_id = k
+        .get("item_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let title = k
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let chunk_offset_start = k.get("chunk_offset_start").and_then(|v| v.as_u64());
     let chunk_offset_end = k.get("chunk_offset_end").and_then(|v| v.as_u64());
@@ -148,8 +156,12 @@ fn provider_for(model: &str) -> &'static str {
         "google"
     } else if m.contains("deepseek") {
         "deepseek"
-    } else if m.starts_with("qwen") || m.starts_with("llama") || m.starts_with("phi") || m.starts_with("mistral") {
-        "ollama"
+    } else if m.starts_with("qwen")
+        || m.starts_with("llama")
+        || m.starts_with("phi")
+        || m.starts_with("mistral")
+    {
+        "local_scheduler"
     } else if m.starts_with("doubao") || m.starts_with("ernie") || m.contains("baichuan") {
         "tencent"
     } else {
@@ -159,7 +171,7 @@ fn provider_for(model: &str) -> &'static str {
 
 /// Build the `cost` block for a chat response.
 ///
-/// `is_local` tells us whether the LLM provider is Ollama-on-laptop / K3 form
+/// `is_local` tells us whether the LLM provider is scheduler-local / local-scheduler form
 /// factor → estimated_usd forced to 0.0 (the user is paying CPU/GPU, not USD).
 /// Cloud models that have no pricing entry also fall through to 0.0 (rather
 /// than `null`), so bench can sum `cost.estimated_usd` across rows without
@@ -171,7 +183,7 @@ pub fn build_cost_block(
     is_local: bool,
 ) -> serde_json::Value {
     let provider = if is_local {
-        "ollama"
+        "local_scheduler"
     } else {
         provider_for(model)
     };
@@ -353,7 +365,7 @@ mod tests {
         assert_eq!(provider_for("claude-3-5-sonnet"), "anthropic");
         assert_eq!(provider_for("gemini-1.5-pro"), "google");
         assert_eq!(provider_for("deepseek-chat"), "deepseek");
-        assert_eq!(provider_for("qwen2.5:3b"), "ollama");
+        assert_eq!(provider_for("qwen2.5:3b"), "local_scheduler");
         assert_eq!(provider_for("totally-mystery"), "unknown");
     }
 

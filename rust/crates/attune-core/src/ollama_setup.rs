@@ -138,7 +138,11 @@ pub fn install_plan(os: &str) -> OllamaInstallPlan {
             homepage: OLLAMA_HOMEPAGE.into(),
         },
         other => OllamaInstallPlan {
-            platform: if other.is_empty() { "unknown".into() } else { other.into() },
+            platform: if other.is_empty() {
+                "unknown".into()
+            } else {
+                other.into()
+            },
             method: OllamaInstallMethod::ManualDownload {
                 download_url: OLLAMA_HOMEPAGE.into(),
             },
@@ -225,7 +229,10 @@ mod tests {
     fn readiness_model_missing() {
         let avail = vec!["llama3.2:1b".to_string()];
         match check_readiness(true, &avail, "qwen2.5:3b") {
-            OllamaReadiness::ModelMissing { configured, available } => {
+            OllamaReadiness::ModelMissing {
+                configured,
+                available,
+            } => {
                 assert_eq!(configured, "qwen2.5:3b");
                 assert_eq!(available, avail);
             }
@@ -237,7 +244,10 @@ mod tests {
     fn readiness_model_missing_empty_daemon() {
         // daemon 在但一个模型都没有
         match check_readiness(true, &[], "qwen2.5:3b") {
-            OllamaReadiness::ModelMissing { configured, available } => {
+            OllamaReadiness::ModelMissing {
+                configured,
+                available,
+            } => {
                 assert_eq!(configured, "qwen2.5:3b");
                 assert!(available.is_empty());
             }
@@ -250,7 +260,9 @@ mod tests {
         let avail = vec!["qwen2.5:3b".to_string()];
         assert_eq!(
             check_readiness(true, &avail, "qwen2.5:3b"),
-            OllamaReadiness::Ready { resolved: "qwen2.5:3b".into() }
+            OllamaReadiness::Ready {
+                resolved: "qwen2.5:3b".into()
+            }
         );
     }
 
@@ -259,7 +271,9 @@ mod tests {
         let avail = vec!["bge-m3:latest".to_string()];
         assert_eq!(
             check_readiness(true, &avail, "bge-m3"),
-            OllamaReadiness::Ready { resolved: "bge-m3:latest".into() }
+            OllamaReadiness::Ready {
+                resolved: "bge-m3:latest".into()
+            }
         );
     }
 
@@ -285,7 +299,10 @@ mod tests {
     fn install_plan_macos_is_manual() {
         let p = install_plan("macos");
         assert_eq!(p.platform, "macos");
-        assert!(matches!(p.method, OllamaInstallMethod::ManualDownload { .. }));
+        assert!(matches!(
+            p.method,
+            OllamaInstallMethod::ManualDownload { .. }
+        ));
         assert!(!is_auto_installable(&p));
     }
 
@@ -293,7 +310,10 @@ mod tests {
     fn install_plan_unknown_is_manual() {
         let p = install_plan("freebsd");
         assert_eq!(p.platform, "freebsd");
-        assert!(matches!(p.method, OllamaInstallMethod::ManualDownload { .. }));
+        assert!(matches!(
+            p.method,
+            OllamaInstallMethod::ManualDownload { .. }
+        ));
         assert!(!is_auto_installable(&p));
         // empty → "unknown"
         assert_eq!(install_plan("").platform, "unknown");

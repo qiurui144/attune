@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attune.eval.suite.v1",
+  "title": "Attune Eval Suite Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "suite_id",
+    "purpose",
+    "corpora",
+    "scenarios",
+    "gates",
+    "thresholds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "attune.eval.suite.v1"
+    },
+    "suite_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1
+    },
+    "corpora": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "thresholds": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

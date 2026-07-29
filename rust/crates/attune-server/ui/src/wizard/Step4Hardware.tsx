@@ -50,10 +50,28 @@ type AiStackRecommendation = {
   total_download_mb: number;
 };
 
+type VitisAiAdvice = {
+  npu_present: boolean;
+  runtime_present: boolean;
+  vitis_compiled: boolean;
+  status: 'active' | 'directml-active-npu-roadmap';
+  npu_roadmap: boolean;
+  learn_more_url: string;
+  rationale: string;
+  benchmark: {
+    npu_ocr_cer_pct: number;
+    directml_ocr_cer_pct: number;
+    npu_p50_ms: number;
+    directml_p50_ms: number;
+    note: string;
+  };
+};
+
 type AiStackResponse = {
   hardware: AiStackTier & { ram_gb?: number; has_gpu?: boolean };
   region: { detected: string; hf_endpoint: string };
   recommendation: AiStackRecommendation | null;
+  vitisai_advice?: VitisAiAdvice | null;
 };
 
 type ScanStep = {
@@ -169,12 +187,37 @@ export function Step4Hardware({
     onContinue();
   }
 
+  // 本地调度器设备:embedding/rerank/OCR/ASR 由 local-scheduler :8090 提供,
+  // 模型预装 → 跳过模型下载步。仅本地调度器形态生效,不影响其他形态。
+  if (ctx.llmMode === 'local_scheduler') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+        <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
+          {t('wizard.hw.local_scheduler.heading')}
+        </h2>
+        <div
+          style={{
+            padding: 'var(--space-4)',
+            background: 'rgba(34, 197, 94, 0.06)',
+            border: '1px solid var(--color-success)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-secondary)',
+          }}
+        >
+          {t('wizard.hw.local_scheduler.preinstalled')}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Button variant="primary" size="lg" onClick={onContinue}>
+            {t('wizard.hw.local_scheduler.continue')} →
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   // v0.6.0-rc.4: Tier 0 (unsupported) 拒绝继续，显示明确错误信息
   const tierUnsupported = aiStack?.hardware?.supported === false;
-  const localChatBlocked =
-    ctx.llmMode === 'ollama'
-    && aiStack != null
-    && (aiStack.hardware.tier === 'unsupported' || aiStack.hardware.tier === 'low' || aiStack.hardware.tier === 'mid');
 
   if (tierUnsupported && aiStack) {
     return (
@@ -213,7 +256,7 @@ export function Step4Hardware({
         >
           <strong>{t('wizard.hw.unsupported.recommend')}</strong>
           <ul style={{ marginTop: 'var(--space-2)', paddingLeft: 'var(--space-4)' }}>
-            <li>{t('wizard.hw.unsupported.option_k3')}</li>
+            <li>{t('wizard.hw.unsupported.option_local_scheduler')}</li>
             <li>{t('wizard.hw.unsupported.option_device')}</li>
           </ul>
         </div>
@@ -302,22 +345,7 @@ export function Step4Hardware({
         </details>
       )}
 
-      {localChatBlocked && (
-        <div
-          style={{
-            padding: 'var(--space-3)',
-            border: '1px solid var(--color-warning)',
-            background: 'rgba(245, 158, 11, 0.08)',
-            borderRadius: 'var(--radius-md)',
-            color: 'var(--color-text-secondary)',
-            fontSize: 'var(--text-sm)',
-          }}
-        >
-          {t('wizard.hw.local_blocked')}
-        </div>
-      )}
-
-      {hw && !localChatBlocked && (
+      {hw && (
         <div className="fade-slide-in" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
           <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>{t('wizard.hw.auto_result')}</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
@@ -328,17 +356,74 @@ export function Step4Hardware({
         </div>
       )}
 
+      {aiStack?.vitisai_advice && <VitisAiCard advice={aiStack.vitisai_advice} />}
+
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button
           variant="primary"
           size="lg"
           loading={applying}
-          disabled={!hw || localChatBlocked}
+          disabled={!hw}
           onClick={applyRecommendation}
         >
           {t('wizard.hw.apply')} →
         </Button>
       </div>
+    </div>
+  );
+}
+
+// AMD NPU(VitisAI)监测 + 推荐卡片。标签走 t() 全 i18n;benchmark 数字 locale-neutral。
+// 「有 vitis 就用,没有就 AMD GPU(DirectML)+ CPU 兜底」——本卡只做监测+推荐(指官方),
+// 不托管/不再分发 AMD Ryzen AI(EULA 在 AMD 站点接受)。
+function VitisAiCard({ advice }: { advice: VitisAiAdvice }): JSX.Element {
+  const statusKey = advice.status.replace(/-/g, '_');
+  const b = advice.benchmark;
+  return (
+    <div
+      className="fade-slide-in"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-2)',
+        padding: 'var(--space-3)',
+        borderRadius: 'var(--radius-md)',
+        border: '1px solid var(--color-border)',
+        background: 'var(--color-bg)',
+      }}
+    >
+      <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>
+        {t('wizard.hw.vitisai.title')}
+      </div>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+        {t(`wizard.hw.vitisai.status.${statusKey}`)}
+      </div>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text)' }}>
+        {t(`wizard.hw.vitisai.rationale.${statusKey}`)}
+      </div>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+        {t('wizard.hw.vitisai.bench', {
+          npuCer: String(b.npu_ocr_cer_pct),
+          dmlCer: String(b.directml_ocr_cer_pct),
+          npuMs: String(b.npu_p50_ms),
+          dmlMs: String(b.directml_p50_ms),
+        })}
+      </div>
+      {advice.npu_roadmap && (
+        <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+          <a
+            href={advice.learn_more_url}
+            target="_blank"
+            rel="noreferrer noopener"
+            style={{
+              fontSize: 'var(--text-xs)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            {t('wizard.hw.vitisai.learn_more')} ↗
+          </a>
+        </div>
+      )}
     </div>
   );
 }
@@ -394,4 +479,3 @@ function MiniStat({ label, value }: { label: string; value: string }): JSX.Eleme
     </div>
   );
 }
-

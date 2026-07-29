@@ -75,7 +75,6 @@ attune 的支持响应分级。OSS 主线 best-effort，Attune Pro 会员有更�
 | GitHub Issues | P1 / P2 bug 上报 | https://github.com/qiurui144/attune-core/issues |
 | GitHub Discussions | P3 feature / 使用问题 / 讨论 | https://github.com/qiurui144/attune-core/discussions |
 | Email（私下） | P0 安全漏洞 / 数据安全 issue | happyqiuqiu9604@gmail.com |
-| Discord（占位） | 实时讨论（待开启） | TBD |
 
 ## 上报模板
 
@@ -94,7 +93,7 @@ P2 / P3 至少 1 / 3 / 4。
 
 以下场景**不在** attune OSS 支持范围内:
 
-- **个性化部署咨询**（如 K3 一体机适配 / 企业 LDAP 接入）→ 联系 Attune Pro 商业支持
+- **个性化部署咨询**（如 本地调度器设备适配 / 企业 LDAP 接入）→ 联系 Attune Pro 商业支持
 - **第三方 LLM provider 自身故障**（OpenAI / Anthropic / Gemini API 不可用） → 上报对应厂商
 - **用户硬件故障**（GPU 驱动 / Ollama runtime 装错）→ 上游社区
 - **超出 README 文档范围的二次开发**（魔改源码后异常）→ 自行排查

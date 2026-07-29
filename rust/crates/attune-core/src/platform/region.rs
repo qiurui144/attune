@@ -1,7 +1,22 @@
 //! 区域检测 + 模型下载源选择
 //!
 //! 用户决策（2026-04-27）："中国区域默认走代理地址" — 启动时根据 timezone + locale
-//! 自动检测，给国内用户选 hf-mirror.com 镜像，避免 HuggingFace 直连慢/失败。
+//! 自动检测，给国内用户选国内源，避免 HuggingFace 直连慢/失败。
+//!
+//! 2026-06-12 修正(§6.3 实测拍板 CN→ModelScope/海外→HF):旧 `hf-mirror.com` 在 CN 已死
+//! (连不上/卡死),改默认 `modelscope.cn`(实测唯一活源,4MB/s,HF-resolve 兼容)。
+//!
+//! ⚠️ per-model 覆盖差异(ModelScope 非全镜像):
+//!   - ✅ embedding/reranker(Xenova ONNX)— ModelScope 有 `Xenova/bge-m3` /
+//!     `Xenova/bge-reranker-base`(实测 206)
+//!   - ❌ ASR(`ggerganov/whisper.cpp`)/ OCR(`SWHL/RapidOCR`)— ModelScope 无(404)
+//!
+//! 注:本 `Region::hf_endpoint()` 现仅作启动期 `HF_ENDPOINT` env 的**静态默认**(state.rs)
+//! 加显式覆盖逃生门。模型**下载**已升级到 S8 动态多源选择(`infer::model_source`:候选注册表
+//! company-mirror > ModelScope > hf-mirror > HF 加健康探测 + failover),对 ModelScope
+//! 无覆盖的 whisper/PP-OCR 自动跳过改走 company-mirror/HF,不再 404 degrade
+//! (spec docs/superpowers/specs/2026-06-11-modelstack-lifecycle.md §12;company-mirror
+//! host 归 cloud R2.E)。
 //!
 //! 区域分类：
 //! - China: timezone Asia/{Shanghai/Chongqing/Urumqi/Harbin/Hong_Kong/Taipei/Macau}
@@ -18,10 +33,14 @@ pub enum Region {
 }
 
 impl Region {
-    /// HuggingFace 模型下载 endpoint
+    /// HuggingFace 兼容模型下载 endpoint(hf-hub crate 读 `HF_ENDPOINT`)。
+    /// CN → ModelScope(HF-resolve 兼容,实测唯一活源);海外 → HF 官方。
+    /// per-model 覆盖差异见模块 doc(embedding/reranker 有;ASR/OCR 无 → degrade)。
     pub fn hf_endpoint(self) -> &'static str {
         match self {
-            Region::China => "https://hf-mirror.com",
+            // hf-hub 拼 `{endpoint}/{repo}/resolve/{rev}/{file}`;ModelScope 的 HF-resolve
+            // 兼容路径在 `/models/` 下,故 endpoint 含 `/models` 才能命中。
+            Region::China => "https://modelscope.cn/models",
             Region::International => "https://huggingface.co",
         }
     }
@@ -45,7 +64,7 @@ impl Region {
 
     pub fn label(self) -> &'static str {
         match self {
-            Region::China => "China (hf-mirror.com)",
+            Region::China => "China (modelscope.cn)",
             Region::International => "International (huggingface.co)",
         }
     }
@@ -137,8 +156,16 @@ mod tests {
             Region::China.hf_endpoint(),
             Region::International.hf_endpoint()
         );
-        assert!(Region::China.hf_endpoint().contains("hf-mirror"));
-        assert!(Region::International.hf_endpoint().contains("huggingface.co"));
+        // S2: CN 默认源改 ModelScope(实测唯一活源;旧 hf-mirror 已死),海外保持 HF 官方。
+        assert!(
+            Region::China.hf_endpoint().contains("modelscope"),
+            "CN endpoint must be ModelScope, got {}",
+            Region::China.hf_endpoint()
+        );
+        assert!(!Region::China.hf_endpoint().contains("hf-mirror"));
+        assert!(Region::International
+            .hf_endpoint()
+            .contains("huggingface.co"));
     }
 
     #[test]

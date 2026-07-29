@@ -107,7 +107,13 @@ impl Store {
                  schema_version = excluded.schema_version, \
                  payload = excluded.payload, \
                  updated_at = datetime('now')",
-            params![agent_id, plugin_id, state_kind.as_str(), schema_version, enc],
+            params![
+                agent_id,
+                plugin_id,
+                state_kind.as_str(),
+                schema_version,
+                enc
+            ],
         )?;
         Ok(())
     }
@@ -247,7 +253,12 @@ mod tests {
             )
             .unwrap();
         let row = store
-            .get_agent_state(&dek, "defamation_extractor", "law-pro", AgentStateKind::Preference)
+            .get_agent_state(
+                &dek,
+                "defamation_extractor",
+                "law-pro",
+                AgentStateKind::Preference,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(row.payload, b"{\"verbosity\":\"terse\"}");
@@ -274,7 +285,10 @@ mod tests {
         // And the wrong DEK must fail to decrypt.
         let wrong = dek2_distinct(&dek);
         let err = store.get_agent_state(&wrong, "a", "oss-core", AgentStateKind::Preference);
-        assert!(err.is_err(), "decrypt with wrong DEK must error, not return garbage");
+        assert!(
+            err.is_err(),
+            "decrypt with wrong DEK must error, not return garbage"
+        );
     }
 
     // Generate a DEK guaranteed different from `other` (Key32::generate is random
@@ -296,18 +310,42 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         store
-            .upsert_agent_state(&dek, "shared_agent", "law-pro", AgentStateKind::SkillExpansion, 1, b"law")
+            .upsert_agent_state(
+                &dek,
+                "shared_agent",
+                "law-pro",
+                AgentStateKind::SkillExpansion,
+                1,
+                b"law",
+            )
             .unwrap();
         store
-            .upsert_agent_state(&dek, "shared_agent", "tech-pro", AgentStateKind::SkillExpansion, 1, b"tech")
+            .upsert_agent_state(
+                &dek,
+                "shared_agent",
+                "tech-pro",
+                AgentStateKind::SkillExpansion,
+                1,
+                b"tech",
+            )
             .unwrap();
 
         let law = store
-            .get_agent_state(&dek, "shared_agent", "law-pro", AgentStateKind::SkillExpansion)
+            .get_agent_state(
+                &dek,
+                "shared_agent",
+                "law-pro",
+                AgentStateKind::SkillExpansion,
+            )
             .unwrap()
             .unwrap();
         let tech = store
-            .get_agent_state(&dek, "shared_agent", "tech-pro", AgentStateKind::SkillExpansion)
+            .get_agent_state(
+                &dek,
+                "shared_agent",
+                "tech-pro",
+                AgentStateKind::SkillExpansion,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(law.payload, b"law");
@@ -325,12 +363,30 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         store
-            .upsert_agent_state(&dek, "a", "oss-core", AgentStateKind::RatchetWatermark, 1, b"0.80")
+            .upsert_agent_state(
+                &dek,
+                "a",
+                "oss-core",
+                AgentStateKind::RatchetWatermark,
+                1,
+                b"0.80",
+            )
             .unwrap();
         store
-            .upsert_agent_state(&dek, "a", "oss-core", AgentStateKind::RatchetWatermark, 2, b"0.85")
+            .upsert_agent_state(
+                &dek,
+                "a",
+                "oss-core",
+                AgentStateKind::RatchetWatermark,
+                2,
+                b"0.85",
+            )
             .unwrap();
-        assert_eq!(store.count_agent_state().unwrap(), 1, "same key must not duplicate");
+        assert_eq!(
+            store.count_agent_state().unwrap(),
+            1,
+            "same key must not duplicate"
+        );
         let row = store
             .get_agent_state(&dek, "a", "oss-core", AgentStateKind::RatchetWatermark)
             .unwrap()

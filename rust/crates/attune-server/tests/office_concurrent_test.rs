@@ -1,6 +1,6 @@
 //! D5.1 — L2 concurrent stress test.
 //!
-//! Spec §6.3 — 5 OCR + 2 ASR concurrent, JobRegistry consistency, no panic.
+//! Spec §6.3 — 5 OCR + 2 ASR concurrent, durable job-store consistency, no panic.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,12 +24,20 @@ async fn start_server() -> String {
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+    // 空缓存 + 同步 ensure_models → blocking hf-hub 下载在 async drop runtime → panic;
+    // HF_HUB_OFFLINE 让未命中缓存直接 Err(graceful),不进网络(同 office_error_contract)。
+    std::env::set_var("HF_HUB_OFFLINE", "1");
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).unwrap();
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
+    // G5: office ASR routes need the durable job store (503 otherwise). The
+    // HOME/XDG override above points db_path() into this test's TempDir.
+    state.install_job_store();
     let router = attune_server::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
     let base = format!("http://127.0.0.1:{port}");
     wait_for_server(&base).await;
     let client = reqwest::Client::new();
@@ -75,7 +83,11 @@ async fn five_concurrent_bad_ocr_requests_all_return_invalid_input() {
         statuses.push(h.await.unwrap());
     }
     // All 5 should be 400 (missing profile → invalid-input)
-    assert_eq!(statuses, vec![400u16; 5], "all concurrent requests should 400 cleanly");
+    assert_eq!(
+        statuses,
+        vec![400u16; 5],
+        "all concurrent requests should 400 cleanly"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -97,7 +109,10 @@ async fn concurrent_transcribe_submits_create_independent_jobs() {
                 .send()
                 .await
                 .expect("post");
-            (resp.status().as_u16(), resp.text().await.unwrap_or_default())
+            (
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            )
         }));
     }
     let mut results = Vec::new();
@@ -133,37 +148,42 @@ async fn concurrent_get_unknown_jobs_all_404() {
     for h in handles {
         statuses.push(h.await.unwrap());
     }
-    assert!(statuses.iter().all(|s| *s == 404), "all should be 404; got {statuses:?}");
+    assert!(
+        statuses.iter().all(|s| *s == 404),
+        "all should be 404; got {statuses:?}"
+    );
 }
 
 #[test]
-fn job_registry_concurrent_inserts_no_panic() {
-    // Pure unit: spawn 16 threads each inserting jobs, then verify all there.
-    use attune_core::office_job_queue::{Job, JobRegistry};
+fn job_store_concurrent_enqueues_no_panic() {
+    // Pure unit: 16 threads each enqueue 8 durable jobs on the shared store
+    // handle (same Arc<Mutex<Store>> shape the routes + job worker use).
+    use attune_core::office_job_queue::JobKind;
+    use attune_core::store::Store;
+    use std::sync::Mutex;
     use std::thread;
 
-    let registry = JobRegistry::new();
+    let store = Arc::new(Mutex::new(Store::open_memory().unwrap()));
     let mut handles = Vec::new();
-    for i in 0..16 {
-        let r = registry.clone();
+    for _ in 0..16 {
+        let store = store.clone();
         handles.push(thread::spawn(move || {
-            for j in 0..8 {
-                r.insert(Job::new(format!("job-{i}-{j}")));
+            let mut ids = Vec::new();
+            for _ in 0..8 {
+                let s = store.lock().unwrap_or_else(|e| e.into_inner());
+                ids.push(s.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap());
             }
+            ids
         }));
     }
+    let mut all_ids = Vec::new();
     for h in handles {
-        h.join().unwrap();
+        all_ids.extend(h.join().unwrap());
     }
-    // All 16 × 8 = 128 jobs should be present
-    let mut count = 0;
-    for i in 0..16 {
-        for j in 0..8 {
-            if registry.get(&format!("job-{i}-{j}")).is_some() {
-                count += 1;
-            }
-        }
-    }
-    assert_eq!(count, 128, "all concurrent inserts must persist");
+    // All 16 × 8 = 128 jobs present, ids unique.
+    all_ids.sort();
+    all_ids.dedup();
+    assert_eq!(all_ids.len(), 128, "all concurrent enqueues must persist");
+    let s = store.lock().unwrap();
+    assert_eq!(s.in_flight_job_count().unwrap(), 128);
 }
-

@@ -36,7 +36,10 @@ fn large_file_ingest_no_panic_graceful_chunk() {
     }
     let actual_kb = content.len() / 1024;
     println!("[oom] large file: {actual_kb} KB");
-    assert!(actual_kb >= 50 * 1024, "测试内容必须 >= 50 MB，实际 = {actual_kb} KB");
+    assert!(
+        actual_kb >= 50 * 1024,
+        "测试内容必须 >= 50 MB，实际 = {actual_kb} KB"
+    );
 
     let store = Store::open_memory().unwrap();
     let mut vectors = VectorIndex::new(64).unwrap();
@@ -49,8 +52,16 @@ fn large_file_ingest_no_panic_graceful_chunk() {
         .expect("insert_item on 100MB doc must not panic/error");
 
     // reindex_item 不应 panic，必须产生 chunk
-    let stats = reindex::reindex_item(&store, &mut vectors, &fulltext, &id, "Large File", &content, "note")
-        .expect("reindex_item on 100MB doc must not panic");
+    let stats = reindex::reindex_item(
+        &store,
+        &mut vectors,
+        &fulltext,
+        &id,
+        "Large File",
+        &content,
+        "note",
+    )
+    .expect("reindex_item on 100MB doc must not panic");
 
     assert!(
         stats.chunks_enqueued > 0,
@@ -69,9 +80,9 @@ fn large_file_ingest_no_panic_graceful_chunk() {
 #[test]
 #[ignore]
 fn vector_index_heavy_load_search_stable() {
-    // VectorIndex::new 内部 reserve(10000)。写满 9_999 个（留 1 槽），验证
-    // 接近满载时搜索不 corrupt。超出 10000 需要额外 reserve（目前无公开 API）。
-    const N: usize = 9_999;
+    // VectorIndex::new 初始 reserve(10_000)；add 越界后 amortized 翻倍扩容。
+    // 写满 12_345 个（越过 10k 边界）验证扩容路径下不 panic、搜索不 corrupt。
+    const N: usize = 12_345;
     const DIMS: usize = 64;
 
     let mut vectors = VectorIndex::new(DIMS).unwrap();
@@ -107,11 +118,16 @@ fn vector_index_heavy_load_search_stable() {
         v.iter_mut().for_each(|x| *x /= norm);
         v
     };
-    let results = vectors.search(&query, 10).expect("search on heavy load must not fail");
+    let results = vectors
+        .search(&query, 10)
+        .expect("search on heavy load must not fail");
     assert!(results.len() <= 10, "搜索结果不得超过 top_k=10");
-    assert!(!results.is_empty(), "50k 向量下搜索必须有结果");
+    assert!(!results.is_empty(), "扩容后大批量向量下搜索必须有结果");
 
-    println!("[oom] vector_index_heavy_load: OK — {N} vectors, search returned {} results", results.len());
+    println!(
+        "[oom] vector_index_heavy_load: OK — {N} vectors (>10k, grown), search returned {} results",
+        results.len()
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -147,8 +163,16 @@ fn oversized_content_chunker_truncates_no_panic() {
         .insert_item(&dek, "Oversized", &content, None, "note", None, None)
         .expect("insert oversized content must not fail");
 
-    let stats = reindex::reindex_item(&store, &mut vectors, &fulltext, &id, "Oversized", &content, "note")
-        .expect("reindex oversized content must not panic");
+    let stats = reindex::reindex_item(
+        &store,
+        &mut vectors,
+        &fulltext,
+        &id,
+        "Oversized",
+        &content,
+        "note",
+    )
+    .expect("reindex oversized content must not panic");
 
     // 应该产生很多 chunk（内容大）
     assert!(
@@ -161,7 +185,10 @@ fn oversized_content_chunker_truncates_no_panic() {
     let pending = store.pending_embedding_count().unwrap();
     assert_eq!(pending, stats.chunks_enqueued, "pending 数必须等于入队数");
 
-    println!("[oom] oversized_content: OK — {actual_kb}KB → {} chunks, no panic", stats.chunks_enqueued);
+    println!(
+        "[oom] oversized_content: OK — {actual_kb}KB → {} chunks, no panic",
+        stats.chunks_enqueued
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -190,7 +217,15 @@ fn edge_case_empty_and_tiny_content_no_panic() {
         match result {
             Ok(id) => {
                 // reindex 也不应 panic
-                let _ = reindex::reindex_item(&store, &mut vectors, &fulltext, &id, title, content, "note");
+                let _ = reindex::reindex_item(
+                    &store,
+                    &mut vectors,
+                    &fulltext,
+                    &id,
+                    title,
+                    content,
+                    "note",
+                );
             }
             Err(e) => {
                 println!("[oom] edge case '{title}' insert returned error (acceptable): {e}");

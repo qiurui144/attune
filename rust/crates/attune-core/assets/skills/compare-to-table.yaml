@@ -1,0 +1,45 @@
+# OSS 通用 skill: 设备参数比对成表 (用户例 3)
+# "一个文档中两个设备参数的不同 → 输出表格并下载"
+#
+# 步骤: rag(取文档) → agent(抽取两实体参数并比对, §4.5 LLM 兜底) → render(成 Table IR)
+#        → export(xlsx, 也可 csv/md)
+# 💰 多步 LLM skill → 必须用户显式触发 (trigger.on=manual, 解析时强制校验)。
+id: compare-to-table
+type: skill
+version: "1.0.0"
+title: 设备参数比对成表
+description: 从文档中抽取两个实体（如两款设备）的参数并生成可下载的差异表格
+cost_tier: llm_multi_step
+trigger:
+  on: manual
+  scope: project
+inputs:
+  - { name: doc, type: item_id, required: true }
+  - { name: entities, type: string_list, required: true }
+steps:
+  - type: rag
+    id: load
+    input:
+      item_ids: ["${doc}"]
+    output: docs
+  - type: agent
+    id: extract
+    agent: document_intelligence.compare_to_table
+    input:
+      text: "${docs}"
+      entity_a: "${entities.0}"
+      entity_b: "${entities.1}"
+    output: diff
+  - type: render
+    id: build
+    as_kind: table
+    input:
+      from: "${diff}"
+      title: "设备参数比对"
+    output: artifact
+  - type: export
+    id: out
+    input:
+      artifact: "${artifact}"
+      format: xlsx
+    output: file

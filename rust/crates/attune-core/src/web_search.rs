@@ -129,7 +129,10 @@ mod tests {
         let result = from_settings(&settings);
         let detected = crate::web_search_browser::detect_system_browser();
         match detected {
-            Some(_) => assert!(result.is_some(), "有 Chrome/Edge 时默认应加载 browser provider"),
+            Some(_) => assert!(
+                result.is_some(),
+                "有 Chrome/Edge 时默认应加载 browser provider"
+            ),
             None => assert!(result.is_none(), "无 Chromium 内核浏览器时返回 None 正常"),
         }
     }
@@ -142,7 +145,9 @@ mod tests {
                 "browser_path": "/nonexistent/path/to/chrome"
             }
         });
-        assert!(from_settings(&settings).is_none(),
-            "bad browser_path must not fall back to auto-detect silently");
+        assert!(
+            from_settings(&settings).is_none(),
+            "bad browser_path must not fall back to auto-detect silently"
+        );
     }
 }

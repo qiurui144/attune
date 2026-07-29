@@ -15,7 +15,154 @@
 
 pub const DEFAULT_CHUNK_SIZE: usize = 512;
 pub const DEFAULT_OVERLAP: usize = 128;
+pub const DEFAULT_SCHEDULER_CHUNK_SIZE: usize = 4096;
+pub const DEFAULT_SCHEDULER_OVERLAP: usize = 256;
 pub const SECTION_TARGET_SIZE: usize = 1500;
+pub const MIN_CONFIGURED_CHUNK_SIZE: usize = 128;
+pub const MAX_CONFIGURED_CHUNK_SIZE: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkingOptions {
+    pub chunk_size: usize,
+    pub overlap: usize,
+    pub include_level1: bool,
+    pub include_level2: bool,
+}
+
+impl Default for ChunkingOptions {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl ChunkingOptions {
+    pub fn new(chunk_size: usize, overlap: usize) -> Self {
+        Self::normalized(chunk_size, overlap, true, true)
+    }
+
+    pub fn with_levels(mut self, include_level1: bool, include_level2: bool) -> Self {
+        self.include_level1 = include_level1;
+        self.include_level2 = include_level2;
+        if !self.include_level1 && !self.include_level2 {
+            self.include_level2 = true;
+        }
+        self
+    }
+
+    pub fn from_env() -> Self {
+        let chunk_size = env_usize_any(
+            &[
+                "ATTUNE_INGEST_CHUNK_SIZE",
+                "ATTUNE_INDEX_CHUNK_SIZE",
+                "ATTUNE_CHUNK_SIZE",
+            ],
+            DEFAULT_CHUNK_SIZE,
+        );
+        let overlap = env_usize_any(
+            &[
+                "ATTUNE_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_INDEX_CHUNK_OVERLAP",
+                "ATTUNE_CHUNK_OVERLAP",
+            ],
+            DEFAULT_OVERLAP,
+        );
+        let include_level1 = env_bool_any(&["ATTUNE_INGEST_INCLUDE_LEVEL1"], true);
+        let include_level2 = env_bool_any(&["ATTUNE_INGEST_INCLUDE_LEVEL2"], true);
+        Self::normalized(chunk_size, overlap, include_level1, include_level2)
+    }
+
+    /// Scheduler-backed edge ingest uses coarser L2-only chunking by default.
+    ///
+    /// On large manuals, the legacy 512-character L1+L2 policy can enqueue tens
+    /// of thousands of redundant embedding jobs per corpus and push the answer
+    /// path behind indexing. The scheduler path is meant to run on constrained
+    /// local CPU/NPU boxes, so the default favors bounded queue size and stable
+    /// recall; operators can still override every knob with env vars.
+    pub fn scheduler_from_env() -> Self {
+        let chunk_size = env_usize_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_CHUNK_SIZE",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_SIZE",
+                "ATTUNE_INGEST_CHUNK_SIZE",
+                "ATTUNE_INDEX_CHUNK_SIZE",
+                "ATTUNE_CHUNK_SIZE",
+            ],
+            DEFAULT_SCHEDULER_CHUNK_SIZE,
+        );
+        let overlap = env_usize_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_INDEX_CHUNK_OVERLAP",
+                "ATTUNE_CHUNK_OVERLAP",
+            ],
+            DEFAULT_SCHEDULER_OVERLAP,
+        );
+        let include_level1 = env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+                "ATTUNE_INGEST_INCLUDE_LEVEL1",
+            ],
+            false,
+        );
+        let include_level2 = env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+                "ATTUNE_INGEST_INCLUDE_LEVEL2",
+            ],
+            true,
+        );
+        Self::normalized(chunk_size, overlap, include_level1, include_level2)
+    }
+
+    fn normalized(
+        chunk_size: usize,
+        overlap: usize,
+        include_level1: bool,
+        include_level2: bool,
+    ) -> Self {
+        let chunk_size = chunk_size.clamp(MIN_CONFIGURED_CHUNK_SIZE, MAX_CONFIGURED_CHUNK_SIZE);
+        let overlap = overlap.min(chunk_size.saturating_sub(1));
+        let (include_level1, include_level2) = if !include_level1 && !include_level2 {
+            (false, true)
+        } else {
+            (include_level1, include_level2)
+        };
+        Self {
+            chunk_size,
+            overlap,
+            include_level1,
+            include_level2,
+        }
+    }
+}
+
+fn env_usize_any(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+fn env_bool_any(keys: &[&str], default: bool) -> bool {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key).ok().map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+        })
+        .unwrap_or(default)
+}
 
 /// 滑动窗口分块（字符级，句子边界感知 + Markdown code fence 边界保留）
 ///
@@ -375,6 +522,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chunking_options_clamp_size_and_overlap() {
+        let opts = ChunkingOptions::new(1, 999);
+        assert_eq!(opts.chunk_size, MIN_CONFIGURED_CHUNK_SIZE);
+        assert_eq!(opts.overlap, MIN_CONFIGURED_CHUNK_SIZE - 1);
+
+        let opts = ChunkingOptions::new(MAX_CONFIGURED_CHUNK_SIZE * 2, 0);
+        assert_eq!(opts.chunk_size, MAX_CONFIGURED_CHUNK_SIZE);
+        assert_eq!(opts.overlap, 0);
+    }
+
+    #[test]
+    fn chunking_options_keep_at_least_one_level_enabled() {
+        let opts = ChunkingOptions::new(512, 128).with_levels(false, false);
+        assert!(!opts.include_level1);
+        assert!(opts.include_level2);
+    }
+
+    #[test]
     fn chunk_short_text_single() {
         let chunks = chunk("Hello world", 512, 128);
         assert_eq!(chunks.len(), 1);
@@ -393,15 +558,24 @@ mod tests {
     fn extract_sections_markdown() {
         let content = "# Title\n\nIntro paragraph.\n\n## Section 1\n\nContent 1.\n\n## Section 2\n\nContent 2.";
         let sections = extract_sections(content);
-        assert!(sections.len() >= 2, "Should split on ## headings: got {}", sections.len());
+        assert!(
+            sections.len() >= 2,
+            "Should split on ## headings: got {}",
+            sections.len()
+        );
         assert!(sections[0].1.contains("Title"));
     }
 
     #[test]
     fn extract_sections_code() {
-        let content = "fn main() {\n    println!(\"hello\");\n}\n\npub fn helper() {\n    // code\n}";
+        let content =
+            "fn main() {\n    println!(\"hello\");\n}\n\npub fn helper() {\n    // code\n}";
         let sections = extract_sections(content);
-        assert!(sections.len() >= 2, "Should split on fn boundaries: got {}", sections.len());
+        assert!(
+            sections.len() >= 2,
+            "Should split on fn boundaries: got {}",
+            sections.len()
+        );
     }
 
     #[test]
@@ -426,7 +600,8 @@ mod tests {
     fn chunk_preserves_code_fence_balanced_in_each_chunk() {
         // markdown 含一个会被 chunk 切到中间的 code block
         let prose = "前置说明。".repeat(80); // ~480 chars 中文
-        let code = "\n```rust\nfn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n```\n";
+        let code =
+            "\n```rust\nfn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n```\n";
         let after = "\n后续段落。".repeat(80);
         let text = format!("{prose}{code}{after}");
         let chunks = chunk(&text, 500, 100);
@@ -473,17 +648,27 @@ mod tests {
 
     #[test]
     fn extract_sections_with_path_markdown_nested() {
-        let content = "# 公司手册\n\n概述。\n\n## 第三章 福利\n\n福利总览。\n\n### 3.2 假期\n\n年假 15 天。";
+        let content =
+            "# 公司手册\n\n概述。\n\n## 第三章 福利\n\n福利总览。\n\n### 3.2 假期\n\n年假 15 天。";
         let secs = extract_sections_with_path(content);
         // 4 sections: 概述（path=[公司手册]） / 福利总览（[公司手册, 第三章 福利]）/
         // 假期（[公司手册, 第三章 福利, 3.2 假期]） — 第一个标题前内容如果有则 path=空
         // 当前 content "公司手册" 直接是第一个标题，所以无 path-empty section
-        assert!(secs.len() >= 3, "期望 ≥3 sections, got {}: {:?}", secs.len(), secs);
+        assert!(
+            secs.len() >= 3,
+            "期望 ≥3 sections, got {}: {:?}",
+            secs.len(),
+            secs
+        );
         // 验证最后一个 section 的 path 三层
         let last = &secs[secs.len() - 1];
         assert_eq!(
             last.path,
-            vec!["公司手册".to_string(), "第三章 福利".to_string(), "3.2 假期".to_string()]
+            vec![
+                "公司手册".to_string(),
+                "第三章 福利".to_string(),
+                "3.2 假期".to_string()
+            ]
         );
         assert!(last.content.contains("年假 15 天"));
     }
@@ -494,8 +679,16 @@ mod tests {
         let content = "# A\n内容 A\n\n## B\n内容 B\n\n# C\n内容 C";
         let secs = extract_sections_with_path(content);
         // 找 path 包含 "C" 的 section
-        let c_section = secs.iter().find(|s| s.content.contains("内容 C")).expect("missing C");
-        assert_eq!(c_section.path, vec!["C".to_string()], "dedent must reset to depth-1: got {:?}", c_section.path);
+        let c_section = secs
+            .iter()
+            .find(|s| s.content.contains("内容 C"))
+            .expect("missing C");
+        assert_eq!(
+            c_section.path,
+            vec!["C".to_string()],
+            "dedent must reset to depth-1: got {:?}",
+            c_section.path
+        );
     }
 
     #[test]
@@ -504,7 +697,11 @@ mod tests {
         let content = "fn foo() {\n    println!(\"foo\");\n}\n\npub fn bar() {\n    helper();\n}";
         let secs = extract_sections_with_path(content);
         for s in &secs {
-            assert!(s.path.len() <= 1, "代码 boundary 路径深度不应 > 1: {:?}", s.path);
+            assert!(
+                s.path.len() <= 1,
+                "代码 boundary 路径深度不应 > 1: {:?}",
+                s.path
+            );
         }
     }
 
@@ -533,7 +730,9 @@ mod tests {
             secs.iter().map(|s| s.path.last().cloned()).collect::<Vec<_>>()
         );
         // 应该有一个 Real Heading section
-        assert!(secs.iter().any(|s| s.path == vec!["Real Heading".to_string()]));
+        assert!(secs
+            .iter()
+            .any(|s| s.path == vec!["Real Heading".to_string()]));
         // 不应该有 fn foo / fn bar / impl 等作为 section path
         for s in &secs {
             for p in &s.path {
@@ -566,9 +765,16 @@ mod tests {
         let secs = extract_sections_with_path(content);
         // 第一个 section 的 path 应为空（preamble）
         assert!(!secs.is_empty());
-        assert!(secs[0].path.is_empty(), "preamble path 应为空，得到 {:?}", secs[0].path);
+        assert!(
+            secs[0].path.is_empty(),
+            "preamble path 应为空，得到 {:?}",
+            secs[0].path
+        );
         // 第二个 section 的 path 应有 1 层
-        let after = secs.iter().find(|s| s.content.contains("章节正文")).expect("missing post-heading");
+        let after = secs
+            .iter()
+            .find(|s| s.content.contains("章节正文"))
+            .expect("missing post-heading");
         assert_eq!(after.path, vec!["后来的标题".to_string()]);
     }
 
@@ -668,13 +874,9 @@ mod tests {
             for &len in &[100usize, 500, 1000, 2000, 5000] {
                 let text = deterministic_text(seed, len);
                 let chunks = chunk(&text, 512, 128);
-                assert!(
-                    !chunks.is_empty(),
-                    "seed={} len={} chunks empty",
-                    seed,
-                    len
-                );
-                let first_chunk_starts_with_text_start = text.starts_with(&chunks[0][..chunks[0].len().min(50)])
+                assert!(!chunks.is_empty(), "seed={} len={} chunks empty", seed, len);
+                let first_chunk_starts_with_text_start = text
+                    .starts_with(&chunks[0][..chunks[0].len().min(50)])
                     || chunks[0].starts_with(&text[..text.len().min(50)]);
                 assert!(
                     first_chunk_starts_with_text_start,
@@ -716,13 +918,13 @@ mod tests {
     fn chunk_property_no_panic_on_edge_inputs() {
         // 防御: chunker 不应 panic 即使输入异常
         let cases = vec![
-            "",                                                 // empty
-            "\n\n\n",                                           // only newlines
-            "                                            ",     // only spaces
-            "```",                                              // unclosed fence
-            "```rust\nfn x()\n",                                // unclosed code block
-            "a",                                                // single char
-            "🌿🌿🌿🌿🌿",                                            // multi-byte unicode
+            "",                                             // empty
+            "\n\n\n",                                       // only newlines
+            "                                            ", // only spaces
+            "```",                                          // unclosed fence
+            "```rust\nfn x()\n",                            // unclosed code block
+            "a",                                            // single char
+            "🌿🌿🌿🌿🌿",                                   // multi-byte unicode
         ];
         for input in cases {
             // Must not panic
@@ -730,7 +932,11 @@ mod tests {
             // Empty input → may or may not return [""] — both are valid behaviors
             // for caller (parser typically filters empty content before chunking)
             if !input.is_empty() && !input.trim().is_empty() {
-                assert!(!chunks.is_empty(), "non-empty input {:?} produced 0 chunks", input);
+                assert!(
+                    !chunks.is_empty(),
+                    "non-empty input {:?} produced 0 chunks",
+                    input
+                );
             }
         }
     }
@@ -740,7 +946,7 @@ mod tests {
         // 防死循环: overlap >= chunk_size 时 chunker 应自动 clamp
         let text: String = "a".repeat(2000);
         let chunks = chunk(&text, 512, 999); // overlap > chunk_size
-        // 不应死循环, chunks 数量有限 (<2000 chunks)
+                                             // 不应死循环, chunks 数量有限 (<2000 chunks)
         assert!(
             chunks.len() < 2000,
             "pathological overlap caused {} chunks (likely infinite loop signal)",
@@ -778,7 +984,8 @@ mod tests {
         for (i, c) in chunks.iter().enumerate() {
             assert!(
                 c.chars().count() <= 1024,
-                "chunk[{i}] {} chars > 2*512", c.chars().count()
+                "chunk[{i}] {} chars > 2*512",
+                c.chars().count()
             );
         }
     }

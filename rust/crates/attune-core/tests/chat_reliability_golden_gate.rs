@@ -83,10 +83,10 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn load_yaml(path: &Path) -> Option<GoldenCase> {
-    let raw = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read fixture {:?}: {e}", path));
-    let case: GoldenCase = serde_yaml::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse fixture {:?}: {e}", path));
+    let raw =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read fixture {:?}: {e}", path));
+    let case: GoldenCase =
+        serde_yaml::from_str(&raw).unwrap_or_else(|e| panic!("parse fixture {:?}: {e}", path));
     if !case.reviewer.approved {
         return None;
     }
@@ -181,8 +181,7 @@ fn golden_gate_enforce_mode_zero_violations() {
     );
 
     for (path, case) in &fixtures {
-        let chunks: Vec<RetrievedChunk> =
-            case.chunks.iter().map(chunk_from_golden).collect();
+        let chunks: Vec<RetrievedChunk> = case.chunks.iter().map(chunk_from_golden).collect();
         let report = evaluate_response(&case.response, &chunks, &case.query, &config);
 
         // ── Citation facet ─────────────────────────────────────────────────
@@ -229,8 +228,12 @@ fn golden_gate_enforce_mode_zero_violations() {
             .map(|f| hallucination_kind_to_str(f.kind))
             .collect();
         agent_kinds.sort();
-        let mut expected_kinds: Vec<&str> =
-            case.expected.hallucination_kinds.iter().map(|s| s.as_str()).collect();
+        let mut expected_kinds: Vec<&str> = case
+            .expected
+            .hallucination_kinds
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         expected_kinds.sort();
         if agent_kinds != expected_kinds {
             violations.push(format!(
@@ -241,9 +244,7 @@ fn golden_gate_enforce_mode_zero_violations() {
 
         // ── Confidence facet ───────────────────────────────────────────────
         let [lo, hi] = case.expected.confidence_range;
-        if report.overall_confidence < lo - 1e-4
-            || report.overall_confidence > hi + 1e-4
-        {
+        if report.overall_confidence < lo - 1e-4 || report.overall_confidence > hi + 1e-4 {
             violations.push(format!(
                 "[{}] confidence {} outside expected range [{}, {}] (path={:?})",
                 case.id, report.overall_confidence, lo, hi, path

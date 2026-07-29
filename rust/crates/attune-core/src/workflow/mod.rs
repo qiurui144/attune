@@ -9,11 +9,11 @@
 //! vertical 插件在 plugin.yaml 中注册并通过 plugin loader 加载，attune-core 不内置任何
 //! 行业 workflow — 本文件仅提供通用引擎。
 
-pub mod schema;
-pub mod runner;
 pub mod ops;
+pub mod runner;
+pub mod schema;
 
+pub use runner::{run_workflow, WorkflowError, WorkflowEvent, WorkflowResult};
 pub use schema::{
     parse_workflow_yaml, DeterministicStep, SkillStep, Workflow, WorkflowStep, WorkflowTrigger,
 };
-pub use runner::{run_workflow, WorkflowError, WorkflowEvent, WorkflowResult};

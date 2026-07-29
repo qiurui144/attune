@@ -5,8 +5,8 @@
 //! Calls the agent via the `Agent` trait surface (the same path a
 //! capability_dispatch subprocess or future plugin runtime would take).
 
-use attune_core::agents::Agent;
 use attune_core::agents::document_classifier::DocumentClassifierAgent;
+use attune_core::agents::Agent;
 
 #[test]
 fn integration_agent_trait_run_end_to_end() {
@@ -14,16 +14,25 @@ fn integration_agent_trait_run_end_to_end() {
 
     assert_eq!(agent.id(), "document_classifier_agent");
     assert!(!agent.description().is_empty());
-    assert!(agent.case_kinds().is_empty(), "should be generic (no case_kind binding)");
+    assert!(
+        agent.case_kinds().is_empty(),
+        "should be generic (no case_kind binding)"
+    );
 
     // Realistic 3-doc mixed pool: borrowing-doc + bank-statement + chat.
     let inputs: Vec<(String, String)> = vec![
-        ("借条.pdf".to_string(),
-         "借条\n出借人: 张三\n借款人: 李四\n本金: 500000 元\n月利率 1%".to_string()),
-        ("流水.pdf".to_string(),
-         "交易日期 2023-01-15 对方户名 李四 交易金额 +500000 余额 1000000 汇入".to_string()),
-        ("聊天.txt".to_string(),
-         "[微信] 张三: 已转 50 万 [图片]\n李四: 收到".to_string()),
+        (
+            "借条.pdf".to_string(),
+            "借条\n出借人: 张三\n借款人: 李四\n本金: 500000 元\n月利率 1%".to_string(),
+        ),
+        (
+            "流水.pdf".to_string(),
+            "交易日期 2023-01-15 对方户名 李四 交易金额 +500000 余额 1000000 汇入".to_string(),
+        ),
+        (
+            "聊天.txt".to_string(),
+            "[微信] 张三: 已转 50 万 [图片]\n李四: 收到".to_string(),
+        ),
     ];
 
     let out = agent
@@ -41,7 +50,11 @@ fn integration_agent_trait_run_end_to_end() {
         .map(|c| c.file.as_str())
         .collect();
     for (f, _) in &inputs {
-        assert!(out_files.contains(&f.as_str()), "file {} missing in output", f);
+        assert!(
+            out_files.contains(&f.as_str()),
+            "file {} missing in output",
+            f
+        );
     }
 
     // contract: kind_summary partition

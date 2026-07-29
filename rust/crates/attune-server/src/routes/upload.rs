@@ -29,20 +29,41 @@ pub async fn upload_file(
     mut multipart: Multipart,
 ) -> AppResult<Json<serde_json::Value>> {
     // First, read multipart data without holding any locks
-    let (filename, data) = {
-        let field = multipart
-            .next_field()
-            .await
-            .map_err(|e| AppError::BadRequest(e.to_string()))?
-            .ok_or_else(|| AppError::BadRequest("no file provided".into()))?;
-
-        let filename = field.file_name().unwrap_or("unknown").to_string();
-        let data = field
+    let mut uploaded_file: Option<(String, axum::body::Bytes)> = None;
+    let mut relative_path: Option<String> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "relative_path" {
+            relative_path = Some(
+                field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?,
+            );
+            continue;
+        }
+        if name == "file" && uploaded_file.is_none() {
+            let filename = field.file_name().unwrap_or("unknown").to_string();
+            let data = field
+                .bytes()
+                .await
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            uploaded_file = Some((filename, data));
+            continue;
+        }
+        let _ = field
             .bytes()
             .await
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        (filename, data)
-    };
+    }
+
+    let (filename, data) =
+        uploaded_file.ok_or_else(|| AppError::BadRequest("no file provided".into()))?;
+    let filename = upload_display_name(&filename, relative_path.as_deref())?;
 
     if data.len() > MAX_UPLOAD_BYTES {
         return Err(AppError::PayloadTooLarge(format!(
@@ -52,7 +73,57 @@ pub async fn upload_file(
         )));
     }
 
-    // upload 单次可塞大量 chunks，接同款 embedding 队列 backpressure 防 server hung
+    // G3① locked-mode degrade: when the vault is LOCKED there is no DEK to ingest
+    // with. Instead of dropping the upload (the old 403), stage it encrypted-at-rest
+    // and return 202; a drain worker ingests it on unlock. Checked under a SHORT vault
+    // lock (state read only), then the stage write happens after the lock drops.
+    if matches!(
+        {
+            let v = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            v.state()
+        },
+        attune_core::vault::VaultState::Locked
+    ) {
+        let staging = attune_core::staging::IngestStaging::open_default();
+        let meta = attune_core::staging::StagedMeta {
+            uri: format!("upload://{filename}"),
+            title: String::new(),
+            mime_hint: Some(mime_from_filename(&filename).to_string()),
+            source_kind: "localfolder".into(),
+            domain: None,
+            tags: None,
+            corpus_domain: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        let staging_id = staging.stage(&meta, &data[..]).map_err(|e| match e {
+            attune_core::error::VaultError::StagingFull => AppError::detailed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "staging full: too many pending locked-mode ingests, retry after unlock",
+                    "code": "staging-full",
+                    "retry_after_seconds": 60,
+                }),
+            ),
+            attune_core::error::VaultError::DeviceSecretMissing(_) => AppError::detailed(
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "error": "vault locked and encrypted staging is unavailable: unlock before upload",
+                    "code": "staging-unavailable",
+                }),
+            ),
+            other => AppError::Internal(other.to_string()),
+        })?;
+        return Ok(Json(serde_json::json!({
+            "status": "staged",
+            "staging_id": staging_id,
+            "note": "vault locked; file queued for ingest on unlock",
+        })));
+    }
+
+    // upload 单次可塞大量 chunks，接同款 embedding 队列 backpressure 防 server hung。
+    // This is intentionally after the locked-vault branch: a locked upload either
+    // stages encrypted-at-rest or fails closed, and must not be masked by stale embed
+    // queue pressure from work submitted before the vault was locked.
     const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
     {
         let vault = state
@@ -73,6 +144,9 @@ pub async fn upload_file(
             }
         }
     }
+
+    let ingest_options =
+        crate::local_scheduler::ingest_options_from_state(&state, q.profile.as_deref());
 
     // Now lock vault for DB operations (no more await points after this)
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -96,20 +170,23 @@ pub async fn upload_file(
         metadata: std::collections::HashMap::new(),
     };
 
-    let outcome = attune_core::ingest::ingest_document_with_profile(
+    let outcome = attune_core::ingest::ingest_document_with_options(
         vault.store(),
         &dek,
         &raw,
-        q.profile.as_deref(),
+        &ingest_options,
     )
     .map_err(|e| AppError::Unprocessable(e.to_string()))?;
 
-    let (item_id, chunks_queued, is_new) = match &outcome {
-        attune_core::ingest::IngestOutcome::Inserted { item_id, chunks_enqueued } => {
-            (item_id.clone(), *chunks_enqueued, true)
-        }
+    let (item_id, chunks_queued, is_new, response_status) = match &outcome {
+        attune_core::ingest::IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => (item_id.clone(), *chunks_enqueued, true, "processing"),
         attune_core::ingest::IngestOutcome::Duplicate { item_id } => {
-            tracing::info!("upload content_hash dedup hit: filename={filename} existing_item={item_id}");
+            tracing::info!(
+                "upload content_hash dedup hit: filename={filename} existing_item={item_id}"
+            );
             // dedup 分支 response 与成功分支字段对齐，client 两分支读同名字段。
             return Ok(Json(serde_json::json!({
                 "id": item_id,
@@ -120,7 +197,22 @@ pub async fn upload_file(
             })));
         }
         attune_core::ingest::IngestOutcome::Updated { item_id, .. } => {
-            (item_id.clone(), 0usize, true)
+            (item_id.clone(), 0usize, true, "processing")
+        }
+        attune_core::ingest::IngestOutcome::Degraded {
+            item_id,
+            chunks_enqueued,
+            reason,
+        } => {
+            tracing::warn!(
+                "upload indexed with retryable degraded extraction: filename={filename}: {reason}"
+            );
+            (
+                item_id.clone(),
+                *chunks_enqueued,
+                *chunks_enqueued > 0,
+                "degraded",
+            )
         }
         attune_core::ingest::IngestOutcome::Skipped { reason } => {
             return Err(AppError::Unprocessable(reason.clone()));
@@ -143,26 +235,35 @@ pub async fn upload_file(
     }
 
     // 即时 FTS 索引（搜索不依赖 AI 即可工作）。
-    // ingest_document 不碰 VectorIndex / FulltextIndex（server AppState 独立 Mutex），
-    // FTS 即时写由此 server 薄壳补充（锁顺序与 embed_worker 不相交）。
     // parsed_title：parser 从内容提取的真实标题（如 Markdown H1），用于响应 + FTS；
     // get_item 失败时回退原始文件名。
-    let parsed_title = if is_new {
-        if let Ok(Some(item)) = vault.store().get_item(&dek, &item_id) {
-            let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(ft) = ft_guard.as_ref() {
-                let _ = ft.add_document(&item_id, &item.title, &item.content, "file");
-            }
-            item.title.clone()
-        } else {
-            filename.clone()
+    //
+    // 先在持 vault 时把 title/content 读成 owned 值，drop(vault) 后再单独取
+    // fulltext 写 FTS。绝不在持 vault 时取 fulltext —— 那会反转规范锁序
+    // fulltext → vectors → vault（与 search/chat 热点路径冲突 = ABBA 死锁）。
+    let fts_payload: Option<(String, String)> = if is_new {
+        match vault.store().get_item(&dek, &item_id) {
+            Ok(Some(item)) => Some((item.title.clone(), item.content.clone())),
+            _ => None,
         }
     } else {
-        filename.clone()
+        None
     };
 
-    // 释放 vault guard，让后续 spawn task 能独立 lock vault
+    // 释放 vault guard，让后续 FTS 写 + spawn task 能在不持 vault 时取其他锁。
     drop(vault);
+
+    // FTS 即时写：此处 fulltext 单独持有（vault 已释放），无并发锁序约束。
+    let parsed_title = match &fts_payload {
+        Some((title, content)) => {
+            let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ft) = ft_guard.as_ref() {
+                let _ = ft.add_document(&item_id, title, content, "file");
+            }
+            title.clone()
+        }
+        None => filename.clone(),
+    };
 
     // 新文档入库 → 失效 search 缓存，否则之前搜过的 query
     // 命中旧缓存，新文档搜不到
@@ -176,7 +277,10 @@ pub async fn upload_file(
         tokio::spawn(async move {
             let vault_guard = state_clone.vault.lock();
             let vault_guard = vault_guard.unwrap_or_else(|e| e.into_inner());
-            if !matches!(vault_guard.state(), attune_core::vault::VaultState::Unlocked) {
+            if !matches!(
+                vault_guard.state(),
+                attune_core::vault::VaultState::Unlocked
+            ) {
                 return;
             }
             // 抽 entities — 用 filename 当样本（chunk-level entities 可在 Phase D 优化）
@@ -191,12 +295,18 @@ pub async fn upload_file(
             };
             let project_ents_storage: Vec<(String, Vec<attune_core::entities::Entity>)> = projects
                 .iter()
-                .map(|p| (p.id.clone(), attune_core::entities::extract_entities(&p.title)))
+                .map(|p| {
+                    (
+                        p.id.clone(),
+                        attune_core::entities::extract_entities(&p.title),
+                    )
+                })
                 .collect();
-            let project_entities: Vec<(&String, Vec<attune_core::entities::Entity>)> = project_ents_storage
-                .iter()
-                .map(|(id, ents)| (id, ents.clone()))
-                .collect();
+            let project_entities: Vec<(&String, Vec<attune_core::entities::Entity>)> =
+                project_ents_storage
+                    .iter()
+                    .map(|(id, ents)| (id, ents.clone()))
+                    .collect();
             let candidates = attune_core::project_recommender::recommend_for_file(
                 vault_guard.store(),
                 &item_id_clone,
@@ -233,9 +343,16 @@ pub async fn upload_file(
     let item_id_for_wf = item_id.clone();
     let state_for_wf = state.clone();
     tokio::spawn(async move {
+        // Use a live key-aware registry: encrypted paid plugins are intentionally
+        // absent from the startup registry until the vault entitlement keys are
+        // available after unlock.
+        let registry = crate::routes::plugins::current_plugin_registry(&state_for_wf);
         let vault_guard = state_for_wf.vault.lock();
         let vault_guard = vault_guard.unwrap_or_else(|e| e.into_inner());
-        if !matches!(vault_guard.state(), attune_core::vault::VaultState::Unlocked) {
+        if !matches!(
+            vault_guard.state(),
+            attune_core::vault::VaultState::Unlocked
+        ) {
             return;
         }
         // 找该 file_id 归属的 project
@@ -256,7 +373,6 @@ pub async fn upload_file(
             return; // 未归 project，不触发任何 workflow
         };
         // 从 registry 取所有匹配的 workflow（clone 出来避免 borrow 跨 await）
-        let registry = state_for_wf.plugin_registry.clone();
         let matched: Vec<(String, attune_core::workflow::Workflow)> = registry
             .workflows_by_trigger("file_added")
             .into_iter()
@@ -302,7 +418,9 @@ pub async fn upload_file(
                 Err(e) => {
                     tracing::warn!(
                         "workflow {} (plugin {}) failed: {}",
-                        workflow.id, plugin_id, e
+                        workflow.id,
+                        plugin_id,
+                        e
                     );
                 }
             }
@@ -312,9 +430,33 @@ pub async fn upload_file(
     Ok(Json(serde_json::json!({
         "id": item_id,
         "title": parsed_title,
+        "source_ref": format!("upload://{filename}"),
         "chunks_queued": chunks_queued,
-        "status": "processing"
+        "status": response_status
     })))
+}
+
+fn upload_display_name(filename: &str, relative_path: Option<&str>) -> AppResult<String> {
+    let Some(raw_relative_path) = relative_path.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(filename.to_string());
+    };
+    let normalized = raw_relative_path.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized.contains('\0')
+        || normalized.len() > 1024
+        || normalized
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        || normalized
+            .split('/')
+            .next()
+            .is_some_and(|segment| segment.ends_with(':'))
+    {
+        return Err(AppError::BadRequest(
+            "relative_path must be a safe relative folder path".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 /// 由文件名扩展名推断 MIME —— 用于 A1 原件留存的 Content-Type，
@@ -335,9 +477,7 @@ fn mime_from_filename(filename: &str) -> &'static str {
         "gif" => "image/gif",
         "txt" | "md" => "text/plain; charset=utf-8",
         "csv" => "text/csv; charset=utf-8",
-        "docx" => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        }
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "doc" => "application/msword",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",

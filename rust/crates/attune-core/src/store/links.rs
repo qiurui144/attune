@@ -181,10 +181,7 @@ impl Store {
     /// expected to know its own `item_id`, so we only return the *other* side.
     /// `kind` is returned as the canonical string (`shared_entity` /
     /// `semantic_near` / `explicit_ref`).
-    pub fn list_links_for_item(
-        &self,
-        item_id: &str,
-    ) -> Result<Vec<LinkRow>> {
+    pub fn list_links_for_item(&self, item_id: &str) -> Result<Vec<LinkRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT item_a, item_b, kind, weight, directed, evidence \
              FROM item_links WHERE item_a = ?1 OR item_b = ?1 \
@@ -356,16 +353,10 @@ mod tests {
     #[test]
     fn purge_item_entities_drops_only_targeted_item() {
         let s = fresh();
-        s.replace_item_entities(
-            "a",
-            &[mk_entity(EntityKind::Person, "张三")],
-        )
-        .unwrap();
-        s.replace_item_entities(
-            "b",
-            &[mk_entity(EntityKind::Person, "李四")],
-        )
-        .unwrap();
+        s.replace_item_entities("a", &[mk_entity(EntityKind::Person, "张三")])
+            .unwrap();
+        s.replace_item_entities("b", &[mk_entity(EntityKind::Person, "李四")])
+            .unwrap();
         assert_eq!(s.purge_item_entities("a").unwrap(), 1);
         assert_eq!(s.count_all_item_entities().unwrap(), 1);
         let remaining = s.find_items_by_entity("person", "李四").unwrap();
@@ -447,10 +438,26 @@ mod tests {
         let s = fresh();
         let dek = Key32::generate();
         let id_a = s
-            .insert_item(&dek, "Alpha", "body A", Some("https://a.local"), "note", None, None)
+            .insert_item(
+                &dek,
+                "Alpha",
+                "body A",
+                Some("https://a.local"),
+                "note",
+                None,
+                None,
+            )
             .unwrap();
         let id_b = s
-            .insert_item(&dek, "Beta", "body B", Some("https://b.local"), "note", None, None)
+            .insert_item(
+                &dek,
+                "Beta",
+                "body B",
+                Some("https://b.local"),
+                "note",
+                None,
+                None,
+            )
             .unwrap();
         let id_c = s
             .insert_item(&dek, "Gamma", "body C", None, "note", None, None)

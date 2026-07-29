@@ -55,7 +55,7 @@ pub enum PrivacyTier {
     L0,
     /// 正则 + 词典脱敏后 → 云
     L1,
-    /// LLM 语义脱敏后 → 云（高端硬件 + K3 一体机）
+    /// LLM 语义脱敏后 → 云（高端硬件 + local-scheduler appliance）
     L3,
 }
 
@@ -593,7 +593,14 @@ impl Store {
         redacted_count: i64,
         original_len: i64,
     ) -> Result<()> {
-        record(&self.conn, route, category, kind, redacted_count, original_len)
+        record(
+            &self.conn,
+            route,
+            category,
+            kind,
+            redacted_count,
+            original_len,
+        )
     }
 
     pub fn audit_log_list(&self, limit: usize, offset: usize) -> Result<Vec<AuditEntry>> {
@@ -611,8 +618,7 @@ impl Store {
 
 /// 生成 RFC4180 CSV（header + rows）。用于 export endpoint。
 pub fn entries_to_csv(entries: &[AuditEntry]) -> String {
-    let mut out =
-        String::from("timestamp,route,category,kind,redacted_count,original_len\n");
+    let mut out = String::from("timestamp,route,category,kind,redacted_count,original_len\n");
     for e in entries {
         out.push_str(&format!(
             "{},{},{},{},{},{}\n",

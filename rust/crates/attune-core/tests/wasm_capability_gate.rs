@@ -15,8 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 fn fixture_wasm() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/wasm/echo_calc_agent.wasm")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm/echo_calc_agent.wasm")
 }
 
 /// 独立 native ground truth — **不调 wasm**,直接按契约算期望 stdout(spec §9)。
@@ -75,7 +74,11 @@ fn golden_wasm_output_byte_equal_native_baseline() {
     let stdin = r#"{"a":1,"b":1,"op":"add"}"#;
     let r = run_wasm(stdin, 5000);
     let wrong_gt = native_expected(1, 1, "mul"); // value=1 vs add value=2
-    assert_ne!(r.stdout.trim(), wrong_gt, "sentinel: diff check must catch mismatch");
+    assert_ne!(
+        r.stdout.trim(),
+        wrong_gt,
+        "sentinel: diff check must catch mismatch"
+    );
 }
 
 // ─────────────────────── 错误/异常 (≥3) ───────────────────────

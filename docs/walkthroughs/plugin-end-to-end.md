@@ -39,21 +39,21 @@ $ attune plugin-sign /path/to/law-pro/ --priv-file ~/.secrets/law-pro.signing-ke
   signature (base64): UrpOJ6041/e2mCRGGuXkuV9yH5Z...
 ```
 
-### 4. 打包分发 (.attunepkg = tar.gz of plugin dir)
+### 4. 打包分发 (.tar.gz of plugin dir)
 
 ```bash
-$ cd /path/to/law-pro/.. && tar czf law-pro-0.2.0.attunepkg law-pro/
+$ cd /path/to/law-pro/.. && tar czf law-pro-0.2.0.tar.gz law-pro/
 ```
 
 发布到 attune-enterprise/pluginhub (attune-cloud 软链共享).
 
 ## Phase B: 律师侧 (安装 + 使用)
 
-### 1. 下载 + 解压 .attunepkg
+### 1. 下载 + 解压 `.tar.gz`
 
 ```bash
-$ curl -O https://hub.engi-stack.com/plugins/law-pro/0.2.0.attunepkg
-$ tar xzf law-pro-0.2.0.attunepkg
+$ curl -O https://hub.engi-stack.com/api/v1/packages/law-pro-0.2.0.tar.gz
+$ tar xzf law-pro-0.2.0.tar.gz
 ```
 
 ### 2. 装载到 attune (CLI 自动校验签名 + 解密)
@@ -189,7 +189,7 @@ $ echo '{"facts":{...,"principal":null,...},...}' | agent_civil_loan
 | Phase B agent | civil_loan_agent::happy_path_outputs_audit_trail (单测) |
 | Phase B agent | agent_civil_loan binary subprocess (本 walkthrough Step 7C) |
 | Phase B UI | forms_routes_test::forms_endpoints_return_404_for_unknown_plugin |
-| Phase B UI | playwright_forms_v2_test (preflight + 友好提示) |
+| Phase B UI | forms_routes_test::forms_endpoints_return_404_for_unknown_plugin |
 | Phase C 设备 | attune_accounts::third_device_returns_409_with_existing |
 | Phase C 设备 | attune_accounts::re_register_same_device_renews |
 | Phase D 红线 | civil_loan_agent::red_line_no_loan_doc_returns_safe_output |
@@ -201,4 +201,4 @@ $ echo '{"facts":{...,"principal":null,...},...}' | agent_civil_loan
 - [ ] **attune-server scan 支持 paid plugin 解密** — 当前装载时 .yaml.enc 不解密 (限定明文)
 - [ ] **forms-iframe 用真实 form schema** — 当前路由返空 fields stub, 应从 plugin dir 读 form yaml
 - [ ] **chat 命中后真 dispatch** — 当前 chat.rs 只提示, 不自动调 agent_runner (因 chat 缺 facts JSON)
-- [ ] **attune-enterprise/pluginhub 集成 .attunepkg 上传 + 公钥分发** — attune-cloud 软链已就位, 缺真实分发流程
+- [ ] **attune-enterprise/pluginhub 集成签名 .tar.gz 上传 + 公钥分发** — attune-cloud 软链已就位, 缺真实分发流程

@@ -92,7 +92,11 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          # linux/amd64 only: aarch64 不是 v1.x 支持目标(attune-core CLAUDE.md),且
+          # sherpa-rs-sys(asr-sensevoice)无 arm64 预编译 → arm64 退回源码构建失败;
+          # cloud SaaS 栈 x86_64-only(memory project_cloud_x86_only)。需要 arm64 时
+          # 再补 arm64 sherpa 预编译或在该 leg 关 asr-sensevoice。
+          platforms: linux/amd64
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           provenance: true

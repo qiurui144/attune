@@ -61,7 +61,9 @@ impl CacheBackend for SqliteEncryptedCache {
             Err(e) => {
                 log::warn!(
                     "L2 cache decryption failed for key={} model={}: {}",
-                    key, raw.model, e
+                    key,
+                    raw.model,
+                    e
                 );
                 return None;
             }
@@ -88,12 +90,12 @@ impl CacheBackend for SqliteEncryptedCache {
                 return;
             }
         };
-        let encrypted = CachedValue {
-            bytes: ct,
-            ..value
-        };
+        let encrypted = CachedValue { bytes: ct, ..value };
         let Ok(g) = self.store.lock() else {
-            log::warn!("L2 cache: store mutex poisoned, skipping put for key={}", key);
+            log::warn!(
+                "L2 cache: store mutex poisoned, skipping put for key={}",
+                key
+            );
             return;
         };
         if let Err(e) = g.llm_cache_put(key, &encrypted) {

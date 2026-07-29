@@ -73,10 +73,7 @@ pub trait EmailProvider: Send + Sync {
     ) -> impl Future<Output = Result<Vec<EmailMessage>>> + Send;
 
     /// 拉取指定 UID 的完整邮件（含正文 + 附件文件名）。
-    fn fetch_message(
-        &self,
-        uid: u64,
-    ) -> impl Future<Output = Result<EmailMessage>> + Send;
+    fn fetch_message(&self, uid: u64) -> impl Future<Output = Result<EmailMessage>> + Send;
 }
 
 /// 测试用 mock，返回 2 条 hardcoded 邮件。
@@ -132,9 +129,7 @@ impl EmailProvider for MockEmailProvider {
             .into_iter()
             .find(|m| m.uid == uid)
             .ok_or_else(|| {
-                crate::error::VaultError::Classification(format!(
-                    "mock: email uid {uid} not found"
-                ))
+                crate::error::VaultError::Classification(format!("mock: email uid {uid} not found"))
             })
     }
 }

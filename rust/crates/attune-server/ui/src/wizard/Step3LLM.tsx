@@ -6,35 +6,23 @@ import { Button, Input, Tooltip, LocalModelReadiness } from '../components';
 import { t } from '../i18n';
 import { api } from '../store/api';
 import { toast } from '../components/Toast';
+import { memberActivateLicense, memberLoginPassword } from '../hooks/useMember';
+import { isCloudNetworkEndpoint, schedulerNativeBase } from '../llmConfig';
 import type { WizardContext } from './types';
 
-type OllamaStatus = 'checking' | 'ready' | 'missing';
-
 type Diagnostics = {
-  ollama_status?: string;
-  ollama_models?: string[];
+  scheduler?: {
+    status?: string;
+    models?: string[];
+  };
   hardware?: {
-    form_factor?: 'laptop' | 'k3' | 'server' | 'unknown';
+    form_factor?: 'laptop' | 'local_scheduler' | 'server' | 'unknown';
     prefers_local_llm?: boolean;
     recommended_summary_model?: string;
   };
 };
 
-type LmStudioProbeResponse = {
-  found: boolean;
-  endpoint?: string | null;
-  models: string[];
-  download_url: string;
-};
-
-type AiStackGate = {
-  hardware?: {
-    tier?: 'unsupported' | 'low' | 'mid' | 'high' | 'flagship';
-    supported?: boolean;
-  };
-};
-
-type ProbeK3Response = {
+type ProbeLocalSchedulerResponse = {
   found: boolean;
   endpoint?: string | null;
   checked: string[];
@@ -47,20 +35,14 @@ export type Step3Props = {
 };
 
 export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element {
-  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('checking');
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  // 形态分裂：K3 一体机优先本地 Ollama；Laptop/Server 默认远端 token
+  const [localSchedulerModels, setLocalSchedulerModels] = useState<string[]>([]);
+  // 形态分裂：本地调度器设备优先本地推理；Laptop/Server 默认远端 token
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
-  const [localChatAllowed, setLocalChatAllowed] = useState<boolean>(false);
-  const [localBlockReason, setLocalBlockReason] = useState<string>(t('wizard.llm.block.default_reason'));
-  const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8080/v1');
-  const [k3Detecting, setK3Detecting] = useState(false);
-  const [k3DetectResult, setK3DetectResult] = useState<string | null>(null);
-  // 本地模型一键就绪：目标 chat 模型 = 硬件推荐 (fallback qwen2.5:3b)。
-  const [ollamaTargetModel, setOllamaTargetModel] = useState('qwen2.5:3b');
-  // LM Studio (OpenAI 兼容 :1234) 自动探测
-  const [lmStudio, setLmStudio] = useState<LmStudioProbeResponse | null>(null);
-  const [lmStudioProbing, setLmStudioProbing] = useState(false);
+  // Scheduler-native API base; the server appends `/v1` only for its chat adapter.
+  const [localSchedulerEndpoint, setLocalSchedulerEndpoint] = useState('http://127.0.0.1:8090');
+  const [localSchedulerDetecting, setLocalSchedulerDetecting] = useState(false);
+  const [localSchedulerDetectResult, setLocalSchedulerDetectResult] = useState<string | null>(null);
+  const [localSchedulerTargetModel, setLocalSchedulerTargetModel] = useState('llm-chat');
 
   // 云端 API 表单
   // Default: attune-pro membership — 登录即用，token 配额由 attune 计费追踪
@@ -73,118 +55,61 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [memberLoggingIn, setMemberLoggingIn] = useState(false);
   const [memberReady, setMemberReady] = useState(false);
   const [testing, setTesting] = useState(false);
-  // 默认隐藏 Ollama / K3 (这两个面向高级用户). 用户主动展开"其他选项"才看到.
+  // 默认隐藏 local scheduler (面向高级用户). 用户主动展开"其他选项"才看到.
   const [showAdvancedProviders, setShowAdvancedProviders] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
 
-  async function scanOllama() {
-    setOllamaStatus('checking');
+  async function scanLocalSchedulerDiagnostics() {
     try {
-      const [d, gate] = await Promise.all([
-        api.get<Diagnostics>('/status/diagnostics'),
-        api.get<AiStackGate>('/ai_stack'),
-      ]);
-      if (d.ollama_status === 'ready') {
-        setOllamaStatus('ready');
-        setOllamaModels(d.ollama_models ?? []);
-      } else {
-        setOllamaStatus('missing');
+      const d = await api.get<Diagnostics>('/status/diagnostics');
+      if (d.scheduler?.status === 'ready') {
+        setLocalSchedulerModels(d.scheduler.models ?? []);
       }
-      // 读形态：K3 → 主推 Ollama；Laptop/其他 → 主推云端
+      // 读形态：local-scheduler → 主推本地；Laptop/其他 → 主推云端
       setPrefersLocal(d.hardware?.prefers_local_llm === true);
-      // 本地一键拉取的目标模型 = 硬件推荐（弱机自动落到轻量模型）
-      if (d.hardware?.recommended_summary_model) {
-        setOllamaTargetModel(d.hardware.recommended_summary_model);
-      }
-
-      const tier = gate.hardware?.tier ?? 'unsupported';
-      const allow = gate.hardware?.supported === true && (tier === 'high' || tier === 'flagship');
-      setLocalChatAllowed(allow);
-      if (!allow) {
-        setLocalBlockReason(t('wizard.llm.block.tier_reason'));
+      if (d.scheduler?.models?.[0]) {
+        setLocalSchedulerTargetModel(d.scheduler.models[0]);
       }
     } catch {
-      setOllamaStatus('missing');
-      setLocalChatAllowed(false);
-      setLocalBlockReason(t('wizard.llm.block.detect_failed'));
+      setPrefersLocal(false);
     }
   }
 
   useEffect(() => {
-    void scanOllama();
-    void autoDetectK3(true);
-    void probeLmStudio(true);
+    void scanLocalSchedulerDiagnostics();
+    void autoDetectLocalScheduler(true);
   }, []);
 
-  async function probeLmStudio(silent = false) {
-    setLmStudioProbing(true);
-    try {
-      const res = await api.get<LmStudioProbeResponse>('/lmstudio/probe');
-      setLmStudio(res);
-      if (res.found && !silent) {
-        toast('success', t('wizard.llm.lmstudio.detected', { count: res.models.length }));
-      } else if (!res.found && !silent) {
-        toast('error', t('wizard.llm.lmstudio.not_found'));
-      }
-    } catch {
-      setLmStudio(null);
-    } finally {
-      setLmStudioProbing(false);
-    }
-  }
-
-  async function selectLmStudio() {
-    if (!lmStudio?.found || !lmStudio.endpoint) {
-      toast('error', t('wizard.llm.lmstudio.not_found'));
-      return;
-    }
-    const lmModel = lmStudio.models[0] ?? 'auto';
-    onUpdate({ llmMode: 'cloud' });
-    try {
-      // LM Studio = 本机 OpenAI 兼容 server，按 openai_compat 接入（无需 api_key）。
-      await api.patch('/settings', {
-        llm: {
-          endpoint: lmStudio.endpoint,
-          api_key: '',
-          model: lmModel,
-          provider: 'openai_compat',
-        },
-      });
-    } catch {
-      /* 保存失败不阻塞 */
-    }
-    onContinue();
-  }
-
-  async function autoDetectK3(silent = false) {
-    setK3Detecting(true);
+  async function autoDetectLocalScheduler(silent = false) {
+    setLocalSchedulerDetecting(true);
     if (!silent) {
-      setK3DetectResult(null);
+      setLocalSchedulerDetectResult(null);
     }
     try {
-      const res = await api.post<ProbeK3Response>('/llm/probe-k3', {});
+      const res = await api.post<ProbeLocalSchedulerResponse>('/llm/probe-edge-scheduler', {});
       if (res.found && res.endpoint) {
-        setK3Endpoint(res.endpoint);
-        const msg = t('wizard.llm.k3.detected', { endpoint: res.endpoint });
-        setK3DetectResult(msg);
+        const schedulerBase = schedulerNativeBase(res.endpoint);
+        setLocalSchedulerEndpoint(schedulerBase);
+        const msg = t('wizard.llm.local_scheduler.detected', { endpoint: schedulerBase });
+        setLocalSchedulerDetectResult(msg);
         if (!silent) {
           toast('success', msg);
         }
       } else {
-        const msg = t('wizard.llm.k3.not_found');
-        setK3DetectResult(msg);
+        const msg = t('wizard.llm.local_scheduler.not_found');
+        setLocalSchedulerDetectResult(msg);
         if (!silent) {
           toast('error', msg);
         }
       }
     } catch (e) {
-      const msg = t('wizard.llm.k3.detect_failed', { message: e instanceof Error ? e.message : String(e) });
-      setK3DetectResult(msg);
+      const msg = t('wizard.llm.local_scheduler.detect_failed', { message: e instanceof Error ? e.message : String(e) });
+      setLocalSchedulerDetectResult(msg);
       if (!silent) {
         toast('error', msg);
       }
     } finally {
-      setK3Detecting(false);
+      setLocalSchedulerDetecting(false);
     }
   }
 
@@ -197,6 +122,11 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     setTesting(true);
     setTestResult(null);
     try {
+      if (isCloudNetworkEndpoint(endpoint)) {
+        // Clicking “test” is explicit cloud-LLM egress consent. Persist it
+        // before the fail-closed backend probe so a fresh wizard can test.
+        await api.patch('/privacy/settings', { llm: true });
+      }
       const res = await api.post<{ ok: boolean; latency_ms?: number; error?: string }>(
         '/llm/test',
         { endpoint, api_key: apiKey, model: cloudModel },
@@ -213,39 +143,25 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     }
   }
 
-  async function selectOllama() {
-    if (!localChatAllowed) {
-      toast('error', localBlockReason);
+  async function selectLocalScheduler() {
+    const schedulerBase = schedulerNativeBase(localSchedulerEndpoint);
+    if (!schedulerBase) {
+      toast('error', t('wizard.llm.local_scheduler.need_endpoint'));
       return;
     }
-    onUpdate({ llmMode: 'ollama' });
-    try {
-      await api.patch('/settings', {
-        llm: { endpoint: null, api_key: '', model: ollamaModels[0] ?? null },
-      });
-    } catch {
-      /* 保存失败不阻塞流程 */
-    }
-    onContinue();
-  }
-
-  async function selectK3() {
-    if (!k3Endpoint.trim()) {
-      toast('error', t('wizard.llm.k3.need_endpoint'));
-      return;
-    }
-    onUpdate({ llmMode: 'k3' });
+    onUpdate({ llmMode: 'local_scheduler' });
     try {
       await api.patch('/settings', {
         llm: {
-          endpoint: k3Endpoint.trim(),
+          endpoint: schedulerBase,
           api_key: '',
-          model: 'auto',
-          provider: 'openai_compat',
+          model: localSchedulerModels[0] ?? 'llm-chat',
+          provider: 'local_scheduler',
         },
       });
     } catch {
-      /* 保存失败不阻塞流程 */
+      toast('error', t('settings.ai.llm.save_failed_toast'));
+      return;
     }
     onContinue();
   }
@@ -275,35 +191,61 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       return;
     }
     onUpdate({ llmMode: 'cloud' });
+    if (provider === 'attune-pro') {
+      // Login already persisted the membership-owned gateway token and endpoint.
+      try {
+        await api.patch('/privacy/settings', { llm: true });
+      } catch {
+        toast('error', t('settings.ai.llm.save_failed_toast'));
+        return;
+      }
+      onContinue();
+      return;
+    }
+    // Vendor choices select presets only; every BYOK request uses the same
+    // OpenAI-compatible transport implemented by the server.
+    const persistedProvider = 'openai_compat';
     try {
       await api.patch('/settings', {
         llm: {
           endpoint,
-          api_key: provider === 'attune-pro' ? '' : apiKey,
+          api_key: apiKey,
           model: cloudModel,
-          provider,
+          provider: persistedProvider,
         },
       });
+      // Selecting a cloud provider here is the explicit LLM egress opt-in.
+      await api.patch('/privacy/settings', { llm: true });
     } catch {
-      /* 保存失败不阻塞 */
+      toast('error', t('settings.ai.llm.save_failed_toast'));
+      return;
     }
     onContinue();
   }
 
   async function loginMember(): Promise<boolean> {
-    if (!ctx.memberEmail || !ctx.memberPassword) {
+    const licenseCode = ctx.memberLicenseCode?.trim() || '';
+    const email = ctx.memberEmail?.trim() || '';
+    const password = ctx.memberPassword || '';
+    const hasAccount = !!email && !!password;
+    if (!hasAccount && !licenseCode) {
       toast('error', t('wizard.llm.member.step2_missing'));
       return false;
     }
     setMemberLoggingIn(true);
     try {
-      await api.post('/member/login-password', {
-        email: ctx.memberEmail,
-        password: ctx.memberPassword,
-        license_code: ctx.memberLicenseCode?.trim() || null,
-      });
+      const result = hasAccount
+        ? await memberLoginPassword(email, password, licenseCode || null)
+        : await memberActivateLicense(licenseCode);
+      if (!result.ok) {
+        throw new Error(result.error ?? t('settings.member.unknown_error'));
+      }
       setMemberReady(true);
-      toast('success', t('wizard.llm.member.login_ok'));
+      toast('success', hasAccount ? t('wizard.llm.member.login_ok') : t('settings.member.activate_ok'));
+      // GAP-B: cloud 下发会员场景 + 已按场景自动装插件 → 提示"已为〔律师〕场景安装 …"。
+      if (result.verticalMessage) toast('success', result.verticalMessage);
+      if (result.syncMessage) toast('success', result.syncMessage);
+      if (result.syncWarning) toast('error', result.syncWarning);
       return true;
     } catch (e) {
       setMemberReady(false);
@@ -343,95 +285,35 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           alignItems: 'start',
         }}
       >
-        {/* Ollama + K3 默认隐藏, 用户点 "其他选项" 才显示 (面向高级用户) */}
+        {/* local scheduler 默认隐藏, 用户点 "其他选项" 才显示 (面向高级用户) */}
         {showAdvancedProviders && (
           <>
-            {/* Ollama 卡片 */}
-        <Card
-          selected={ctx.llmMode === 'ollama'}
-          onClick={ollamaStatus === 'ready' && localChatAllowed ? selectOllama : undefined}
-          disabled={ollamaStatus !== 'ready' || !localChatAllowed}
-          recommended={prefersLocal}
-        >
-          <CardHeader
-            icon="🟢"
-            title={t('wizard.llm.ollama.title')}
-            tag={prefersLocal ? '★ ' + t('wizard.llm.ollama.tag') : t('wizard.llm.ollama.tag')}
-          />
-          <div style={{ fontSize: 'var(--text-sm)', minHeight: 56 }}>
-            {/* 本地模型一键就绪：三态 + 一键安装/拉取（替代过去让用户复制 curl 命令）。
-                model 用硬件推荐的本地 chat 模型；就绪后允许选 Ollama。 */}
-            <LocalModelReadiness
-              model={ollamaTargetModel}
-              onReadyChange={(ready) => setOllamaStatus(ready ? 'ready' : 'missing')}
-            />
-            {!localChatAllowed && (
-              <div style={{ color: 'var(--color-warning)', marginTop: 'var(--space-2)' }}>
-                {localBlockReason}
-              </div>
-            )}
-          </div>
-        </Card>
-
-        {/* K3 第三方设备卡片 */}
-        <Card selected={ctx.llmMode === 'k3'}>
-          <CardHeader icon="🧩" title={t('wizard.llm.k3.card_title')} tag={t('wizard.llm.k3.card_tag')} />
+        <Card selected={ctx.llmMode === 'local_scheduler'} recommended={prefersLocal}>
+          <CardHeader icon="🧩" title={t('wizard.llm.local_scheduler.card_title')} tag={t('wizard.llm.local_scheduler.card_tag')} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-              {t('wizard.llm.k3.card_desc')}
+              {t('wizard.llm.local_scheduler.card_desc')}
             </div>
-            <Button size="sm" variant="secondary" onClick={() => void autoDetectK3()} loading={k3Detecting}>
-              {t('wizard.llm.k3.detect_btn')}
+            <LocalModelReadiness
+              model={localSchedulerTargetModel}
+            />
+            <Button size="sm" variant="secondary" onClick={() => void autoDetectLocalScheduler()} loading={localSchedulerDetecting}>
+              {t('wizard.llm.local_scheduler.detect_btn')}
             </Button>
             <Input
               type="text"
-              placeholder={t('wizard.llm.k3.endpoint_placeholder')}
-              value={k3Endpoint}
-              onInput={(e) => setK3Endpoint(e.currentTarget.value)}
+              placeholder={t('wizard.llm.local_scheduler.endpoint_placeholder')}
+              value={localSchedulerEndpoint}
+              onInput={(e) => setLocalSchedulerEndpoint(e.currentTarget.value)}
             />
-            {k3DetectResult && (
+            {localSchedulerDetectResult && (
               <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-                {k3DetectResult}
+                {localSchedulerDetectResult}
               </div>
             )}
-            <Button size="sm" variant="primary" onClick={selectK3} disabled={!k3Endpoint.trim()}>
-              {t('wizard.llm.k3.use_btn')}
+            <Button size="sm" variant="primary" onClick={selectLocalScheduler} disabled={!localSchedulerEndpoint.trim()}>
+              {t('wizard.llm.local_scheduler.use_btn')}
             </Button>
-          </div>
-        </Card>
-
-        {/* LM Studio 卡片：自动探测本机 :1234 OpenAI 兼容 server */}
-        <Card selected={false}>
-          <CardHeader icon="🖥" title={t('wizard.llm.lmstudio.title')} tag={t('wizard.llm.lmstudio.tag')} />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-              {t('wizard.llm.lmstudio.desc')}
-            </div>
-            <Button size="sm" variant="secondary" onClick={() => void probeLmStudio()} loading={lmStudioProbing}>
-              {t('wizard.llm.lmstudio.detect_btn')}
-            </Button>
-            {lmStudio?.found && (
-              <>
-                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-success)' }}>
-                  {t('wizard.llm.lmstudio.found', { count: lmStudio.models.length })}
-                </div>
-                <Button size="sm" variant="primary" onClick={selectLmStudio}>
-                  {t('wizard.llm.lmstudio.use_btn')}
-                </Button>
-              </>
-            )}
-            {lmStudio && !lmStudio.found && (
-              <button
-                type="button"
-                onClick={() => window.open(lmStudio.download_url, '_blank', 'noopener')}
-                style={{
-                  background: 'transparent', border: 'none', color: 'var(--color-accent)',
-                  fontSize: 'var(--text-xs)', cursor: 'pointer', padding: 0, textAlign: 'left',
-                }}
-              >
-                {t('wizard.llm.lmstudio.download_link')}
-              </button>
-            )}
           </div>
         </Card>
           </>
@@ -452,18 +334,18 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               value={provider}
               onChange={(e) => {
                 setProvider(e.currentTarget.value);
+                setTestResult(null);
                 // 预填常见 provider endpoint
                 // 设计（2026-05-01 用户拍板，澄清版）：
                 //   - 笔电暂时不走本地 LLM（研发成本高，云端更准确，等本地解决不了再上）
                 //   - 主推 attune Pro 会员（登录即用，token 配额由 attune 计费跟踪）
-                //   - 用户已有的 web 会员（ChatGPT Plus / Claude Pro / Gemini Advanced）→ 走 BYOK API key
-                //   - 不预设第三方 "free API tier"（避免误导，用户的"免费"指浏览器 web 会话）
+                //   - BYOK means a separately billed provider API account/key;
+                //     consumer web subscriptions do not supply API credits.
                 const presets: Record<string, { endpoint: string; model: string }> = {
                   // ── ★ 主推：attune Pro 会员 gateway ──
                   'attune-pro': { endpoint: 'https://gateway.engi-stack.com/v1', model: 'auto' },
-                  // ── BYOK：用户已有付费会员的 API key ──
+                  // ── BYOK：用户自己的 API account/key ──
                   openai: { endpoint: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-                  anthropic: { endpoint: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' },
                   gemini: { endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
                   deepseek: { endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
                   qwen: { endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
@@ -488,7 +370,6 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               </optgroup>
               <optgroup label={t('wizard.llm.cloud.optgroup_byok')}>
                 <option value="openai">{t('wizard.llm.cloud.opt_openai')}</option>
-                <option value="anthropic">{t('wizard.llm.cloud.opt_anthropic')}</option>
                 <option value="gemini">{t('wizard.llm.cloud.opt_gemini')}</option>
                 <option value="deepseek">{t('wizard.llm.cloud.opt_deepseek')}</option>
                 <option value="qwen">{t('wizard.llm.cloud.opt_qwen')}</option>
@@ -509,9 +390,25 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 </div>
                 <Input
                   type="text"
-                  placeholder={t('wizard.llm.cloud.endpoint_default_placeholder')}
-                  value={endpoint}
-                  onInput={(e) => setEndpoint(e.currentTarget.value)}
+                  label={t('wizard.member.email')}
+                  placeholder={t('wizard.member.email_placeholder')}
+                  value={ctx.memberEmail ?? ''}
+                  onInput={(e) => {
+                    onUpdate({ memberEmail: e.currentTarget.value });
+                    setMemberReady(false);
+                    setTestResult(null);
+                  }}
+                />
+                <Input
+                  type="password"
+                  label={t('wizard.member.password')}
+                  placeholder={t('wizard.member.password_placeholder')}
+                  value={ctx.memberPassword ?? ''}
+                  onInput={(e) => {
+                    onUpdate({ memberPassword: e.currentTarget.value });
+                    setMemberReady(false);
+                    setTestResult(null);
+                  }}
                 />
                 <Button
                   size="sm"
@@ -530,13 +427,19 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                   type="text"
                   placeholder={provider === 'custom' ? t('wizard.llm.cloud.custom_url_placeholder') : t('wizard.llm.cloud.endpoint_url_placeholder')}
                   value={endpoint}
-                  onInput={(e) => setEndpoint(e.currentTarget.value)}
+                  onInput={(e) => {
+                    setEndpoint(e.currentTarget.value);
+                    setTestResult(null);
+                  }}
                 />
                 <Input
                   type="password"
                   placeholder={provider === 'custom' ? t('wizard.llm.cloud.custom_token_placeholder') : t('wizard.llm.cloud.apikey_placeholder')}
                   value={apiKey}
-                  onInput={(e) => setApiKey(e.currentTarget.value)}
+                  onInput={(e) => {
+                    setApiKey(e.currentTarget.value);
+                    setTestResult(null);
+                  }}
                 />
               </>
             )}
@@ -544,7 +447,10 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               type="text"
               placeholder={t('wizard.llm.cloud.model_placeholder')}
               value={cloudModel}
-              onInput={(e) => setCloudModel(e.currentTarget.value)}
+              onInput={(e) => {
+                setCloudModel(e.currentTarget.value);
+                setTestResult(null);
+              }}
             />
             <Button
               size="sm"
@@ -604,7 +510,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
         </Card>
       </div>
 
-      {/* "其他选项" toggle — 默认折叠, 展开后显示 Ollama + K3 */}
+      {/* "其他选项" toggle — 默认折叠, 展开后显示 local scheduler */}
       {!showAdvancedProviders && (
         <button
           type="button"

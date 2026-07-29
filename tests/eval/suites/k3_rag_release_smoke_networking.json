@@ -1,0 +1,25 @@
+{
+  "schema_version": "attune.eval.suite.v1",
+  "suite_id": "k3_rag_release_smoke_networking",
+  "purpose": "K3 single-industry release smoke for networking TCP/IP knowledge workflows.",
+  "corpora": ["networking_tcpip_smoke"],
+  "scenarios": ["networking_tcpip_troubleshooting"],
+  "gates": [
+    "scheduler_contract",
+    "ingest",
+    "search",
+    "chat",
+    "multiturn"
+  ],
+  "thresholds": {
+    "retrieval_hit_at_5_min": 0.85,
+    "citation_hit_rate_min": 0.9,
+    "answer_accuracy_min": 0.8,
+    "terminal_error_rate_max": 0.02,
+    "hot_chat_p95_ms_max": 30000
+  },
+  "ci": {
+    "hardware_required": true,
+    "default_runner": "k3_hardware_nightly"
+  }
+}

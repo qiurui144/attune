@@ -100,7 +100,7 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 | F-06-WEBSEARCH | 浏览器自动化网络搜索 + 30d 加密缓存 | F-15-MCP | Python stdio shim 包 REST 供 MCP 客户端 |
 | F-07-EVOLUTION | episodic 记忆固化 + SkillEvolver 失败信号扩展 | F-16-DISTRIBUTION | Tauri 2 桌面（Win MSI/NSIS、Linux deb/AppImage）+ NAS HTTPS + 硬件 profile |
 | F-08-BROWSEEXT | Chrome 扩展 G1/G2/G5：通用浏览捕获 + 自动书签 + 隐私面板 | F-17-PRIVACY | 三级隐私（L0 chunk 隔离 / L1 PII 占位 / L3）+ 跨域防御 |
-| F-09-FORMFACTOR | FormFactor split（Laptop/K3Appliance/Server/Unknown）+ LLM 默认路径 | F-18-QUALITY | K2 Parse golden set（CI 门）+ RAGAS 风格 benchmark harness |
+| F-09-FORMFACTOR | FormFactor split（Laptop/LocalSchedulerAppliance/Server/Unknown）+ LLM 默认路径 | F-18-QUALITY | K2 Parse golden set（CI 门）+ RAGAS 风格 benchmark harness |
 
 简版覆盖概览（v1.1.0 状态，新能力 ACP/Agent Flow 见 §2.4）：
 
@@ -124,6 +124,75 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 - 验收脚本: `rust/crates/attune-server/tests/amd_laptop_e2e_smoke.rs` (默认 #[ignore], 跑前设 `ATTUNE_E2E_HOST` + `ATTUNE_E2E_TOKEN`)
 - 报告: 真机验收截图归 `docs/screenshots/<release>-verification/`；bug 修复记录入 RELEASE.md 对应版本节（不单独维护 e2e-test-report.md per §3.2）
 - 跑 trigger: 每次 release-candidate 重 deb 后必跑一次 (覆盖 wizard 5 步 + 6 tab + RAG chat + law-pro 证据链)
+
+### 1.5 E2E 环境保真契约 + 禁止近路自检（2026-06-12 立此，治本）
+
+> **背景**：2026-06-12 一次"会员 + 本地 attune"E2E 反复抄近路（`--no-auth` / curl 直怼后端 / cargo binary 代 release 包 / 本机模型缓存代真下载 / mock 代真服务）。根因不是没规则（全局 §2.2/§6.4/§7.3 都在），而是**本大纲只写"测什么"（场景/覆盖矩阵），没写"在什么环境保真度下测"，且 §2.5 把 mock 当默认文化** → 执行时顺着便利惯性就降级。**本节把全局 §6.4.1 下沉为本仓 L4/L5 的 per-test 硬门。**
+
+**层级 × 保真度（mock 边界写死）**：
+| 层 | mock 允许? | 模型/服务 | auth | artifact |
+|----|-----------|----------|------|----------|
+| L1-L3（unit/integration/component） | ✅ 默认 mock（§2.5） | Mock provider | `--no-auth` 可 | cargo test |
+| **L4 真机 E2E / L5 验收** | ❌ **禁 mock 禁近路** | 真模型（真源下载）/ 真 cloud | 真 auth（真登录） | **真 release pkg（GH artifact，非 cargo build）** |
+
+**L4/L5 每个 E2E 跑前必过自检（任一为是 → 测试不成立，重走）**：
+- [ ] 用了 `--no-auth`？→ 改真 auth（真 vault unlock / 真登录）
+- [ ] 用 `curl`/脚本直怼后端绕了 UI？→ 改 Playwright Chrome 真点（§6.4）
+- [ ] 跑的是 `cargo build`/`target/` 二进制而非 GH release artifact？→ 下真包真装（§7.3）
+- [ ] 用了本机模型缓存 / `HF_HUB_OFFLINE` 假装有模型？→ **干净环境真下载**（正式用户无缓存）
+- [ ] mock 了 LLM / cloud / 任何真服务？→ L4/L5 一律真服务
+- [ ] 在 dev 机（有旧 vault.db / 旧缓存）跑而非干净机？→ **优先 AMD 干净机（192.168.100.201）**，dev 机的残留会掩盖 fresh-install bug（2026-06-12 v1.2.0 schema crash 即此被掩盖）
+
+**强制**：L4/L5 报告头必须声明"本次环境保真自检 6 项全过"+ 列实际 artifact SHA / 机器 / 模型源；缺则验收不成立（§5.2.0b 一票否决）。横向 = 全局 §6.4.1。
+
+### 1.6 Web UI E2E 三种运行形态（无头 / 有头 / 真包验收）
+
+Attune 的 Web 测试不能只看 API。所有涉及用户体验的改动必须明确落到以下三条线之一：
+
+| 形态 | 目的 | 浏览器 | 服务端 | 何时跑 | 通过标准 |
+|------|------|--------|--------|--------|----------|
+| **Headless 自动化** | CI/本机快速回归，稳定复现 DOM 行为 | Playwright Chrome `headless=true` | `attune-server-headless` 隔离数据目录 | PR / pre-merge | 脚本 exit 0，截图非空，关键可见文本/状态 chip/citation 命中 |
+| **Headed 有头测试** | 人工观察真实 UX：焦点、滚动、后台任务、长回答等待、错误提示 | Playwright Chrome `ATTUNE_HEADLESS=0` 或人工打开 URL | 真实本地/远端 server | UI/长文本/scheduler 改动后必须至少跑一次 | 人眼确认页面不卡顿、状态可解释、长任务不中断输入；脚本断言也必须通过 |
+| **Release artifact 验收** | 用户安装路径保真，不允许 dev 近路 | 系统 Chrome + 真安装包启动的服务 | deb/MSI/AppImage 真安装 | release candidate | 环境保真自检 6 项全过；报告包含 artifact SHA、机器、模型/云端来源 |
+
+有头测试最小命令：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_BASE_URL=http://localhost:18905 \
+ATTUNE_PLAYWRIGHT_CHANNEL=chrome \
+python3 tests/e2e/playwright/v10_ga_ui_e2e.py
+```
+
+长文本有头测试入口：
+
+```bash
+ATTUNE_HEADLESS=0 \
+ATTUNE_E2E_LONGTEXT=1 \
+ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
+ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
+bash tests/e2e/run_all.sh
+```
+
+K3 平台例外：K3 测试不在前端主机启动 server。正确拓扑是 K3 上运行
+Attune server + scheduler + vault/vector/Tantivy/corpus，前端主机只打开浏览器或
+Playwright 连接 K3 URL。任何 `/api/v1/index/bind` 路径都必须是 K3 文件系统路径。
+可执行入口见 [`tests/e2e/README.md`](../tests/e2e/README.md) 的“K3 平台有头测试拓扑”。
+K3 的 strict headed gate 必须覆盖后台 bind visibility；如当前 K3 服务仍是旧二进制，
+只允许临时跳过该子门禁做人工 chat 验证，不能作为最终验收。
+
+有头测试观察清单：
+
+- 首屏：wizard/主界面无白屏，侧栏、模型选择、输入框、会员提示不遮挡。
+- 后台任务：目录 bind/vector DB 生成必须进入后台任务区，页面仍可搜索、切 tab、输入问题。
+- 长文本问答：scheduler 状态 chip 可见；等待中不出现无限 spinner；完成后 citation 可见且可读。
+- 降级/失败：scheduler 延迟、拒答、OCR metadata-only、无知识命中都必须给诚实反馈，不能静默切小模型胡答。
+- 视觉：桌面 1440x900 与窄屏至少各看一次；按钮文字不溢出，弹层不遮挡主操作。
+
+当前长文本 K3/scheduler 基准见：
+
+- [`docs/benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md`](benchmarks/2026-07-08-airplane-manual-longtext-kb-dataset.md)
+- [`docs/benchmarks/2026-07-20-longtext-corpora-e2e.md`](benchmarks/2026-07-20-longtext-corpora-e2e.md)
 
 ---
 
@@ -150,6 +219,7 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 | Tier | 大小 | 是否入仓 | 何时跑 | 内容 |
 |------|------|---------|--------|------|
 | **Tier 0：内嵌 fixtures** | < 100 KB | ✅ 跟代码走 | 单元测试 / golden | `rust/crates/attune-core/tests/fixtures/` 5 篇手写 MD（中/英/代码/法律/学术） |
+| **Tier 0 PDF：内嵌 PDF fixtures** | < 100 KB | ✅ 跟代码走 | 集成测试（pre-PR） | `rust/crates/attune-core/tests/fixtures/pdf/` 4 篇确定性 PDF（text-en / text-zh / mixed-zhen / scanned）；由 `scripts/gen-pdf-fixtures.py` 生成（Chrome 文本层 + fitz 栅格扫描件），生成器与 PDF 同入仓、字节级可复现 |
 | **Tier 1：小语料** | < 100 MB | ❌ 下载 | 默认集成测试（pre-PR） | rust-book + cs-notes（共 ~160 MB） |
 | **Tier 2：大语料** | > 1 GB | ❌ 下载 sparse | nightly / pre-release | technical-books（sparse-checkout 5 子目录） |
 
@@ -160,7 +230,7 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 
 CI 默认只跑 Tier 0 + Tier 1；Tier 2 用 `cargo test --test '*' -- --ignored --include-ignored` 手动触发。
 
-**Tier 0 多样性现状（R17 audit 2026-05-01）**：5 篇 fixture 覆盖中/英/代码/法律/学术/新闻/技术博客，4 主类齐全。已知 gap：`rust/tests/fixtures/edge_cases/` 目录创建但未填充（空文档 / 10 MB / 非 UTF-8 / 全 emoji / 恶意 HTML），为 **v0.7+ 待补**。
+**Tier 0 多样性现状（R17 audit 2026-05-01）**：5 篇 fixture 覆盖中/英/代码/法律/学术/新闻/技术博客，4 主类齐全。`rust/crates/attune-core/tests/fixtures/edge_cases/`（空文档 / 10 MB / 非 UTF-8 / 全 emoji / 恶意 HTML / deep-nested）**已于 2026-06-08 填充**（`ingest_edge_resource_test.rs` 13 用例 + `generate.sh`），详见 §2.6。
 
 #### 语料库清单
 
@@ -171,13 +241,25 @@ CI 默认只跑 Tier 0 + Tier 1；Tier 2 用 `cargo test --test '*' -- --ignored
 | **C: openai-cookbook** | github.com/openai/openai-cookbook | tag `2025-12-01` | Markdown + Jupyter notebook | Notebook 解析 + token-dense 内容 |
 | **D: pdl** (可选) | github.com/openlawlibrary/pdl | TBD | 法律类长文档 | law 插件 + 长文档分段 |
 | **E: edge cases** | `rust/tests/fixtures/edge_cases/` | 跟代码走 | 空文档/10MB/非 UTF-8/全 emoji/恶意 HTML | 容错与压力 |
+| **F: PDF fixtures** | `rust/crates/attune-core/tests/fixtures/pdf/` | 跟代码走 | text-en / text-zh / mixed-zhen（真文本层）+ scanned（图片层无文字，触发 OCR 路由） | `pdf_extract` 文本层提取（中/英/混合）+ `needs_ocr` 路由决策（`tests/pdf_ingest_test.rs`） |
+
+**F: PDF fixtures 说明（2026-06-08）**：4 篇确定性 PDF 由 `scripts/gen-pdf-fixtures.py` 生成并同入仓。
+文本层 PDF 用 **Chrome headless print-to-PDF**（标准 Identity-H + ToUnicode CMap，`pdf-extract` 可解析；
+PyMuPDF 内置 CJK 字体的 `UniGB-UTF16-H` / 子集 CMap 会让 `pdf-extract` 的 `adobe-cmap-parser` panic）；
+`scanned.pdf` 用 fitz 把文字栅格化成 PNG 再经 Chrome `<img>` 打印（无文字层）。pikepdf 钉死
+`/CreationDate`/`/ModDate`/`/Title`/`/ID` → 字节级可复现。注意 `pdf-extract` 对拉丁词会插入词内空格
+（`borrowing` → `bor rowing`），token 断言用去空格比对（见 `pdf_ingest_test.rs::despace`）。
+**Tier-1 PDF 计划（v1.x 待补）**：把 rust-book / cs-notes 的代表章节转 PDF（pandoc/Chrome 批量），
+做大规模 PDF 解析质量回归，复用上表 A/B 的 commit 固化口径。
 
 **GitConnector 测试语料（2026-05-31）**：GitConnector（`Settings → 从 Git 仓库导入`）复用上表
 **A: rust-book**（tag `1.75.0`）+ **B: cs-notes**（commit `c47a2a7`）做真平台仓验证（手动/nightly：
 clone → glob → 入库 → BM25/向量可检索 + tantivy-jieba 中文分词）。CI 默认走**本地 bare-repo
 fixture**（`crates/attune-core/tests/git_connector.rs`，git2 程序化建仓，无网络、确定性），覆盖
 happy/edge（空仓/全二进制/subdir/超长路径）/error（无效 URL/404/ref）/adversarial（SSRF 全表 +
-path traversal）/资源耗尽（限额）/i18n（中文 .md）。SSRF + 错误码契约端到端见
+path traversal）/资源耗尽（限额）/i18n（中文 .md）。`ingest::git` 内联测试额外覆盖
+full tree vs incremental diff 契约：只有 full tree 可用 seen_refs 做删除对账，incremental
+只能消费 cloner 明确返回且已转成 source_ref 的 deleted 列表。SSRF + 错误码契约端到端见
 `crates/attune-server/tests/git_route_subprocess.rs`。
 
 #### 运行
@@ -318,6 +400,146 @@ cargo test -p attune-core --test stress_large_scale_test
 # 降级路径默认走 mock，遍布各集成套件（无需额外命令）
 ```
 
+**CI 持续纪律门（W4 #93）**：六类下限不再仅靠约定，已固化为 CI 硬门：
+- `scripts/test-floor-check.sh`（CI job `test-floor`，纯 bash 秒级）以
+  `rust/agent_quality_manifest.yaml` 为 SSOT，硬性校验：每个确定性 agent golden ≥10、
+  **新 agent 必须同 PR 带 gate + golden**（`tests/golden/<agent>` 无对应 manifest gate 即 fail）、
+  以及 §2.6 A–K 维度矩阵在本文件存在；proptest/边界/error 计数为 advisory WARN。本机跑
+  `bash scripts/test-floor-check.sh`（`--warn` 只报不 fail）。
+- `agent_gate_orchestrator.rs`（跑在 `cargo test --workspace` 内）= 阈值 ratchet 只升不降 +
+  `#[ignore]` 突增守卫（baseline+2）。
+- real-LLM N=3 floor 走 secret-gated CI job `real-llm-secret-gated`：配了
+  `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY` CI secret 时对真模型跑 N=3 F1 floor；未配则
+  skip（标 PENDING，不 block）。另有 `nightly-real-llm.yml`（自建 Ollama runner）跑同套 gate。
+
+---
+
+### 2.6 文档智能 — 全维测试覆盖矩阵（release 验收硬门 · 2026-06-08）
+
+> **release 硬性要求（非一次性）**：每轮 RC/GA 验收必须过本矩阵 —— §7.2 **Gate 2** = A-K 的确定性测试在 CI `cargo test` 全绿；**Gate 3** = 每维有真跑证据（真模型/真语料）；**Gate 4** = ⚠️/❌ 维度登记 RELEASE.md Known Limitations。**任何新增 ingest/search 能力必须在此登记对应行**，否则不通过验收。
+
+#### 2.6.1 显式语料 / 仓库清单（版本钉死，可复现）
+
+| 代号 | 语料 / 仓库 | 固化版本 | 内容 | 维度 |
+|------|------------|---------|------|------|
+| A | github.com/rust-lang/book | tag `1.75.0` (`f1e5e4b`) | 英文 + 代码块密集 Markdown | 格式/英文/分块/检索 |
+| B | github.com/CyC2018/CS-Notes | commit `c47a2a7` | 中文算法笔记 | 中文分词/中英混合 |
+| C | github.com/openai/openai-cookbook | tag `2025-12-01` | Markdown + notebook | token-dense |
+| D | github.com/openlawlibrary/pdl（可选） | TBD | 法律长文档 | 长文分段 |
+| PDF | `tests/fixtures/pdf/`（生成器 `scripts/gen-pdf-fixtures.py`，Chrome 文本层 + fitz 扫描件） | 跟代码走 | text-en/zh/mixed + scanned | A/B/D/G |
+| EDGE | `tests/fixtures/edge_cases/`（`generate.sh` 生成 huge/non-utf8/many-lines/deep-nested） | 跟代码走 | empty/emoji/malicious-html/10MB/非UTF8 | C |
+| AUDIO | `tests/fixtures/audio/`（`gen_audio_fixtures.py`） | 跟代码走 | tone/silence/corrupt/speech WAV | H |
+| OCRIMG | `tests/fixtures/ocr_image/`（`gen_ocr_image_fixtures.py`） | 跟代码走 | known-text PNG/JPG + zero-byte/non-image | A/G |
+| I18N | `tests/fixtures/i18n/`（生成器 `generate.sh`：committed UTF-8 = japanese/korean/traditional_chinese/arabic_rtl/hebrew_rtl/emoji_heavy + gitignored 非UTF8 = gbk/shift_jis 测试内重生成） | 跟代码走 | 多语种 ingest + FTS 词法层 | B |
+| OFFICE | `tests/fixtures/office/`（生成器 `scripts/gen-office-fixtures.py`：known.{docx,xlsx,pptx,epub,rtf,csv} 含 CN+EN marker + bomb.{docx,xlsx}/traversal.docx/laughs.docx/big_entry.docx 对抗样本） | 跟代码走 | ZIP/XML 系格式 + 对抗 | A/C |
+| RETR | `tests/fixtures/retrieval/`（structured_doc.md + golden_corpus.yaml + cross_language.yaml） | 跟代码走 | 分块/RRF/relevance@K/跨语言 golden | D/E |
+
+> 真实仓库语料**必须 git clone --depth 1 -b `<tag/commit>` 锁版本**（附录 B 脚本）；上游变动不得改判据基线（§6.3）。本地 fixture **必须随生成器同入仓、字节级可复现**。
+
+#### 2.6.2 A-K 维度覆盖矩阵
+
+| 轴 | 维度 | 测试文件 | 语料 | 通过判据 | 状态 |
+|----|------|---------|------|---------|------|
+| **A** | 格式（14 类） | `parser` 单测 + `pdf_ingest_test`/`ocr_image_test` + `office_formats_test`(7) | PDF/OCRIMG/A/B/OFFICE | 每格式抽取已知内容 | PDF/图/文 ✅；docx/xlsx/pptx/epub/rtf/csv ✅(OFFICE，各格式抽取 CN+EN 已知 marker) |
+| **B** | 语言 i18n | `pdf_e2e_search`(中英)、`golden/*/e03-non-utf8`、jieba 套件、`i18n_ingest_search_test`(10) | PDF mixed/B/I18N | 各语种 ingest 无 panic + 词法层行为如实记录 | **ingest ✅**(JP/KR/繁/RTL/emoji/非UTF8 GBK/SJIS 全 graceful，ASCII marker 经 from_utf8_lossy 存活，emoji 文档内非 emoji token 仍可检索)；**词法层**：中英 ✅、JP 汉字 ✅、繁中 ✅(jieba Han 词典切真词)、emoji ✅(token 化不崩)；⚠️ **韩/阿/希伯来词法层降级**(jieba 无模型 → 逐音节/逐字母切，单字符 query 过度命中、无词边界)，语义召回靠向量层 bge-m3 — FLAG `index.rs::register_tokenizers` 后续 ICU/分语种分词器(见下 I18N-GAP) |
+| **C** | 鲁棒 6 类 | `ingest_edge_resource_test`(13) + `office_adversarial_test`(6+1 FLAG) | EDGE/OFFICE | 空/超长/非UTF8/emoji/恶意HTML graceful；并发无死锁；ZIP/XML 对抗 bounded | edge/error/resource/concurrent ✅；**ZIP/XML 对抗 ✅(OFFICE,P0安全)** — docx/epub/pptx zip-bomb 真解压上限拒绝/路径穿越无FS逃逸/billion-laughs+XXE 惰性/超大单条目 bounded，均带 20s watchdog；⚠️ xlsx bomb 仅挡"诚实"中央目录(BUG-3b：伪造声明大小可绕过，#[ignore] FLAG 留 follow-up) |
+| **D** | 检索质量 | `pdf_e2e_search`(真 bge-m3) + `retrieval_quality_test`(10) | PDF/A/B/RETR | 中/英/大写 query 命中;RRF 双信号;relevance@K | ✅ E2E + relevance@K(golden recall 5/5+precision@1 5/5;真 bge-m3 跨语言 EN→CN top-1;RRF 表面 lexical-only+vector-only 双信号)。⚠️ FLAG:`rrf_fuse` rank-based,弱但普遍 doc 可压过强单信号精确命中—corrector 是 cross-encoder rerank,非 fusion 权重 |
+| **E** | 分块质量 | `chunking_quality_test`(10) + `chunker` 单测 | RETR | L1章节/L2段落边界、代码块/表格保留 | ✅(L1 边界落标题+path=[H1,H2];L2 ≤2×chunk_size+overlap 覆盖头尾;代码 fence 平衡不撕裂;超大段落 Latin+CJK 分块不丢;表格行保留) |
+| **F** | 向量/embedding | `pdf_e2e_search`、`index::` 套件 | PDF | bge-m3 1024d 真向量;维度一致 | ✅ |
+| **G** | OCR 专项 | `ocr_image_test`、`ppocr_icbc_smoke` | OCRIMG/PDF scanned | 路由正确;真 CER 红线 | 路由 ✅;真 CER ⚠️(PP-OCR 模型 env-gated) |
+| **H** | ASR 专项 | `asr_ingest_test` | AUDIO | 路由 + 真 WER/CER 红线 | ✅(真 whisper turbo CER=0.000) |
+| **I** | 采集连接器 | email/rss/git/webdav 矩阵(本文档下方) | bare-repo fixture/A/B | 各连接器 ingest E2E + 增量 + 去重 | ✅ |
+| **J** | 迁移/reindex | `index::` migration 测试 | — | tokenizer_version 变更 → 索引重建无数据丢失 | ✅(FTS v2 迁移) |
+| **K** | 成本契约 | `context_budget` 套件 | — | 建库不升 LLM;CJK-aware 预算;成本显示准 | ⚠️待系统化 |
+
+**最高价值待补（§6.1「证明它会挂」）**：① RETR relevance@K golden。I18N 非中英语种 ingest 已闭环（`i18n_ingest_search_test.rs` 10 用例，2026-06-08）；OFFICE ZIP/XML 对抗已闭环（见下 BUG-3）。
+
+**FLAG I18N-GAP（词法层降级，非 bug，follow-up）**：FTS 分词链 `JiebaTokenizer→LowerCaser→Stemmer(English)` 对 jieba 无模型的脚本（韩文 Hangul / 阿拉伯 / 希伯来）**无词分割**，退化为**逐音节 / 逐字母** token。实测（`i18n_ingest_search_test.rs::hangul_arabic_hebrew_are_character_level_matched_documented_gap` 钉死，2026-06-08 probe）：本词召回正常、多音节跨词不误命中（BM25 conjunction 过滤部分重叠），但**单字符 query 过度命中**（"학" 命中所有含该音节文档；阿拉伯字母 "ة" 命中所有含该字母文档）= 真实假阳性。这些脚本的**语义召回靠向量层 bge-m3**（多语种，向量层覆盖）。根治：`src/index.rs::register_tokenizers`（:152）注册 ICU / unicode 词边界分词器（tantivy `icu` feature 或 `unicode-segmentation`），或按检测脚本分语种 analyzer + `TOKENIZER_VERSION` bump（触发索引重建）—— 属 src 改动，本切片只 FLAG 不改。JP 汉字 / 繁中走 jieba Han 词典正常切真词，不在此 gap。
+
+**已抓修真 bug（本轮扩展产出，回归永久锁）**：BUG-1 `parser.rs` 首行标题多字节 byte-slice **PANIC**（char-safe 修）；BUG-2 `html_to_text` body 级 `<script>/<style>` 源码**泄漏进索引**（剔除子树修）。两者回归测试在 `ingest_edge_resource_test.rs`。**BUG-3（P0 安全，本轮）**：docx/xlsx/pptx/epub 的 ZIP 条目解压**无大小上限** —— `read_to_string` 把整条目读进内存，高压缩比 zip-bomb（~100KB 压缩 → ~100MB 解压，甚至可达 GB 级）能 **OOM**。修复：`parser.rs::read_zip_entry_string_bounded` + `MAX_ZIP_ENTRY_BYTES`(64MB) 给 docx/epub/pptx 单条目+累计**真解压**量设硬上限(`Read::take` 在实际解压流上，不可伪造)，超限 `InvalidInput` 拒绝；xlsx 在交 calamine 前预扫描中央目录**声明的**解压大小拒绝炸弹。回归锁在 `office_adversarial_test.rs`（zip-bomb 拒绝 / 路径穿越 memory-only 无 FS 逃逸 / billion-laughs+XXE 因 char-scanner 不展开实体而惰性 / 超大单条目 bounded，全部 20s watchdog 兜 hang）。**残留 BUG-3b（FLAG，follow-up）**：xlsx 扫描信任 `ZipFile::size()`(取自可伪造的中央目录)，伪造"声明小、实际大"的 bomb 可绕过 → calamine 仍累积真字节。docx/epub/pptx 不受影响(走真解压 take)。根治需对 calamine 将读的 part 做真解压带上限，属较大改动，`#[ignore]` FLAG `xlsx_spoofed_size_bomb_not_yet_bounded` 留记。
+
+---
+
+### 2.7 文件夹一键整理 → 案卷（organize 引擎）测试矩阵（release 验收硬门 · 2026-06-15）
+
+> **能力**：导入文件夹（已编排 / 完全扁平）→ 全自动聚类（本地 HDBSCAN）→ 命名/分类（领域无关 `OrganizationStrategy`，OSS 内置 `GenericStrategy`，law 语义在 attune-pro）→ 用户确认 → 单事务批量归入案卷（Project）。spec `docs/superpowers/specs/2026-06-15-auto-organize-folder-to-project.md`。
+> **release 硬性要求**：每轮 RC/GA 验收过本矩阵 —— §7.2 **Gate 2** = 确定性维度 CI 全绿；**Gate 3** = tier-3 命名路径有真模型证据（多模型矩阵脚本）；**Gate 4** = ⚠️ 维度登记 RELEASE.md Known Limitations。
+
+#### 2.7.1 维度覆盖矩阵
+
+| 轴 | 维度 | 测试文件 | 通过判据 | 状态 |
+|----|------|---------|---------|------|
+| **G1** | 分组（HDBSCAN，真聚类） | `organize_golden_gate.rs`(golden 01/02/08/09) + `clusterer::group_only` 单测 | 两/多密簇 → ≥2 真组（`allow_single_cluster=false` 需 ≥2-way split）；不调 LLM | ✅ |
+| **G2** | fallback（点数 < HDBSCAN_FLOOR=5） | golden 04/05 + `organizer::mod` 单测 | clean < 5 → 子目录 fallback，**绝不**触发 hdbscan 库 panic | ✅ |
+| **G3** | 混维 / 无向量 → noise | golden 06/07/10 + `grouping::partition_by_majority_dim` 单测 | 少数派维度 + 无向量入 noise；`dimension_mismatch_count` 准确；不丢点 | ✅ |
+| **G4** | 命名（tier-2 extractive，无 LLM） | golden 12 + proptest `groups_are_named_and_nonempty` | 每组标题词频 top1 命名非空；golden 12 命名含共享高频词 | ✅ |
+| **G5** | 命名（tier-3 LLM，多模型矩阵） | `organize_golden_gate::organize_tier_matrix_naming`(#[ignore]) + `scripts/run-organize-tier-matrix.sh` | qwen2.5:3b / gemini-flash / deepseek-v4 三 tier 命名质量 + JSON-parse 鲁棒 | ⚠️ PENDING-VERIFY（需 §1.3 算力批准；CI 不跑） |
+| **G6** | 成本契约（tier 路由 + token） | proptest `no_llm_always_tier_two` + golden `tier` 字段 | 无 LLM → tier-2 + 0 token；有会员+LLM → tier-3；`group_only` 不双调 LLM | ✅ |
+| **G7** | 不变量（并集 = 输入） | proptest `union_equals_inputs`(256 case) + `types::all_item_ids` 单测 | 任意 lobe/缺向量/簇大小组合：groups ∪ noise == inputs（不丢不重） | ✅ |
+| **G8** | 错误 case（空 scope） | golden 11 + `organizer::mod` 单测 + `organize_route_test::analyze_empty_scope_returns_400` | 0 item → `EmptyScope` / HTTP 400 | ✅ |
+| **G9** | 路由 member-gate + 锁序 | `organize_route_test.rs`(7) | 非会员 → tier-2 + `member-required-for-llm-label` hint；vault locked → 401/403；锁序 fulltext→vectors→vault | ✅ |
+| **G10** | 持久化幂等（单事务） | `organize_route_test::apply_files_items_then_is_idempotent` + `store::organization` 单测 | apply 单事务 create+file+timeline+status；重 apply → `already_applied`，无重复建项目 | ✅ |
+| **G11** | 集成 E2E（seed→analyze→apply） | `organize_e2e_test.rs`(2 跑 + 1 #[ignore]) | 12 item 双簇真 HDBSCAN → analyze → get → apply 全链；filed_count = 分组 item 数；幂等 | ✅ |
+
+#### 2.7.2 E2E 模式说明（轻量 seed vs 重路径）
+
+- **CI 跑的 E2E = 轻量 seed**（`organize_e2e_test.rs`）：`Vault::open_memory` + `setup/unlock` + `insert_item` + **直接 seed `state.vectors`**（两个 ≥5 点正交密簇），不走 HTTP `/vault/setup` + `/index/bind` + `/ingest`。WHY：重路径加载 reranker + 在 async ctx drop 后台 worker，会挂 2-worker test runtime（Task-8 实测，与 `vault_setup_test` 同因 `#[ignore]`）。
+- **重路径 E2E** `folder_http_bind_ingest_organize_e2e_heavy` = **诚实 `#[ignore]` stub**：保留全保真意图（真 bind + 真 ingest），需真模型栈手动跑 `-- --ignored`，PENDING-VERIFY，**不假装跑过**。
+- **golden 向量合成**：golden YAML 用 `lobe` 轴索引合成正交 8 维向量（同 lobe 同基轴 = 一密簇），完全确定性、离线（无 embedding 模型、无 LLM），HDBSCAN 在每 lobe ≥5 点时切出独立簇。GT 独立于引擎（向量几何 → 期望分组数下限手工推导，非跑引擎记录），符合 §「Agent 验证铁律」。
+
+#### 2.7.3 运行命令
+
+```bash
+# 确定性维度（CI 门，全绿）
+cd rust && TMPDIR=/data cargo test -p attune-core --test organize_golden_gate   # golden 12 + proptest 3
+cd rust && TMPDIR=/data cargo test -p attune-core --lib organizer               # 引擎单测
+cd rust && TMPDIR=/data cargo test -p attune-server --test organize_e2e_test    # E2E 轻量 seed（2 跑 + 1 ignore）
+cd rust && TMPDIR=/data cargo test -p attune-server --test organize_route_test  # 路由 7
+
+# tier-3 多模型命名矩阵（⚠️ 需 §1.3 算力批准；非 CI）
+ORGANIZE_TIERS="qwen2.5:3b" bash scripts/run-organize-tier-matrix.sh
+```
+
+> **CI shard**：`organize_golden_gate`(core HALF_B) / `organize_e2e_test` + `organize_route_test`(server GROUP_A) 已登记 split-guard + ci.yml `--test` 名单（确定性 blocker，不进 shard = CI 红）。
+
+### 2.8 记忆延续与可迁移性（memory continuity）测试矩阵（release 验收硬门 · 2026-06-15）
+
+> **能力**：(A) 换 embedding 模型后老记忆向量自动 reindex（旧维度键向量逐条原地 re-embed 为当前模型，不再静默丢失召回）；(B) 记忆经 Argon2id 口令派生 key 加密成 bundle，合并式跨设备导出/导入（按 `source_chunk_hashes` 幂等去重）。spec `docs/superpowers/specs/2026-06-15-memory-continuity-and-portability.md`。**不碰已实装的 L3 semantic。**
+> **release 硬性要求**：每轮 RC/GA 验收过本矩阵 —— §7.2 **Gate 2** = 确定性维度（golden + proptest + E2E）CI 全绿；**Gate 4** = ⚠️ 召回降级语义（迁移中旧向量 graceful-skip 而非丢失）登记 RELEASE.md Known Limitations。
+
+#### 2.8.1 维度覆盖矩阵
+
+| 轴 | 维度 | 测试文件 | 通过判据 | 状态 |
+|----|------|---------|---------|------|
+| **M1** | 导出/导入 round-trip（异 DEK） | `memory_continuity_golden_gate.rs`(golden 01/02/03/06) | bundle 经口令 key 解密 → summary 明文等价落库；中文/超长 summary 不丢/不乱码（UTF-8 GCM） | ✅ |
+| **M2** | 合并幂等（source_chunk_hashes） | golden 04 + proptest `second_import_is_pure_skip` | 二次导入同 bundle → `imported=0` / `skipped=N`；目标已有同源子集只补差 | ✅ |
+| **M3** | 空 bundle 边界 | golden 05 | 零记忆 vault 也能合法 round-trip（`imported=0`，不 panic） | ✅ |
+| **M4** | reindex 换模型 → stale=0 + 召回恢复 | golden 07/08 + `memory_continuity_e2e::change_model_then_reindex...` | 旧维度键向量全 stale → `reindex_one` 逐条 → `list_stale_memory_ids=0`；新模型 cosine 召回命中 | ✅ |
+| **M5** | reindex 幂等边界（已是当前模型） | golden 09 | from==to 维度 → stale 始终 0，reindex 无操作 | ✅ |
+| **M6** | import-then-reindex 组合（regression） | golden 10 + `memory_continuity_e2e` round-trip | bundle 带旧模型向量 → 新设备 import → reindex 对齐本机模型 → stale=0 + 召回恢复 | ✅ |
+| **M7** | 错误 case（错口令 / 损坏包） | golden 11/12 + proptest `wrong_passphrase_never_writes` | 错口令 / 截断 bundle → GCM 认证在写库前 fail → 整包拒绝 + **零写入**（原子拒绝） | ✅ |
+| **M8** | 不变量 `import(export(x))==x` | proptest `import_of_export_is_identity`(48 case) | 任意随机记忆集 → 导出再导入 → summary 集合 byte-for-byte 一致 | ✅ |
+| **M9** | 路由：status/reindex/export/import | `memory_route_test.rs`(8) | status 报 current_model+stale；reindex 翻转 pause flag；export 200 二进制 + 口令下限 < 8→400；import multipart + sealed→400 vault-not-ready + 错口令→400 bad-passphrase | ✅ |
+| **M10** | 集成 E2E（HTTP 全链） | `memory_continuity_e2e.rs`(2) | 真起服 → 换模型 reindex stale=0 + 向量真对齐 dim8；export→fresh vault import imported≥1 + 二次导入幂等 skip | ✅ |
+
+#### 2.8.2 E2E 模式说明（轻量 seed vs 重路径）
+
+- **CI 跑的 E2E = 轻量 seed**（`memory_continuity_e2e.rs`）：`Vault::open_memory` + `setup/unlock` + `insert_memory` + `put_memory_vector`（直接 seed 旧模型向量），不走 HTTP `/vault/setup` + `/ingest`。boot 守 office trap：`HF_HUB_OFFLINE=1` + `install_job_store()` 在 serve 前（防 `init_search_engines` 在 request path 同步 hf-hub 下载 → async drop runtime panic / 503，per fix 22eec99）。
+- **reindex 驱动**：E2E 直接调真 `memory::migration::reindex_one`（与后台 batch worker `run_memory_reindex_batch` 同一代码路径）逐条迁移,再经 HTTP `/migration/status` 断言 stale=0 —— 避开后台 loop 的 timing flakiness,验的是真路由 + 真 reindex 逻辑。
+- **召回验证用真 cosine**：golden gate 用产品同款 `MemoryVectorIndex` 余弦检索；`MockEmbeddingProvider` 把共享 token 哈希成相近向量,故"共享关键词的 query 真能召回该记忆"是真检索而非行数。GT 独立于引擎（YAML `expected.*` 手工 curate），符合 §「Agent 验证铁律」。
+
+#### 2.8.3 运行命令
+
+```bash
+# 确定性维度（CI 门，全绿）
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-core --test memory_continuity_golden_gate   # golden 12 + proptest 3
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-server --test memory_continuity_e2e         # E2E 轻量 seed（2）
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-server --test memory_route_test             # 路由 8
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-core memory::portability memory::migration   # lib 单测
+```
+
+> **CI shard**：`memory_continuity_golden_gate`(core) / `memory_continuity_e2e` + `memory_route_test`(server GROUP_A) 已登记 split-guard + ci.yml `--test` 名单（确定性 blocker，不进 shard = CI 红）。
+
 ---
 
 ## 3. 安全 + 跨平台测试
@@ -333,6 +555,24 @@ cargo test -p attune-core --test stress_large_scale_test
 | S-005 | Session token 伪造 | HMAC 校验 + nonce 递增 | F-01-VAULT |
 | S-006 | 无授权访问 | 所有 vault API 返回 403 | F-01-VAULT |
 | S-007 | API key 泄露（GET /settings） | redact_api_key 必须生效 | F-09-FORMFACTOR / 配置 |
+| S-008 | 出网点关闭仍出网（web_search/webdav） | OutboundGate Err 中止 HTTP；`{web_search,webdav}_disabled_in_settings_blocks_outbound` | F-17-PRIVACY |
+| S-009 | vault 锁定仍出网（web_search/webdav） | OutboundGate VaultLocked 中止；`{web_search,webdav}_vault_locked_blocks_outbound` | F-17-PRIVACY |
+| S-010 | L0 内容流向云端 LLM | `retain_non_l0_for_cloud` + 路由二次过滤剔除 L0 item / memory anchor；`retain_drops_l0_item_from_cloud_context`、`l0_content_to_cloud_is_blocked` | F-17-PRIVACY |
+| S-011 | OutboundGate Result 被丢弃（no-op enforce） | `scripts/privacy-audit.sh` 检查 #5 FAIL on `let _ = OutboundGate::enforce` / no-op marker | F-17-PRIVACY |
+
+#### F-17-PRIVACY OutboundGate 强制点 — P0-fixed list（2026-06-08）
+
+> 背景：coverage scan `reports/2026-06-08_coverage-scan-vault-privacy-security.md` G1/G3 暴露「OutboundGate 在 3/5 出网点是 no-op + L0「永不出网」零强制」。本轮 TDD（先红后绿）闭环。
+
+| 缺口 | 根因（修前） | 修复 | 回归测试（绿） |
+|------|--------------|------|----------------|
+| **G1** web_search 出网无强制 | `let _ = enforce(... enabled:true, vault_unlocked:true)` 丢弃 Result（"Task 7" 从未做）；关闭/锁定仍真出网（实测红：DuckDuckGo 真返结果） | `BrowserSearchProvider` 加真实 `outbound_enabled`/`vault_unlocked`，`search()` 用 `?` 中止；路由层 `read_privacy_outbound_enabled` 活查 `privacy.web_search` | `web_search_browser::tests::web_search_{disabled,vault_locked}_blocks_outbound` |
+| **G1** webdav 出网无强制 | 同上（`scanner_webdav::list` no-op）；关闭/锁定仍 PROPFIND（实测红：真连远端） | `WebDavConnector::with_outbound_policy` + `list()` 用 `?` 中止；`sync_webdav_dir` 活查 `privacy.webdav` + vault state | `scanner_webdav::tests::webdav_{disabled,vault_locked}_blocks_outbound` |
+| **G1** cloud_saas wipe | `let _ = enforce`（**有意** always-allow，DSAR 擦除）| 保留 always-allow，注释/audit allow-list 显式化（唯一合法丢弃点） | privacy-audit 检查 #5 allow-list |
+| **G3** L0「永不出网」未实现 | `PrivacyTier::L0` 仅存储；`filter_out_l0_items` 死代码（无调用方）；`OutboundGate` 无 tier 参数 | `OutboundGate` 加 `local_destination`/`contains_l0`（L0→云 = `L0CloudBlocked`）；`Store::retain_non_l0_for_cloud` 原语 + 路由出网前调用 + 记忆装配后二次过滤 | `outbound_gate::tests::l0_content_to_cloud_is_blocked`、`store::items::privacy_tier_tests::retain_drops_l0_item_from_cloud_context`（含 deleted/ghost fail-closed） |
+| **audit** 脚本被 no-op 骗过 | 检查 #1 仅看 `enforce` 调用存在 | 新增检查 #5：grep `let _ = OutboundGate::enforce` / `wired in Task 7` 标记 → FAIL（已自测灵敏度：probe 注入 no-op 真红） | `scripts/privacy-audit.sh` 检查 #5 |
+
+**残留（FLAG，follow-up）**：(a) 休眠的 agent `WebSearchTool`（`tools.rs`，OSS 未注册进任何生产 ToolRegistry）走 state provider 默认 permissive policy —— 接入生产 flow 时构造方须调 `with_outbound_policy`；(b) 全链 HTTP E2E（真 upload+index+L0 标记→chat→断言 cloud payload 无 L0）需真 embedding，本轮以 store 原语级 + gate 级红→绿 prove-test 闭环替代。
 
 ### 3.2 跨平台测试矩阵（CI）
 
@@ -590,16 +830,18 @@ Email IMAP 采集源与 `SourceConnector` 统一抽象（`ingest/connector.rs`�
 |----|------|------|
 | Unit — connector | `ingest/connector.rs` 内联 | `SourceKind::as_str` 稳定字符串；`RawDocument` 字段构造；`SourceConnector` trait 驱动 sink 回调 |
 | Unit — email parse | `ingest/email.rs` 内联 | `html_to_text` 剥 HTML 标签；style/script block 过滤 |
+| Unit — email store | `tests/email_accounts_test.rs` | add/get/list/delete 全流程；密码加密落盘 + 解密回明文；UID cursor 幂等；删除账号清理 `email_folder_uids` 与 `indexed_files` tracking，但保留已入库 item |
 | Unit — pipeline enum | `ingest/pipeline.rs` 内联 | `IngestOutcome` derive 特征（Debug/Clone/PartialEq/Eq）四 variant 全覆盖 |
 | Integration — email | `tests/ingest_email_test.rs` | `parse_email_bytes`（plain/HTML/attachment/invalid）；`EmailConnector` mock fetcher；UID 增量游标；attachment RawDocument 独立产出；正文 RawDocument 可过 `ingest_document` |
 | Integration — pipeline | `tests/ingest_pipeline_test.rs` | `ingest_document` 四态（Inserted/Duplicate/Updated/Skipped）；domain/tags 透传；corpus_domain 前缀；`ingest_document_replacing` + 第三方 hash 防护；`ingest_document_with_profile` 命名 profile；raw.title 优先于 parser title |
-| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "Email IMAP 采集源" | 添加 IMAP 账号、手动同步、UID 游标增量、附件索引 — 需真实 IMAP 账号，不进 CI |
+| Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "Email IMAP 采集源" | 添加 IMAP 账号、手动同步、UID 游标增量、附件索引 — 需真实 IMAP 账号，不进 CI |
 
 跑法：
 
 ```bash
 cd rust
 cargo test -p attune-core --lib ingest                      # unit tests
+cargo test -p attune-core --test email_accounts_test        # 7 个 encrypted store CRUD/cursor test
 cargo test -p attune-core --test ingest_email_test          # email integration
 cargo test -p attune-core --test ingest_pipeline_test       # pipeline integration
 ```
@@ -614,7 +856,7 @@ cargo test -p attune-core --test ingest_pipeline_test       # pipeline integrati
 |----|------|------|
 | Unit | — | TypeScript 类型检查：`npm run typecheck`（`tsc --noEmit`） |
 | E2E | `tests/e2e_rust/`（C.2 规划后） | 待建立 Playwright 层后补充导航交互测试 |
-| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "两级侧边栏导航" | 主级常驻可见、折叠模式图标、"更多"展开/折叠、激活指示器、活跃视图自动展开、Settings 位置 |
+| Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "两级侧边栏导航" | 主级常驻可见、折叠模式图标、"更多"展开/折叠、激活指示器、活跃视图自动展开、Settings 位置 |
 
 跑法：
 
@@ -623,7 +865,7 @@ cd rust/crates/attune-server/ui
 npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 类型）
 ```
 
-人工验收在 `python/tests/MANUAL_TEST_CHECKLIST.md` 维护，每次 release 前必须人工跑一遍。
+人工验收在 `tests/MANUAL_TEST_CHECKLIST.md` 维护，每次 release 前必须人工跑一遍。
 
 ## RSS / Atom 采集源测试矩阵（v0.7，2026-05-20）
 
@@ -634,16 +876,16 @@ npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 
 | 层 | 文件 | 覆盖 |
 |----|------|------|
 | Unit — connector | `ingest/rss.rs` 内联 | RSS 2.0 + Atom 解析；HTML body 剥标签；entry dedup（last_entry_guid 命中即 break）；304 路径不 emit；200 last_response 透出 ETag/Last-Modified；垃圾 XML 拒绝 |
-| Unit — store CRUD | `tests/rss_feeds_test.rs` | add/get/list/delete 全流程；URL 加密落盘 + 解密回明文；明文 URL 绝不在 BLOB 里；update_etag_lastmod / touch_polled_at / update_last_entry / update_feed_settings 幂等性 |
+| Unit — store CRUD | `tests/rss_feeds_test.rs` | add/get/list/delete 全流程；URL 加密落盘 + 解密回明文；明文 URL 绝不在 BLOB 里；update_etag_lastmod / touch_polled_at / update_last_entry / update_feed_settings 幂等性；RSS 非 `bound_dirs` source 可写入 `indexed_files`，删除 feed 清理 tracking 但保留 item |
 | Integration — connector | `tests/ingest_rss_test.rs` | 端到端 first-poll → 全 emit；conditional-GET 透传 ETag；dedup invariant（cursor 推进后二次 poll → 0 新条目）；fetch Err 传播；空 entry 跳过；RawDocument 真正过 ingest_document |
-| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "RSS 订阅采集源"（待补） | 添加真实 LWN / GitHub releases RSS；poll-now；周期 worker 到期触发；304 路径；删除订阅；禁用订阅 |
+| Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "RSS 订阅采集源"（待补） | 添加真实 LWN / GitHub releases RSS；poll-now；周期 worker 到期触发；304 路径；删除订阅；禁用订阅 |
 
 跑法：
 
 ```bash
 cd rust
 cargo test -p attune-core --lib ingest::rss          # 8 个内联 connector unit test
-cargo test -p attune-core --test rss_feeds_test      # 10 个 store CRUD test
+cargo test -p attune-core --test rss_feeds_test      # 11 个 store CRUD test
 cargo test -p attune-core --test ingest_rss_test     # 8 个端到端 integration test
 ```
 
@@ -680,9 +922,86 @@ benchmark 走确定性 MockEmbeddingProvider，无 LLM / 无网络，进 CI（<1
 
 ---
 
+## 非文字内容识别 (Non-Text Content Recognition) 测试矩阵（2026-06-10，`--features nontext`）
+
+OSS-base 共享视觉理解能力（ADR-0008）。设计上检测 7 类非文字 region（table / chart / figure /
+formula / handwriting / stamp / signature + checkbox），跑 🆓/⚡ 本地识别器，🆓 与 PP-OCR 交叉
+校验，仅对低置信/分歧 region 升级 💰 VLM。所有代码门控在 `nontext` feature 后（默认 OFF →
+plain OCR，`regions: None`，字节级旧行为）。
+
+> ✅ **FUNCTIONAL 状态（C1 诚实标注，2026-06-10→2026-06-11 更新）**：Stage1 布局检测
+> （`layout::detect_regions`）**已接入真实 ONNX 推理**（RapidLayout PP-Structure CDLA PicoDet，
+> Apache-2.0）。模型**未捆绑但首用自动拉取**（mirrors PpOcr，`HF_ENDPOINT` 可指向镜像）：模型存在
+> 且推理成功 → `engine_status=functional`，region 反映真实布局；推理失败 → `layout-error`（上浮，
+> 绝不伪装空页，I1）；仅离线/无下载环境模型缺失 → `scaffold-no-layout-model`，降级 plain OCR。
+> `recognize_page` / CLI / REST 响应都带显式 `engine_status` 字段，调用方据此**知道**识别状态。
+> Stage1 产出 region 后 R6 stamp / R7 checkbox 等识别器跑在真实 per-region 裁剪上。
+>
+> ⚠️ **诚实边界（不可过度宣称）**：检测**准确率尚未对标注集验证**（无 mAP 实测）。SLANet
+> 表格结构已接 ONNX 推理链路，但 release 环境还需确认模型 provisioning、结构字典匹配与标注集结构
+> F1/准确率；💰 VLM Stage4 升级路径仍按 type-enforced gate 验证。
+
+**运行**：`cargo test -p attune-core --features nontext`（lib + golden）；
+`cargo test -p attune-cli --features nontext`（agent-invocable CLI E2E）。
+feature-OFF 必须仍全绿（`cargo test -p attune-core` / `-p attune-server` / `-p attune-cli`）。
+
+### 6 类下限映射（per §6.1）
+
+| 类型 | 落点 | 覆盖 |
+|------|------|------|
+| Golden | `tests/nontext_cross_validate_golden.rs` | OCR-纠错 ≥8 ContentConflict + ≥2 Agree sentinel（视觉混淆数字/字母） |
+| 边界 | `ocr/nontext/mod.rs` `#[cfg(test)]` | recognize_region 各 kind dispatch / model-missing → UnrecognizedV1 / recognize_page 空模型 degrade + `engine_status=scaffold-no-layout-model`（C1） |
+| 异常/错误 | CLI E2E + 路由 | 图片缺失 → exit 1；模型缺失 → 空 envelope 200/exit 0（never 500/panic, R1）；recognizer Err → region 保留为 UnrecognizedV1 + warning（**绝不 drop**, I1）；Stage1 推理 Err → 上浮 warning 而非伪装空页（I1） |
+| 隐私/出网（C2/C3） | `ocr/nontext/vlm_escalate.rs` `#[cfg(test)]` + doctest | VLM 出网类型强制：`VlmEgressToken` 无公开构造器，唯一来源 `gate_vlm_egress`（`compile_fail` doctest 证明无法绕过）；图片级 refuse/allow + 下采样到 `EGRESS_MAX_EDGE`，离开的是缩小副本非原图，读图失败 fail-closed |
+| 属性 (proptest) | `ocr/nontext/...proptest` | cross-validation 不变量：no auto-correct（R5）、total = confirmed+conflicts+discrepancies |
+| 集成 E2E | `attune-cli/tests/cli_recognize_regions_smoke.rs` | subprocess 真跑 `attune recognize-regions` — 插件 dispatch 的契约 |
+| 模型矩阵 failover（I3） | `ocr/nontext/vlm_router.rs` `#[cfg(test)]` | healthy primary 不 failover 且 backup 零调用（failover ≠ fan-out, §8）；primary provider err → 切 backup；probe=false → 跳过未调用 + 仍计入聚合（R2 不掩盖死 primary）；全候选失败 → degrade local 不 panic；空矩阵 degrade；失败率 >30% → suggest-higher-tier hint（§4.5-F 复用 `FAILURE_RATE_ALERT_THRESHOLD`） |
+| agent-invocable 暴露（I5） | `ocr/nontext/vision_capability.rs` `#[cfg(test)]` | `vision.recognize` 返回 typed `VisionRecognizeResult`（`schema_version` + flatten `RecognizePageResult` + `vlm_hint`）；router 聚合 → hint；零行业绑定（ADR-0008/R8） |
+| 回归 | golden set 永久 | 阈值 ratchet 只升不降（≥8 conflict floor） |
+
+### agent-invocable 面（ADR-0008）
+
+`attune recognize-regions <image>` 输出 typed JSON envelope（`regions` + `correction_report` +
+`cost`）到 stdout — 任意插件经 subprocess capability 契约（`CapabilityInvocation`）调用、拿
+通用 `RegionResult`，再叠加行业语义。REST `POST /api/v1/ocr/recognize` + CLI 共用 core 单一
+orchestrator `nontext::recognize_page`（成本/质量/遥测单一调优点）。
+
+**I5 in-process capability（W3 #92）**：`nontext::vision_capability::recognize`（capability id
+`vision.recognize`，`SCHEMA_VERSION=1`）是 ADR-0008 的 agent-invocable 暴露面 —— 插件/agent 直接
+在进程内拿同一份 typed `VisionRecognizeResult`（`RecognizePageResult` + `vlm_hint`），无需 REST
+自调、不重造 agent 框架（复用 `recognize_page` + `VlmRouter`，R9）。
+
+**I3 模型矩阵 failover（W3 #92）**：`nontext::vlm_router::VlmRouter` 把单 `VlmProvider` 升级为
+「优先级候选 + `probe()` 健康探测 + 顺序 failover」。primary 失败（provider err / 不健康）→ 切下
+一候选；全失败 → degrade 纯 local（既有 §7 路径）。failover 是顺序而非并发（一次只付一个候选的
+💰，cost contract §8）；一个 gated `VlmEgressToken` 借用复用给每个候选（不 re-gate，出网不绕过
+`gate_vlm_egress`）。`(kind×model)` 失败率聚合驱动 §4.5-F 的 `vlm_hint`。
+
+### 💰 VLM 路径 — multi-seed + 3-tier 兼容矩阵（ship 前必跑，per §4.5 D + Agent 验证铁律）
+
+VLM 升级路径（Stage4，schema-guided + 重试-验证 ≤3 + telemetry）一旦接真模型，必须：
+- **multi-seed N=3**：评估指标高方差，胜出/SOTA 候选 ≥3 seed 复跑，报 mean ± std。
+- **3-tier 矩阵**：弱本地（qwen2.5-vl:3b）/ 弱云（gemini-1.5-flash）/ 强云（GPT-4o）各 ≥10 case。
+  三 tier F1 差 > 0.15 → RELEASE.md 标最低 tier（`Requires ≥ ...`）；弱模型 < floor → 自动 disable。
+- **精度判据（量化，非主观）**：cell-level F1（table）/ LaTeX edit-distance（formula）/ chart series
+  rel-error。
+- **R3 directive**：任何「极致精度 / F1↑」claim 必须有真 golden 实测 + 对照 baseline + raw log 链接
+  （`reports/runs/<ts>/`），不接受 anecdote / 单 seed 排名。
+
+### 格式安全对抗面（继承自 document-intelligence 矩阵，P0）
+
+非文字识别吃 office/PDF 解包出的图像 → 继承 ZIP/XML 格式对抗维度：office 解压炸弹（zip bomb）/
+路径穿越（zip slip）/ XML 实体膨胀（billion laughs）。这些在上游 ingest 解包层拦截，但 nontext
+入口对超大/畸形图像必须 graceful（OOM 防护 / 尺寸上限 / decode 失败不 panic），不得绕过该防线。
+
+> tokenizer / 模型版本变更触发 reindex 迁移：region schema（`*_v1` tag）演进必须 additive +
+> serde-default，老 vault 的 `regions: None` 永远可读（§10 向后兼容）。
+
+---
+
 ## 附录 A：人工验收清单
 
-某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。
+某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`tests/MANUAL_TEST_CHECKLIST.md`](../tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。
 
 每次 release 前，必须人工跑一遍清单。
 

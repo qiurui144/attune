@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod chat_cost_estimate_tests {
-    use attune_core::cost::{estimate_tokens, estimate_cost_usd, lookup_pricing};
+    use attune_core::cost::{estimate_cost_usd, estimate_tokens, lookup_pricing};
 
     #[test]
     fn cost_estimate_fields_for_cloud_model() {
@@ -12,8 +12,7 @@ mod chat_cost_estimate_tests {
         let response = "根据文档内容，这是一份关于测试的文档。";
         let model = "gpt-4o";
 
-        let tokens_in = estimate_tokens(system_prompt, model)
-            + estimate_tokens(user_msg, model);
+        let tokens_in = estimate_tokens(system_prompt, model) + estimate_tokens(user_msg, model);
         let tokens_out = estimate_tokens(response, model);
 
         assert!(tokens_in > 0, "输入 token 必须 > 0");
@@ -31,7 +30,10 @@ mod chat_cost_estimate_tests {
         let tokens_out = estimate_tokens("测试响应", "qwen2.5:3b");
 
         let cost_usd = estimate_cost_usd(tokens_in, tokens_out, "qwen2.5:3b");
-        assert!(cost_usd.is_none(), "Ollama 本地模型无定价，cost_usd 应为 None");
+        assert!(
+            cost_usd.is_none(),
+            "Ollama 本地模型无定价，cost_usd 应为 None"
+        );
     }
 
     #[test]
@@ -55,11 +57,13 @@ mod chat_cost_estimate_tests {
     fn lookup_pricing_covers_common_cloud_providers() {
         // 确认常见云端模型都有定价，以免 cost_usd 意外返回 None
         // gemini-2.0-flash 尚未入表（定价表覆盖 gemini-1.5-pro）；测 1.5-pro
-        for model in &["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet", "gemini-1.5-pro"] {
-            assert!(
-                lookup_pricing(model).is_some(),
-                "模型 {model} 应有定价"
-            );
+        for model in &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "claude-3-5-sonnet",
+            "gemini-1.5-pro",
+        ] {
+            assert!(lookup_pricing(model).is_some(), "模型 {model} 应有定价");
         }
         // 本地模型不在表中，正常返回 None
         assert!(lookup_pricing("qwen2.5:3b").is_none());
@@ -74,8 +78,8 @@ mod chat_cost_estimate_tests {
         let model_name = "gpt-4o";
         let is_local = false;
 
-        let tokens_in = estimate_tokens(system_prompt, model_name)
-            + estimate_tokens(user_message, model_name);
+        let tokens_in =
+            estimate_tokens(system_prompt, model_name) + estimate_tokens(user_message, model_name);
         let tokens_out = estimate_tokens(response, model_name);
         let cost_usd: Option<f64> = if is_local {
             None
@@ -109,15 +113,15 @@ mod chat_cost_estimate_tests {
         ];
 
         // 按 chat.rs 修复后的逻辑：system + 逐条 history + user
-        let mut tokens_in = estimate_tokens(system_prompt, model)
-            + estimate_tokens(user_message, model);
+        let mut tokens_in =
+            estimate_tokens(system_prompt, model) + estimate_tokens(user_message, model);
         for (_, content) in &history {
             tokens_in += estimate_tokens(content, model);
         }
 
         // 不含 history 的旧逻辑
-        let tokens_in_without_history = estimate_tokens(system_prompt, model)
-            + estimate_tokens(user_message, model);
+        let tokens_in_without_history =
+            estimate_tokens(system_prompt, model) + estimate_tokens(user_message, model);
 
         assert!(
             tokens_in > tokens_in_without_history,

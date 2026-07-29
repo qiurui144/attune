@@ -6,7 +6,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use attune_core::ChatEngine;
 use attune_core::crypto::Key32;
 use attune_core::embed::EmbeddingProvider;
 use attune_core::index::FulltextIndex;
@@ -14,6 +13,7 @@ use attune_core::infer::RerankProvider;
 use attune_core::llm::MockLlmProvider;
 use attune_core::store::Store;
 use attune_core::vectors::VectorIndex;
+use attune_core::ChatEngine;
 
 fn build_engine_with_responses(responses: &[&str]) -> (ChatEngine, Key32) {
     let mock = Arc::new(MockLlmProvider::new("test"));

@@ -124,8 +124,8 @@ fn collect_approved(root: &Path) -> Vec<(PathBuf, GoldenCase)> {
 
 fn load_if_approved(path: &Path) -> Option<GoldenCase> {
     let s = std::fs::read_to_string(path).ok()?;
-    let c: GoldenCase = serde_yaml::from_str(&s)
-        .unwrap_or_else(|e| panic!("yaml parse {}: {e}", path.display()));
+    let c: GoldenCase =
+        serde_yaml::from_str(&s).unwrap_or_else(|e| panic!("yaml parse {}: {e}", path.display()));
     if c.reviewer.approved {
         Some(c)
     } else {
@@ -264,7 +264,11 @@ fn memory_promotion_golden_gate_pass_rate_must_be_one() {
     let mut failures: Vec<String> = Vec::new();
     let mut report = Vec::new();
     for (path, case) in &cases {
-        report.push(format!("[{}] {}", path.file_name().unwrap().to_string_lossy(), case.id));
+        report.push(format!(
+            "[{}] {}",
+            path.file_name().unwrap().to_string_lossy(),
+            case.id
+        ));
         match execute_case(case) {
             Ok(()) => {}
             Err(e) => failures.push(format!("FAIL {}: {e}", case.id)),
@@ -311,11 +315,7 @@ fn memory_consolidation_six_class_floor() {
     let has_sentinel = std::fs::read_dir(golden_root())
         .unwrap()
         .filter_map(|e| e.ok())
-        .any(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .contains("sentinel")
-        });
+        .any(|e| e.file_name().to_string_lossy().contains("sentinel"));
     if main_cases < 11 {
         violations.push(format!(
             "Golden floor: ≥ 10 real + 1 sentinel = 11; got {}",
@@ -343,8 +343,7 @@ fn memory_consolidation_six_class_floor() {
 
     // 4: Boundary — `#[test] fn boundary_*` count in src/memory/consolidation_agent.rs.
     let boundary_count = count_test_arms(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/memory/consolidation_agent.rs"),
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/memory/consolidation_agent.rs"),
         "boundary_",
     );
     if boundary_count < 5 {
@@ -409,7 +408,9 @@ fn count_yaml(dir: &Path) -> usize {
 
 fn count_proptest_arms(path: &Path) -> usize {
     let src = std::fs::read_to_string(path).unwrap_or_default();
-    src.lines().filter(|l| l.trim_start().starts_with("fn prop_")).count()
+    src.lines()
+        .filter(|l| l.trim_start().starts_with("fn prop_"))
+        .count()
 }
 
 fn count_test_arms(path: &Path, prefix: &str) -> usize {

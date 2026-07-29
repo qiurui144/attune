@@ -1,9 +1,16 @@
 // npu-vault/crates/vault-core/src/infer/mod.rs
 
+pub mod accel;
+pub mod bootstrap_status;
+pub mod catalog;
+#[cfg(feature = "local-inference")]
 pub mod embedding;
+pub mod model_source;
 pub mod model_store;
+#[cfg(feature = "local-inference")]
 pub mod provider;
 pub mod reranker;
+pub mod stack_installer;
 
 use crate::error::Result;
 
@@ -20,7 +27,9 @@ pub struct MockRerankProvider {
 
 impl MockRerankProvider {
     pub fn new(scores: Vec<f32>) -> Self {
-        Self { scores: std::sync::Mutex::new(scores) }
+        Self {
+            scores: std::sync::Mutex::new(scores),
+        }
     }
 }
 

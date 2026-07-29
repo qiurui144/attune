@@ -37,14 +37,18 @@ impl RawItem {
                     .ok()
                     .or_else(|| {
                         // 新版：ClassificationResult 格式。读取 user_tags（如果有）或降级为空
-                        serde_json::from_slice::<serde_json::Value>(&plain).ok().map(|v| {
-                            v.get("user_tags")
-                                .and_then(|t| t.as_array())
-                                .map(|arr| arr.iter()
-                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                                    .collect())
-                                .unwrap_or_default()
-                        })
+                        serde_json::from_slice::<serde_json::Value>(&plain)
+                            .ok()
+                            .map(|v| {
+                                v.get("user_tags")
+                                    .and_then(|t| t.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            })
                     });
                 parsed
             }
@@ -81,6 +85,7 @@ pub struct DecryptedItem {
 pub struct ItemSummary {
     pub id: String,
     pub title: String,
+    pub url: Option<String>,
     pub source_type: String,
     pub domain: Option<String>,
     pub created_at: String,
@@ -128,6 +133,29 @@ pub struct BoundDirRow {
     pub last_scan: Option<String>,
 }
 
+impl BoundDirRow {
+    pub fn file_type_list(&self) -> Vec<String> {
+        if let Ok(values) = serde_json::from_str::<Vec<String>>(&self.file_types) {
+            return normalize_file_types(values);
+        }
+        normalize_file_types(
+            self.file_types
+                .split(',')
+                .map(|s| s.trim_matches(|c| matches!(c, '[' | ']' | '"' | '\'' | ' ')))
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+}
+
+fn normalize_file_types(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHistoryRow {
     pub id: i64,
@@ -143,6 +171,16 @@ pub struct IndexedFileRow {
     pub path: String,
     pub file_hash: String,
     pub item_id: Option<String>,
+    pub stat: Option<IndexedFileStatMarker>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexedFileStatMarker {
+    pub size: i64,
+    pub mtime_ns: i64,
+    pub ctime_ns: Option<i64>,
+    pub inode: Option<i64>,
+    pub dev: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,11 +296,11 @@ pub struct ProjectTimelineEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRow {
     pub id: String,
-    pub kind: String,            // 'episodic' (L2) / 'semantic' (L3)
-    pub window_start: i64,       // unix epoch 秒
+    pub kind: String,      // 'episodic' (L2) / 'semantic' (L3)
+    pub window_start: i64, // unix epoch 秒
     pub window_end: i64,
-    pub source_chunk_hashes: Vec<String>,  // 升序
-    pub summary: String,         // 已解密
+    pub source_chunk_hashes: Vec<String>, // 升序
+    pub summary: String,                  // 已解密
     pub model: String,
     pub created_at: i64,
     /// 语义层去重键（L3）；episodic 行为 None。

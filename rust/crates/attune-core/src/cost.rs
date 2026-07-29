@@ -64,19 +64,40 @@ pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
     let m = model.to_ascii_lowercase();
     // mini 必须在 4o 之前判断（gpt-4o-mini 也以 gpt-4o 开头）
     if m.starts_with("gpt-4o-mini") {
-        Some(ModelPricing { input_per_1k_usd: 0.000_150, output_per_1k_usd: 0.000_600 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.000_150,
+            output_per_1k_usd: 0.000_600,
+        })
     } else if m.starts_with("gpt-4o") {
-        Some(ModelPricing { input_per_1k_usd: 0.002_500, output_per_1k_usd: 0.010_000 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.002_500,
+            output_per_1k_usd: 0.010_000,
+        })
     } else if m.starts_with("claude-3-5-sonnet") || m.starts_with("claude-3.5-sonnet") {
-        Some(ModelPricing { input_per_1k_usd: 0.003_000, output_per_1k_usd: 0.015_000 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.003_000,
+            output_per_1k_usd: 0.015_000,
+        })
     } else if m.starts_with("claude-3-opus") {
-        Some(ModelPricing { input_per_1k_usd: 0.015_000, output_per_1k_usd: 0.075_000 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.015_000,
+            output_per_1k_usd: 0.075_000,
+        })
     } else if m.starts_with("gemini-1.5-pro") {
-        Some(ModelPricing { input_per_1k_usd: 0.001_250, output_per_1k_usd: 0.005_000 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.001_250,
+            output_per_1k_usd: 0.005_000,
+        })
     } else if m.starts_with("deepseek-chat") {
-        Some(ModelPricing { input_per_1k_usd: 0.000_140, output_per_1k_usd: 0.000_280 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.000_140,
+            output_per_1k_usd: 0.000_280,
+        })
     } else if m.starts_with("qwen-max") {
-        Some(ModelPricing { input_per_1k_usd: 0.002_500, output_per_1k_usd: 0.005_000 })
+        Some(ModelPricing {
+            input_per_1k_usd: 0.002_500,
+            output_per_1k_usd: 0.005_000,
+        })
     } else {
         None
     }
@@ -225,9 +246,17 @@ mod tests {
     // Output 比 input 价高 (per business model — chat 应 disincentivize long output)
     #[test]
     fn lookup_pricing_output_higher_than_input() {
-        for m in ["gpt-4o", "claude-3-5-sonnet", "claude-3-opus", "gemini-1.5-pro"] {
+        for m in [
+            "gpt-4o",
+            "claude-3-5-sonnet",
+            "claude-3-opus",
+            "gemini-1.5-pro",
+        ] {
             let p = lookup_pricing(m).unwrap();
-            assert!(p.output_per_1k_usd > p.input_per_1k_usd, "{m} output >= input");
+            assert!(
+                p.output_per_1k_usd > p.input_per_1k_usd,
+                "{m} output >= input"
+            );
         }
     }
 
@@ -269,8 +298,8 @@ mod tests {
     #[test]
     fn estimate_tokens_model_family_differs() {
         let text = "这是一段比较长的中文测试文本用于验证模型系数差异";
-        let n_gpt = estimate_tokens(text, "gpt-4o");      // 0.50 coef
-        let n_qwen = estimate_tokens(text, "qwen-max");   // 0.40 coef
+        let n_gpt = estimate_tokens(text, "gpt-4o"); // 0.50 coef
+        let n_qwen = estimate_tokens(text, "qwen-max"); // 0.40 coef
         assert!(n_gpt > n_qwen, "gpt 系数更高 → token 更多");
     }
 

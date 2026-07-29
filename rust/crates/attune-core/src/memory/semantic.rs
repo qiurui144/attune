@@ -96,8 +96,7 @@ pub fn prepare_semantic_cycle(
         if indices.len() < MIN_MEMS_PER_TOPIC {
             continue;
         }
-        let mut member_ids: Vec<String> =
-            indices.iter().map(|&i| embedded[i].id.clone()).collect();
+        let mut member_ids: Vec<String> = indices.iter().map(|&i| embedded[i].id.clone()).collect();
         member_ids.sort();
         let topic_key = topic_key_of(&member_ids);
 
@@ -305,7 +304,13 @@ mod tests {
     }
 
     /// Seed N episodic memories whose summaries all share a topic word, return ids.
-    fn seed_topic(store: &Store, dek: &Key32, prefix: &str, topic_word: &str, n: usize) -> Vec<String> {
+    fn seed_topic(
+        store: &Store,
+        dek: &Key32,
+        prefix: &str,
+        topic_word: &str,
+        n: usize,
+    ) -> Vec<String> {
         let mut ids = Vec::new();
         for i in 0..n {
             let hash = format!("{prefix}-{i}");
@@ -334,7 +339,11 @@ mod tests {
         ids
     }
 
-    fn embed_summaries(store: &Store, dek: &Key32, emb: &dyn EmbeddingProvider) -> HashMap<String, Vec<f32>> {
+    fn embed_summaries(
+        store: &Store,
+        dek: &Key32,
+        emb: &dyn EmbeddingProvider,
+    ) -> HashMap<String, Vec<f32>> {
         let mut map = HashMap::new();
         for m in store.list_live_memories(dek, "episodic", false).unwrap() {
             let v = emb.embed(&[m.summary.as_str()]).unwrap().0.pop().unwrap();
@@ -350,7 +359,9 @@ mod tests {
         seed_topic(&store, &dek, "t", "Rust", 2);
         let emb = MockEmbeddingProvider::new(64);
         let embs = embed_summaries(&store, &dek, &emb);
-        assert!(prepare_semantic_cycle(&store, &dek, &embs).unwrap().is_none());
+        assert!(prepare_semantic_cycle(&store, &dek, &embs)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -366,7 +377,9 @@ mod tests {
         // hdbscan 至少识别出 1 个 ≥4 成员的主题簇
         assert!(clusters.is_some(), "expected at least one topic cluster");
         let clusters = clusters.unwrap();
-        assert!(clusters.iter().all(|c| c.member_ids.len() >= MIN_MEMS_PER_TOPIC));
+        assert!(clusters
+            .iter()
+            .all(|c| c.member_ids.len() >= MIN_MEMS_PER_TOPIC));
     }
 
     #[test]
@@ -378,13 +391,19 @@ mod tests {
         let embs = embed_summaries(&store, &dek, &emb);
         let clusters = prepare_semantic_cycle(&store, &dek, &embs).unwrap();
         let Some(clusters) = clusters else { return };
-        let summaries: Vec<Option<String>> =
-            clusters.iter().map(|_| Some("standing summary".into())).collect();
-        let (r1, _) = apply_semantic_result(&store, &dek, &clusters, &summaries, "m", 1000).unwrap();
+        let summaries: Vec<Option<String>> = clusters
+            .iter()
+            .map(|_| Some("standing summary".into()))
+            .collect();
+        let (r1, _) =
+            apply_semantic_result(&store, &dek, &clusters, &summaries, "m", 1000).unwrap();
         assert!(r1.inserted >= 1);
         // 第二次跑：相同 membership → topic_key 命中，prepare 应排除
         let c2 = prepare_semantic_cycle(&store, &dek, &embs).unwrap();
-        assert!(c2.is_none(), "already-built topic must be excluded on rerun");
+        assert!(
+            c2.is_none(),
+            "already-built topic must be excluded on rerun"
+        );
     }
 
     #[test]
@@ -434,7 +453,8 @@ mod tests {
     fn apply_rejects_length_mismatch() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        let err = apply_semantic_result(&store, &dek, &[], &[Some("x".into())], "m", 0).unwrap_err();
+        let err =
+            apply_semantic_result(&store, &dek, &[], &[Some("x".into())], "m", 0).unwrap_err();
         assert!(matches!(err, VaultError::InvalidInput(_)));
     }
 
@@ -444,7 +464,16 @@ mod tests {
         let dek = Key32::generate();
         // 老 semantic：成员 {m1, m2}
         let (old_id, _) = store
-            .insert_semantic_memory(&dek, "old-k", &["m1".into(), "m2".into()], "old", "m", 0, 100, 1000)
+            .insert_semantic_memory(
+                &dek,
+                "old-k",
+                &["m1".into(), "m2".into()],
+                "old",
+                "m",
+                0,
+                100,
+                1000,
+            )
             .unwrap();
         // 新 cluster：成员 {m1, m2, m3} ⊃ 老成员 → 应 supersede 老行
         let cluster = SemanticCluster {
@@ -456,7 +485,12 @@ mod tests {
             supersedes: vec![old_id.clone()],
         };
         let (r, _) = apply_semantic_result(
-            &store, &dek, &[cluster], &[Some("refreshed".into())], "m", 2000,
+            &store,
+            &dek,
+            &[cluster],
+            &[Some("refreshed".into())],
+            "m",
+            2000,
         )
         .unwrap();
         assert_eq!(r.inserted, 1);

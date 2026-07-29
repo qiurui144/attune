@@ -48,7 +48,7 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
 - **🔒 三层隐私模型 (Phase A.5)**
   - L0: 文件级 🔒，永不出网（强制本地 LLM）
   - L1: 12 类格式化 PII 自动脱敏 + 出网审计 + CSV 导出（默认）
-  - L3: LLM 语义脱敏（K3 一体机 / 高端硬件）
+  - L3: LLM 语义脱敏（edge scheduler / 高端硬件）
 
 - **🌐 跨域污染防御 (F-Pro)**
   - corpus_domain 字段 + 领域前缀注入 + cross-domain penalty
@@ -74,7 +74,7 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
   <a class="product-card" href="architecture/">
     <span style="font-size:2rem">🏗️</span>
     <h3>架构</h3>
-    <p>双产品线（Python 原型 + Rust 商用）+ 检索栈解析</p>
+    <p>Rust 生产架构 + 检索栈解析</p>
   </a>
   <a class="product-card" href="privacy/">
     <span style="font-size:2rem">🔒</span>
@@ -101,7 +101,7 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
 ## 资源
 
 - 源代码：[github.com/qiurui144/attune](https://github.com/qiurui144/attune)
-- 下载 v1.0.0：[GitHub Releases](https://github.com/qiurui144/attune/releases/tag/v1.0.0) (Linux deb/AppImage + Windows MSI)
+- 下载当前稳定版：[GitHub Releases](https://github.com/qiurui144/attune/releases/latest) (Linux deb/AppImage + Windows NSIS/MSI)
 - 中文 README：[README.zh-CN.md](https://github.com/qiurui144/attune/blob/develop/README.zh-CN.md)
 - Benchmark 详情：[docs/benchmarks/](https://github.com/qiurui144/attune/blob/develop/docs/benchmarks/)
 - Reliability framework：[docs/superpowers/specs/](https://github.com/qiurui144/attune/blob/develop/docs/superpowers/specs/)

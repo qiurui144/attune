@@ -1,0 +1,25 @@
+{
+  "schema_version": "attune.eval.scenario.v1",
+  "scenario_id": "airplane_operation_guidance",
+  "domain": "aviation",
+  "scenario_type": "operation_guidance",
+  "difficulty": "hard",
+  "corpus_id": "airplane_manuals",
+  "turns": [
+    {
+      "turn_id": "manual_grounded_guidance",
+      "message": "只基于已入库航空手册，说明如何定位 A320 QRH 中的异常处置资料，并引用来源。",
+      "answer_mode": "grounded_steps_with_safety_boundary",
+      "requires_citations": true,
+      "expected_sources": ["airbus-a320-qrh-qrh320"],
+      "must_include": ["A320", "QRH", "异常", "引用"],
+      "must_not_include": ["实际飞行决策", "无需查手册", "未引用"],
+      "latency_budget_ms": 60000
+    }
+  ],
+  "scheduler": {
+    "expected_task": "kb.query.ask",
+    "allow_async": true,
+    "require_local_scheduler_metadata": true
+  }
+}

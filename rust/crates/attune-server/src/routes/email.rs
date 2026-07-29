@@ -130,12 +130,7 @@ pub async fn bind_email(
     let dir_cloned = dir_id.clone();
     let domain_cloned = corpus_domain.clone();
     let stats = tokio::task::spawn_blocking(move || {
-        crate::ingest_email::sync_email_account(
-            &state_cloned,
-            &dir_cloned,
-            config,
-            &domain_cloned,
-        )
+        crate::ingest_email::sync_email_account(&state_cloned, &dir_cloned, config, &domain_cloned)
     })
     .await
     .map_err(|e| AppError::Internal(format!("email sync task join: {e}")))?
@@ -188,12 +183,7 @@ pub async fn sync_email_account_now(
     let state_cloned = state.clone();
     let dir_cloned = dir_id.clone();
     let stats = tokio::task::spawn_blocking(move || {
-        crate::ingest_email::sync_email_account(
-            &state_cloned,
-            &dir_cloned,
-            config,
-            &corpus_domain,
-        )
+        crate::ingest_email::sync_email_account(&state_cloned, &dir_cloned, config, &corpus_domain)
     })
     .await
     .map_err(|e| AppError::Internal(format!("email sync task join: {e}")))?

@@ -216,7 +216,11 @@ impl FeedbackController {
     /// **stateful** — a [`TuningAction::DisableWithAlert`] only fires once the
     /// streak reaches `consecutive_periods` (R7), and any non-breaching period
     /// resets the streak.
-    pub fn observe(&mut self, reg: &AgentRegistry, rows: &[AgentModelHealth]) -> Vec<TuningDecision> {
+    pub fn observe(
+        &mut self,
+        reg: &AgentRegistry,
+        rows: &[AgentModelHealth],
+    ) -> Vec<TuningDecision> {
         rows.iter()
             .map(|row| {
                 let key = streak_key(&row.agent_id, &row.model);
@@ -325,10 +329,7 @@ impl FeedbackController {
     /// point). The telemetry fail-rate is one channel; `skill_evolution` is
     /// another — the controller is source-agnostic and simply collects them.
     pub fn aggregate_signals(&self, sources: &[&dyn FeedbackSource]) -> Vec<FeedbackSignal> {
-        sources
-            .iter()
-            .flat_map(|s| s.collect_signals())
-            .collect()
+        sources.iter().flat_map(|s| s.collect_signals()).collect()
     }
 }
 
@@ -454,23 +455,24 @@ pub fn render_tune(decisions: &[TuningDecision], auto_escalate: bool) -> String 
         .filter(|d| !matches!(d.action, TuningAction::NoOp) || d.red_line_protected)
         .collect();
     if actionable.is_empty() {
-        out.push_str("  No tuning actions — all agents healthy (no rows above the 30% alert threshold).\n");
+        out.push_str(
+            "  No tuning actions — all agents healthy (no rows above the 30% alert threshold).\n",
+        );
         return out;
     }
     for d in &actionable {
         let (verb, detail) = match &d.action {
-            TuningAction::EscalateModelTier { from, to } => {
-                ("escalate", format!("{from} → {to}"))
-            }
+            TuningAction::EscalateModelTier { from, to } => ("escalate", format!("{from} → {to}")),
             TuningAction::InjectFewShot { examples, .. } => {
                 ("inject-few-shot", format!("+{examples} examples"))
             }
-            TuningAction::DisableWithAlert { reason, .. } => {
-                ("disable+alert", reason.clone())
-            }
+            TuningAction::DisableWithAlert { reason, .. } => ("disable+alert", reason.clone()),
             TuningAction::NoOp => {
                 if d.red_line_protected {
-                    ("noop", "red-line protected (deterministic) — never tuned".to_string())
+                    (
+                        "noop",
+                        "red-line protected (deterministic) — never tuned".to_string(),
+                    )
                 } else {
                     ("noop", String::new())
                 }

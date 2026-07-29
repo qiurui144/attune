@@ -1,3 +1,6 @@
 /target/
 # Tauri 自动生成的 schema（每次 build 重生成）
 /gen/schemas/
+# SenseVoice native libs staged by build.rs from the cargo target dir (per-platform,
+# regenerated every build — must NOT be committed).
+/resources/lib/

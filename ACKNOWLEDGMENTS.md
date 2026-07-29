@@ -81,7 +81,7 @@ For full software-license attribution of dependencies, see `Cargo.lock` (Rust) a
 |---------|--------|---------------|
 | **K1 Sleeptime evolution agent** | [letta-ai/letta](https://github.com/letta-ai/letta) (Apache-2.0) — "sleeptime agent" pattern; [noahshinn/reflexion](https://github.com/noahshinn/reflexion) (MIT) — verbal feedback long-term buffer | Primary chat agent never blocks for memory compaction; a separate background agent runs cross-session reflection |
 | **K2 Parse Golden Set** | [Readwise Reader](https://blog.readwise.io/the-next-chapter-of-reader-public-beta/) (commercial, design only) | 200-page parsing benchmark methodology; CI regression < 95% accuracy blocks release |
-| **K3 AGENTS.md compatibility** | [continuedev/continue](https://github.com/continuedev/continue) (Apache-2.0) — `.continue/checks/*.md` + `create_rule_block`; [PatrickJS/awesome-cursorrules](https://github.com/PatrickJS/awesome-cursorrules) (MIT) | Plugin SDK reads attune `plugin.yaml` AND community `AGENTS.md` / `.continue/rules/*.md` — zero-cost ecosystem onboarding |
+| **local scheduler AGENTS.md compatibility** | [continuedev/continue](https://github.com/continuedev/continue) (Apache-2.0) — `.continue/checks/*.md` + `create_rule_block`; [PatrickJS/awesome-cursorrules](https://github.com/PatrickJS/awesome-cursorrules) (MIT) | Plugin SDK reads attune `plugin.yaml` AND community `AGENTS.md` / `.continue/rules/*.md` — zero-cost ecosystem onboarding |
 | **K4 CRDT multi-device sync** | [anytype-io/any-sync](https://github.com/anytype-io/any-sync) (MIT for the protocol; Anytype client uses Anytype Tech License) | AnySync architecture as reference for v0.7+ exploration — not yet committed |
 | **K5 Items Key revocation** | [standardnotes/app](https://github.com/standardnotes/app) (AGPL-3.0) — 004 spec hierarchical key model | Master key encrypts items keys, items key encrypts data; per-Project / per-Note independent keys enable selective cloud-backup revocation |
 
@@ -99,6 +99,24 @@ For full software-license attribution of dependencies, see `Cargo.lock` (Rust) a
 |--------|---------------|
 | [langchain-ai/langgraph](https://github.com/langchain-ai/langgraph) (MIT) | E2 plugin SDK: StateGraph + Node/Edge + checkpointing concepts (we keep our own minimal implementation, not a langgraph dependency) |
 | [All-Hands-AI/OpenHands](https://github.com/All-Hands-AI/OpenHands) (MIT) | E1 marketplace YAML schema for plugin manifests |
+
+---
+
+## Bundled / Fetched Model Weights
+
+Attune fetches a small set of base model weights at first run (and mirrors them on its own
+download CDN for reliable cold-start). Each is redistributed under a license that permits it,
+with attribution retained per that license:
+
+| Model (role) | Author / source | License | Attribution note |
+|--------------|-----------------|---------|------------------|
+| **SenseVoice** (default ASR) | Alibaba **FunAudioLLM** (FunASR); ONNX repackage by [csukuangfj/sherpa-onnx](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17) | [FunASR Model License v1.1](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE) (permits copy + share; requires source/author + model-name attribution) | "SenseVoice" model name retained; © Alibaba Group |
+| Whisper GGML (ASR fallback) | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp); OpenAI Whisper weights | MIT | — |
+| bge-m3 / bge-reranker-base (embedding / rerank) | BAAI; ONNX by [Xenova](https://huggingface.co/Xenova) | MIT | — |
+| PP-OCRv4 / v5 + mobile cls (OCR) | PaddlePaddle PP-OCR; packaged by [SWHL/RapidOCR](https://huggingface.co/SWHL/RapidOCR) | Apache-2.0 | — |
+
+DirectML runtime (Windows GPU EP) ships via the OS-provided redistributable; no proprietary
+NPU runtime (e.g. AMD VitisAI / Ryzen AI) is bundled or redistributed (see RELEASE.md Known Limitations).
 
 ---
 

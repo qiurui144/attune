@@ -25,7 +25,12 @@ impl Store {
         Ok(id)
     }
 
-    pub fn list_conversations(&self, dek: &Key32, limit: usize, offset: usize) -> Result<Vec<ConversationSummary>> {
+    pub fn list_conversations(
+        &self,
+        dek: &Key32,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ConversationSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, created_at, updated_at FROM conversations
              ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
@@ -44,12 +49,21 @@ impl Store {
             let (id, enc_title, created_at, updated_at) = row.map_err(VaultError::Database)?;
             let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?)
                 .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
-            results.push(ConversationSummary { id, title, created_at, updated_at });
+            results.push(ConversationSummary {
+                id,
+                title,
+                created_at,
+                updated_at,
+            });
         }
         Ok(results)
     }
 
-    pub fn get_conversation_messages(&self, dek: &Key32, conv_id: &str) -> Result<Vec<ConvMessage>> {
+    pub fn get_conversation_messages(
+        &self,
+        dek: &Key32,
+        conv_id: &str,
+    ) -> Result<Vec<ConvMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, content, citations, created_at
              FROM conversation_messages
@@ -68,13 +82,20 @@ impl Store {
         })?;
         let mut results = Vec::new();
         for row in rows {
-            let (id, role, enc_content, citations_json, created_at) = row.map_err(VaultError::Database)?;
+            let (id, role, enc_content, citations_json, created_at) =
+                row.map_err(VaultError::Database)?;
             let content = String::from_utf8(crypto::decrypt(dek, &enc_content)?)
                 .map_err(|e| VaultError::Crypto(format!("conversation message utf8: {e}")))?;
             let citations: Vec<Citation> = citations_json
                 .and_then(|j| serde_json::from_str::<Vec<Citation>>(&j).ok())
                 .unwrap_or_default();
-            results.push(ConvMessage { id, role, content, citations, created_at });
+            results.push(ConvMessage {
+                id,
+                role,
+                content,
+                citations,
+                created_at,
+            });
         }
         Ok(results)
     }
@@ -93,8 +114,7 @@ impl Store {
         let citations_json: Option<String> = if citations.is_empty() {
             None
         } else {
-            Some(serde_json::to_string(citations)
-                .map_err(VaultError::Json)?)
+            Some(serde_json::to_string(citations).map_err(VaultError::Json)?)
         };
         self.conn.execute(
             "INSERT INTO conversation_messages (id, conversation_id, role, content, citations, created_at)
@@ -157,30 +177,43 @@ impl Store {
 
     pub fn delete_conversation(&self, conv_id: &str) -> Result<()> {
         // CASCADE 会自动删 conversation_messages
-        self.conn.execute("DELETE FROM conversations WHERE id = ?1", params![conv_id])?;
+        self.conn
+            .execute("DELETE FROM conversations WHERE id = ?1", params![conv_id])?;
         Ok(())
     }
 
-    pub fn get_conversation_by_id(&self, dek: &Key32, conv_id: &str) -> Result<Option<ConversationSummary>> {
+    pub fn get_conversation_by_id(
+        &self,
+        dek: &Key32,
+        conv_id: &str,
+    ) -> Result<Option<ConversationSummary>> {
         use rusqlite::OptionalExtension;
-        let row = self.conn
+        let row = self
+            .conn
             .query_row(
                 "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?1",
                 params![conv_id],
-                |row| Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                )),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .optional()
             .map_err(VaultError::Database)?;
         match row {
             Some((id, enc_title, created_at, updated_at)) => {
                 let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?)
-                .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
-                Ok(Some(ConversationSummary { id, title, created_at, updated_at }))
+                    .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
+                Ok(Some(ConversationSummary {
+                    id,
+                    title,
+                    created_at,
+                    updated_at,
+                }))
             }
             None => Ok(None),
         }

@@ -1,0 +1,21 @@
+id: 12-extractive-label-from-titles
+description: GenericStrategy tier-2 extractive 命名取簇内标题高频词 → 命名包含共享词 (命名质量回归)
+min_cluster_size: 5
+items:
+  - { id: a1, lobe: 0, title: budget quarterly summary }
+  - { id: a2, lobe: 0, title: budget quarterly review }
+  - { id: a3, lobe: 0, title: budget quarterly plan }
+  - { id: a4, lobe: 0, title: budget quarterly draft }
+  - { id: a5, lobe: 0, title: budget quarterly final }
+  - { id: b1, lobe: 4, title: travel expense january }
+  - { id: b2, lobe: 4, title: travel expense february }
+  - { id: b3, lobe: 4, title: travel expense march }
+  - { id: b4, lobe: 4, title: travel expense april }
+  - { id: b5, lobe: 4, title: travel expense may }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0
+  label_any_contains: ["budget", "quarterly", "travel", "expense"]

@@ -55,7 +55,8 @@ pub fn summarize_document_set(
         joined.push_str(text);
         joined.push_str("\n\n");
     }
-    let system = "你是多文档汇总助手. 请综合所有输入文档, 用 300-500 字总结核心要点 + 文档间的关联. \
+    let system =
+        "你是多文档汇总助手. 请综合所有输入文档, 用 300-500 字总结核心要点 + 文档间的关联. \
 不要添加原文之外的信息, 不做主观判断.";
     summarize_with_prompt(llm, &joined, system)
 }
@@ -68,11 +69,7 @@ mod tests {
     /// Mock LLM: 直接拼接 system + user 返回, 用于测试 summarize 不依赖真 LLM.
     struct MockLlm;
     impl LlmProvider for MockLlm {
-        fn chat(
-            &self,
-            system: &str,
-            user: &str,
-        ) -> Result<(String, crate::usage::TokenUsage)> {
+        fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
             Ok((
                 format!(
                     "[MOCK] sys.len={}, user.len={}, head={:?}",
@@ -83,8 +80,12 @@ mod tests {
                 crate::usage::TokenUsage::empty("mock", "mock"),
             ))
         }
-        fn is_available(&self) -> bool { true }
-        fn model_name(&self) -> &str { "mock" }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
     }
 
     #[test]

@@ -6,9 +6,7 @@ use tempfile::TempDir;
 
 use crate::store::Store;
 use crate::usage::aggregator::UsageAggregator;
-use crate::usage::types::{
-    CacheOutcome, CallOutcome, TokenUsage, UsageEvent, UsageKind,
-};
+use crate::usage::types::{CacheOutcome, CallOutcome, TokenUsage, UsageEvent, UsageKind};
 
 fn make_store() -> (TempDir, Arc<Mutex<Store>>) {
     let dir = TempDir::new().unwrap();
@@ -41,7 +39,11 @@ async fn flush_now_persists_buffered_events() {
     agg.flush_now().await;
     assert_eq!(agg.buffer_len(), 0, "buffer drained after flush");
 
-    let summary = store.lock().unwrap().usage_summary(0, 9_999_999_999_999).unwrap();
+    let summary = store
+        .lock()
+        .unwrap()
+        .usage_summary(0, 9_999_999_999_999)
+        .unwrap();
     assert_eq!(summary.events, 2);
 }
 
@@ -50,7 +52,11 @@ async fn flush_now_on_empty_buffer_is_noop() {
     let (_dir, store) = make_store();
     let agg = UsageAggregator::new(store.clone(), 100, 50);
     agg.flush_now().await;
-    let summary = store.lock().unwrap().usage_summary(0, 9_999_999_999_999).unwrap();
+    let summary = store
+        .lock()
+        .unwrap()
+        .usage_summary(0, 9_999_999_999_999)
+        .unwrap();
     assert_eq!(summary.events, 0);
 }
 
@@ -100,7 +106,11 @@ async fn recent_only_sees_buffered_events() {
     // After flush, the event is in SQL but no longer in the ring buffer.
     assert_eq!(agg.recent(10).len(), 0);
     // The store does still hold it.
-    let summary = store.lock().unwrap().usage_summary(0, 9_999_999_999_999).unwrap();
+    let summary = store
+        .lock()
+        .unwrap()
+        .usage_summary(0, 9_999_999_999_999)
+        .unwrap();
     assert_eq!(summary.events, 1);
 }
 

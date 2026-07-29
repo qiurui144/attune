@@ -4,11 +4,13 @@ import type { JSX } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button, EmptyState } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { t } from '../i18n';
-import { items, drawerContent } from '../store/signals';
+import { items, drawerContent, currentView } from '../store/signals';
 import type { Item } from '../store/signals';
 import { loadItems, deleteItem } from '../hooks/useItems';
 import { toast } from '../components/Toast';
+import { useFilePicker } from '../hooks/useFilePicker';
 
 /** 把后端 source_type 字段 (web/file/note/chat/upload) 翻译为用户友好标签. */
 function sourceLabel(st: string): string {
@@ -54,7 +56,8 @@ export function ItemsView(): JSX.Element {
           actions={[
             {
               label: t('items.empty.bind_folder'),
-              onClick: () => toast('info', t('items.empty.bind_folder_toast')),
+              // 真导航到 Remote 视图（本地 / WebDAV / Git 目录绑定 UI），不再只弹提示
+              onClick: () => (currentView.value = 'remote'),
               variant: 'primary',
             },
           ]}
@@ -152,13 +155,24 @@ export function ItemsView(): JSX.Element {
 function ItemsHeader(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploading = useSignal(false);
+  const { isDesktop, picking, pickFiles } = useFilePicker();
+  // 上传进度：100MB 大文件按文件串行处理，无反馈时用户会以为卡死。
+  // progress 显示 当前/总数 + 当前文件名，让用户确认仍在进行。
+  const progressDone = useSignal(0);
+  const progressTotal = useSignal(0);
+  const progressName = useSignal('');
 
   const onUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (uploading.value) return; // 并发防护：上传进行中忽略新触发
+    const list = Array.from(files);
     uploading.value = true;
+    progressTotal.value = list.length;
+    progressDone.value = 0;
     let successCount = 0;
     let failCount = 0;
-    for (const file of Array.from(files)) {
+    for (const file of list) {
+      progressName.value = file.name;
       const form = new FormData();
       form.append('file', file);
       try {
@@ -177,8 +191,10 @@ function ItemsHeader(): JSX.Element {
       } catch {
         failCount++;
       }
+      progressDone.value += 1;
     }
     uploading.value = false;
+    progressName.value = '';
     if (successCount > 0) {
       toast('success', t('items.upload.success', { count: successCount }));
       void loadItems(100, 0);
@@ -199,29 +215,90 @@ function ItemsHeader(): JSX.Element {
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
         {`📄 ${t('sidebar.nav.items')}`}
       </h2>
-      <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
-          style={{ display: 'none' }}
-          onChange={(e) => void onUpload((e.target as HTMLInputElement).files)}
-        />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+        {uploading.value && (
+          <span
+            role="status"
+            aria-live="polite"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              fontSize: 'var(--text-xs)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            <span className="spinner" aria-hidden="true" />
+            {progressName.value
+              ? t('items.upload.progress_file', {
+                  name: progressName.value,
+                  done: progressDone.value + 1,
+                  total: progressTotal.value,
+                })
+              : t('items.upload.progress', {
+                  done: progressDone.value,
+                  total: progressTotal.value,
+                })}
+          </span>
+        )}
+        {isDesktop ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={picking.value}
+            disabled={uploading.value}
+            onClick={async () => {
+              const { paths, files } = await pickFiles({
+                multiple: true,
+                accept: '.pdf,.md,.txt,.docx,.png,.jpg,.jpeg',
+                title: t('items.upload.button'),
+              });
+              if (files.length > 0) {
+                const dt = new DataTransfer();
+                for (const f of files) dt.items.add(f);
+                await onUpload(dt.files);
+              } else if (paths.length > 0) {
+                toast('error', t('picker.toast.read_failed'));
+              }
+            }}
+          >
+            {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
+          </Button>
+        ) : (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
+              style={{ display: 'none' }}
+              onChange={(e) => void onUpload((e.target as HTMLInputElement).files)}
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={uploading.value}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
+            </Button>
+          </>
+        )}
         <Button
           variant="secondary"
           size="sm"
           disabled={uploading.value}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
           onClick={() => void loadItems(100, 0)}
         >
           {t('items.refresh')}
+        </Button>
+        {/* OrganizeWizard 只在 Projects 里可达 — 在 Items 给一个发现入口,引导到项目页整理 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => (currentView.value = 'projects')}
+        >
+          {`🗂 ${t('items.organize')}`}
         </Button>
       </div>
     </header>
@@ -254,7 +331,7 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
         aria-hidden="true"
         style={{
           padding: '2px 8px',
-          fontSize: 10,
+          fontSize: 'var(--text-xs)',
           background: 'var(--color-bg)',
           border: '1px solid var(--color-border)',
           borderRadius: 'var(--radius-sm)',
@@ -300,34 +377,27 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
       >
         {formatDate(it.created_at)}
       </time>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-label={t('items.delete.aria')}
         onClick={(e) => {
           e.stopPropagation();
-          if (confirm(t('items.delete.confirm', { title: it.title || t('items.untitled') }))) {
-            void deleteItem(it.id).then((ok) => {
-              if (ok) toast('success', t('items.delete.success'));
+          void confirmDialog({
+            title: t('confirm.title.deleteItem'),
+            message: t('items.delete.confirm', { title: it.title || t('items.untitled') }),
+            danger: true,
+          }).then((ok) => {
+            if (!ok) return;
+            return deleteItem(it.id).then((deleted) => {
+              if (deleted) toast('success', t('items.delete.success'));
               else toast('error', t('items.delete.fail'));
             });
-          }
+          });
         }}
-        aria-label="Delete"
-        style={{
-          background: 'transparent',
-          border: 'none',
-          color: 'var(--color-text-secondary)',
-          cursor: 'pointer',
-          fontSize: 'var(--text-base)',
-          padding: '4px 6px',
-          borderRadius: 'var(--radius-sm)',
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-error)')}
-        onMouseLeave={(e) =>
-          (e.currentTarget.style.color = 'var(--color-text-secondary)')
-        }
       >
         ×
-      </button>
+      </Button>
     </div>
   );
 }

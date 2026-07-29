@@ -1,0 +1,152 @@
+{
+  "contract_version": "edge-scheduler-contract-v2",
+  "schema_versions": {
+    "benchmark_contract": "benchmark_contract.v2",
+    "models": "models.v2",
+    "capacity": "capacity.v2",
+    "jobs": "jobs.v2",
+    "job_status": "job_status.v2",
+    "kb_task": "kb_task.v1",
+    "kb_task_admit": "kb_task_admit.v2"
+  },
+  "revision": 4827,
+  "queue_order": ["resource_key", "priority_desc", "deadline_ms_asc"],
+  "request_fields": ["inputs", "timeout_ms", "context_tokens", "max_output_tokens"],
+  "endpoints": {
+    "kb_task": "POST /kb/tasks/{task}",
+    "job_status": "GET /jobs/{id}"
+  },
+  "application_api": {
+    "ready": "GET /ready",
+    "ready_hot": "GET /ready?hot=1",
+    "health": "GET /health",
+    "kb_task": "POST /kb/tasks/{task}",
+    "kb_task_async": "POST /kb/tasks/{task}:async",
+    "job_status": "GET /jobs/{job_id}",
+    "job_cancel": "POST /jobs/{job_id}:cancel"
+  },
+  "runtime_tasks": [
+    {
+      "name": "kb.query.ask",
+      "stage": "query_rag_flow",
+      "model": "llm-summary",
+      "service_class": "realtime_answer",
+      "description": "Application-facing bounded KB answer flow",
+      "async_only": true,
+      "avoid_cold_start": true,
+      "timeout_ms": 120000,
+      "deadline_ms": 15000,
+      "context_tokens": 4096,
+      "max_output_tokens": 128,
+      "ttl_ms": 900000
+    },
+    {
+      "name": "kb.query.vlm_extract",
+      "stage": "query_vlm",
+      "model": "vlm",
+      "service_class": "realtime_vlm_compact",
+      "description": "Compact document-image extraction",
+      "async_only": false,
+      "avoid_cold_start": true,
+      "timeout_ms": 120000,
+      "deadline_ms": 20000,
+      "context_tokens": 2048,
+      "max_output_tokens": 256,
+      "ttl_ms": 0
+    }
+  ],
+  "service_classes": [
+    {"name": "realtime_answer", "priority": 96, "infer_allowed": true, "sync_allowed": true},
+    {"name": "long_context", "priority": 30, "infer_allowed": true, "sync_allowed": false}
+  ],
+  "models": [
+    {
+      "name": "llm-summary",
+      "primary_device": "cpu.vector",
+      "fallback_devices": [],
+      "resource_key": "answer.cpu.vector",
+      "worker_kind": "llama_http",
+      "exclusive": true,
+      "queue_capacity": 32,
+      "worker_threads": 1,
+      "dram_gb": 2.5,
+      "service_class": "realtime_answer",
+      "priority": 96,
+      "estimated_runtime_ms": 15000,
+      "deadline_ms": 20000,
+      "sync_allowed": true,
+      "async_required_above_ms": 0,
+      "max_context_tokens_sync": 4096,
+      "max_context_tokens_async": 8192,
+      "max_output_tokens_sync": 256,
+      "max_output_tokens_async": 1024,
+      "quality_profile": null,
+      "backend_profile": {"runtime": "scheduler-worker", "requires_no_think": true}
+    },
+    {
+      "name": "llm-chat",
+      "primary_device": "cpu.vector",
+      "fallback_devices": [],
+      "resource_key": "answer.cpu.vector",
+      "worker_kind": "llama_http",
+      "exclusive": true,
+      "queue_capacity": 4,
+      "worker_threads": 1,
+      "dram_gb": 18.0,
+      "service_class": "realtime_answer",
+      "priority": 80,
+      "estimated_runtime_ms": 1100,
+      "deadline_ms": 30000,
+      "sync_allowed": true,
+      "async_required_above_ms": 20000,
+      "max_context_tokens_sync": 4096,
+      "max_context_tokens_async": 8192,
+      "max_output_tokens_sync": 256,
+      "max_output_tokens_async": 1024,
+      "quality_profile": "qwen3-30b-a3b-q4_0",
+      "backend_profile": {"runtime": "scheduler-worker", "requires_no_think": true}
+    },
+    {
+      "name": "vlm",
+      "primary_device": "cpu.vector",
+      "fallback_devices": [],
+      "resource_key": "vision.cpu.vector",
+      "worker_kind": "llama_http",
+      "exclusive": true,
+      "queue_capacity": 4,
+      "worker_threads": 1,
+      "dram_gb": 5.5,
+      "service_class": "realtime_vlm_compact",
+      "priority": 65,
+      "estimated_runtime_ms": 11000,
+      "deadline_ms": 20000,
+      "sync_allowed": true,
+      "async_required_above_ms": 0,
+      "max_context_tokens_sync": 2048,
+      "max_context_tokens_async": 4096,
+      "max_output_tokens_sync": 256,
+      "max_output_tokens_async": 1024,
+      "quality_profile": {"benchmark": "vlm_document_extraction", "field_accuracy": 1.0},
+      "backend_profile": {"runtime": "scheduler-worker", "media_backend": "native"}
+    }
+  ],
+  "async_jobs": {
+    "max_active_jobs": 256,
+    "active": 2,
+    "done_retained": 4,
+    "canceled_retained": 1,
+    "expired_retained": 0
+  },
+  "metrics": ["edge_resource_context_tokens", "edge_resource_async_jobs", "local_scheduler_context_tokens"],
+  "errors": {"async_required": 409, "oversize": 422, "rate_limited": 429},
+  "prompt_cache": {
+    "policy": "prefix_stable_v1",
+    "metadata_fields": ["prompt_cache_key", "cache_hit", "timings.prompt_ms", "timings.predicted_ms"]
+  },
+  "refusal_policy": {
+    "name": "scheduler_refusal_v1",
+    "no_evidence": true,
+    "safety": true
+  },
+  "notes": ["cold-start samples must be bucketed by startup_state"]
+}

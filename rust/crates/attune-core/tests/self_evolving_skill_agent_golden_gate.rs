@@ -121,8 +121,8 @@ fn collect_approved(root: &Path) -> Vec<(PathBuf, GoldenCase)> {
 
 fn load_if_approved(path: &Path) -> Option<GoldenCase> {
     let s = std::fs::read_to_string(path).ok()?;
-    let c: GoldenCase = serde_yaml::from_str(&s)
-        .unwrap_or_else(|e| panic!("yaml parse {}: {e}", path.display()));
+    let c: GoldenCase =
+        serde_yaml::from_str(&s).unwrap_or_else(|e| panic!("yaml parse {}: {e}", path.display()));
     if c.reviewer.approved {
         Some(c)
     } else {
@@ -163,8 +163,8 @@ fn execute_case(case: &GoldenCase) -> Result<(), String> {
     // Fixed reference time for reproducibility (2026-05-19T12:00:00Z).
     const NOW_SECS: i64 = 1_779_624_000;
 
-    let buckets_opt = prepare_run(&store, &cfg, NOW_SECS)
-        .map_err(|e| format!("prepare_run: {e}"))?;
+    let buckets_opt =
+        prepare_run(&store, &cfg, NOW_SECS).map_err(|e| format!("prepare_run: {e}"))?;
     let buckets = buckets_opt.unwrap_or_default();
 
     // Sanity: buckets_count assertion.
@@ -181,8 +181,8 @@ fn execute_case(case: &GoldenCase) -> Result<(), String> {
 
     let records = generate_records(&buckets, None, &cfg);
 
-    let stats = apply_records(&store, &buckets, &records)
-        .map_err(|e| format!("apply_records: {e}"))?;
+    let stats =
+        apply_records(&store, &buckets, &records).map_err(|e| format!("apply_records: {e}"))?;
 
     if let Some(want) = case.expected.exact_rows_written {
         if stats.rows_written != want {
@@ -365,8 +365,12 @@ fn six_class_coverage_floor_enforced() {
 fn agent_persists_to_skill_expansions_after_run() {
     let store = Store::open_memory().unwrap();
     for _ in 0..3 {
-        store.record_skill_signal("rust ownership", 0, false).unwrap();
-        store.record_skill_signal("rust borrow checker", 0, false).unwrap();
+        store
+            .record_skill_signal("rust ownership", 0, false)
+            .unwrap();
+        store
+            .record_skill_signal("rust borrow checker", 0, false)
+            .unwrap();
     }
     let cfg = SkillAgentConfig {
         window_days: 0,

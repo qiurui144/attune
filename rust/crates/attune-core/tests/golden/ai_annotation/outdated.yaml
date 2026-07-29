@@ -1,0 +1,89 @@
+# Holdout corpus for ai_annotation_outdated — human-authored GT.
+# Targets are spans that are (as of the model's knowledge) plausibly outdated:
+# EOL'd tech, superseded versions, past time points, renamed products.
+# Precision controls assert no finding on a note with no dated/outdated claim.
+angle: outdated
+cases:
+  - id: outdated-01-python2
+    text: |
+      项目入门文档建议安装 Python 2.7 并使用 print 语句的写法，团队脚本都基于 Python 2 编写。
+    targets:
+      - "Python 2.7"
+      - "Python 2"
+
+  - id: outdated-02-flash
+    text: |
+      网站首页的动画交互使用 Adobe Flash Player 制作，建议浏览器装好 Flash 插件以获得完整体验。
+    targets:
+      - "Adobe Flash Player"
+      - "Flash 插件"
+
+  - id: outdated-03-ie6
+    text: |
+      兼容性测试需覆盖 Internet Explorer 6，确保在 IE6 下布局不错乱。
+    targets:
+      - "Internet Explorer 6"
+      - "IE6"
+
+  - id: outdated-04-angularjs
+    text: |
+      前端框架选型选定 AngularJS 1.x，团队按其双向绑定写法组织代码。
+    targets:
+      - "AngularJS 1.x"
+
+  - id: outdated-05-past-date
+    text: |
+      计划在 2019 年底之前完成系统上线，赶在春节前发布第一个版本。
+    targets:
+      - "2019 年底之前"
+
+  - id: outdated-06-centos
+    text: |
+      服务器统一安装 CentOS 8 作为生产操作系统，按其默认 yum 源拉取软件包。
+    targets:
+      - "CentOS 8"
+
+  - id: outdated-07-bower
+    text: |
+      前端依赖使用 Bower 管理，通过 bower install 拉取第三方库。
+    targets:
+      - "Bower"
+      - "bower install"
+
+  - id: outdated-08-jquery-mobile
+    text: |
+      移动端页面采用 jQuery Mobile 框架搭建触屏交互界面。
+    targets:
+      - "jQuery Mobile"
+
+  - id: outdated-09-windows7
+    text: |
+      客户端最低支持 Windows 7，安装包仍打包了针对 Windows 7 的兼容运行库。
+    targets:
+      - "Windows 7"
+
+  - id: outdated-10-node8
+    text: |
+      构建环境固定使用 Node.js 8 LTS，CI 镜像基于 node:8 制作。
+    targets:
+      - "Node.js 8"
+      - "node:8"
+
+  - id: outdated-11-phantomjs
+    text: |
+      端到端测试用 PhantomJS 作为无头浏览器跑自动化脚本。
+    targets:
+      - "PhantomJS"
+
+  # ── precision controls (no outdated claim) ──
+  - id: outdated-12-benign-empty
+    text: |
+      勾股定理指出直角三角形两条直角边的平方和等于斜边的平方，这是平面几何里最基础的关系之一。
+    targets: []
+    expect_empty: true
+
+  - id: outdated-13-benign-empty
+    text: |
+      煮一杯手冲咖啡的关键是控制水温在九十度左右，并让水流缓慢均匀地浸润咖啡粉，分段注水能让萃取更均衡。
+    targets: []
+    expect_empty: true

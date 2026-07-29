@@ -13,7 +13,10 @@ fn attune_cmd() -> Command {
 }
 
 fn workspace_file(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join(name)
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(name)
 }
 
 /// S4b: OSS agent_flows.toml is intentionally empty — industry flows
@@ -41,7 +44,14 @@ fn agent_flow_list_shows_empty_oss_flowset_exit_zero() {
 fn agent_flow_run_unknown_industry_flow_exits_nonzero() {
     // legal_defamation is now an attune-pro flow; OSS must reject it gracefully.
     attune_cmd()
-        .args(["agent", "flow", "run", "legal_defamation", "--paid", "--flows"])
+        .args([
+            "agent",
+            "flow",
+            "run",
+            "legal_defamation",
+            "--paid",
+            "--flows",
+        ])
         .arg(workspace_file("agent_flows.toml"))
         .arg("--registry")
         .arg(workspace_file("agents.registry.toml"))
@@ -55,7 +65,14 @@ fn agent_flow_run_unknown_industry_flow_exits_nonzero() {
 fn agent_flow_run_quota_zero_unknown_industry_flow_exits_nonzero() {
     attune_cmd()
         .args([
-            "agent", "flow", "run", "legal_defamation", "--paid", "--cloud-quota", "0", "--flows",
+            "agent",
+            "flow",
+            "run",
+            "legal_defamation",
+            "--paid",
+            "--cloud-quota",
+            "0",
+            "--flows",
         ])
         .arg(workspace_file("agent_flows.toml"))
         .arg("--registry")

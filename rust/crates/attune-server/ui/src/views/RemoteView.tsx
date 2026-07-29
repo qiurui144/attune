@@ -3,7 +3,8 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState, Modal, Input } from '../components';
+import { Button, EmptyState, Modal, Input, Skeleton, AccountsPanel, BrowserLoginPanel } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import {
@@ -13,6 +14,7 @@ import {
   bindGit,
   unbindDir,
 } from '../hooks/useRemote';
+import { useFilePicker } from '../hooks/useFilePicker';
 import type { BoundDir } from '../hooks/useRemote';
 import {
   listEmailAccounts,
@@ -38,7 +40,7 @@ export function RemoteView(): JSX.Element {
   }, []);
 
   async function handleUnbind(d: BoundDir) {
-    if (!confirm(t('remote.confirm.unbind', { path: d.path }))) return;
+    if (!(await confirmDialog({ title: t('confirm.title.unbindFolder'), message: t('remote.confirm.unbind', { path: d.path }), danger: true }))) return;
     const ok = await unbindDir(d.id);
     if (ok) {
       toast('success', t('remote.toast.unbind_success'));
@@ -82,7 +84,14 @@ export function RemoteView(): JSX.Element {
       </header>
 
       {loading.value ? (
-        <div style={{ color: 'var(--color-text-secondary)' }}>{t('common.loading')}</div>
+        <div
+          role="status"
+          aria-label={t('common.loading')}
+          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}
+        >
+          <Skeleton height={56} />
+          <Skeleton height={56} />
+        </div>
       ) : dirs.value.length === 0 ? (
         <EmptyState
           icon="🔗"
@@ -158,6 +167,12 @@ export function RemoteView(): JSX.Element {
       </Modal>
 
       <EmailSection />
+
+      {/* 第三方账号统一管理(波 C):连接 WebDAV/IMAP/RSS/Git/其它源凭据。ConnectSource 建议卡点击落到此处。 */}
+      <AccountsPanel />
+
+      {/* 浏览器登入协助(GAP-A):连接登录墙后的源,人在回路捕获会话入保险柜。 */}
+      <BrowserLoginPanel />
     </div>
   );
 }
@@ -222,25 +237,16 @@ function LocalForm({
 }): JSX.Element {
   const path = useSignal('');
   const submitting = useSignal(false);
-  const picking = useSignal(false);
-  // Tauri 桌面壳里才有原生目录选择器；浏览器调试模式回退到手填路径。
-  const canPickFolder = typeof window !== 'undefined'
-    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  const { isDesktop: canPickFolder, picking, pickDirectory } = useFilePicker();
 
   async function browse() {
     if (!canPickFolder) {
       toast('warning', t('settings.folder.desktop_only'));
       return;
     }
-    picking.value = true;
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ directory: true, multiple: false, title: t('settings.folder.pick_title') });
-      if (typeof selected === 'string') path.value = selected;
-    } catch (e) {
-      toast('error', e instanceof Error ? e.message : t('settings.folder.add_fail'));
-    } finally {
-      picking.value = false;
+    const paths = await pickDirectory({ multiple: false, title: t('settings.folder.pick_title') });
+    if (paths.length > 0) {
+      path.value = paths[0];
     }
   }
 
@@ -318,7 +324,7 @@ function WebdavForm({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
       <Input
-        label="WebDAV URL"
+        label={t('remote.webdav.url')}
         value={url.value}
         onInput={(e) => (url.value = e.currentTarget.value)}
         placeholder="https://nextcloud.example.com/remote.php/dav/files/user"
@@ -472,7 +478,7 @@ function EmailSection(): JSX.Element {
   }
 
   async function handleDelete(a: EmailAccount) {
-    if (!confirm(t('email.confirm.delete', { username: a.username }))) return;
+    if (!(await confirmDialog({ title: t('confirm.title.deleteEmail'), message: t('email.confirm.delete', { username: a.username }), danger: true }))) return;
     const ok = await deleteEmailAccount(a.dir_id);
     if (ok) {
       toast('success', t('email.toast.delete_success'));

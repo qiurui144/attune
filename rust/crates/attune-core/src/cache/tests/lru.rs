@@ -33,7 +33,10 @@ async fn lru_eviction_when_over_cap() {
     c.put(CacheScope::Llm, "a", mkval(b"a"), None).await;
     c.put(CacheScope::Llm, "b", mkval(b"b"), None).await;
     c.put(CacheScope::Llm, "c", mkval(b"c"), None).await; // evicts "a" (LRU)
-    assert!(c.get(CacheScope::Llm, "a").await.is_none(), "a should be evicted");
+    assert!(
+        c.get(CacheScope::Llm, "a").await.is_none(),
+        "a should be evicted"
+    );
     assert!(c.get(CacheScope::Llm, "b").await.is_some());
     assert!(c.get(CacheScope::Llm, "c").await.is_some());
 }
@@ -46,8 +49,14 @@ async fn recent_access_protects_from_eviction() {
     // Touch "a" so it becomes most recent; "b" is now LRU.
     let _ = c.get(CacheScope::Llm, "a").await;
     c.put(CacheScope::Llm, "c", mkval(b"c"), None).await; // should evict "b"
-    assert!(c.get(CacheScope::Llm, "a").await.is_some(), "a should survive — was touched");
-    assert!(c.get(CacheScope::Llm, "b").await.is_none(), "b should be evicted — LRU");
+    assert!(
+        c.get(CacheScope::Llm, "a").await.is_some(),
+        "a should survive — was touched"
+    );
+    assert!(
+        c.get(CacheScope::Llm, "b").await.is_none(),
+        "b should be evicted — LRU"
+    );
     assert!(c.get(CacheScope::Llm, "c").await.is_some());
 }
 
@@ -101,8 +110,10 @@ async fn put_replaces_existing_key() {
 #[tokio::test]
 async fn scopes_do_not_share_namespace() {
     let c = MemoryLruCache::new(10);
-    c.put(CacheScope::Llm, "shared-key", mkval(b"llm-value"), None).await;
-    c.put(CacheScope::Embed, "shared-key", mkval(b"embed-value"), None).await;
+    c.put(CacheScope::Llm, "shared-key", mkval(b"llm-value"), None)
+        .await;
+    c.put(CacheScope::Embed, "shared-key", mkval(b"embed-value"), None)
+        .await;
     let llm_v = c.get(CacheScope::Llm, "shared-key").await.unwrap();
     let embed_v = c.get(CacheScope::Embed, "shared-key").await.unwrap();
     assert_eq!(llm_v.bytes, b"llm-value");

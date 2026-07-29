@@ -13,6 +13,9 @@
 //! - **offline graceful** — GitHub query 失败时返当前版本 + `latest_available: null`,不 panic
 //! - **semver compare** 判 breaking change(major bump)
 
+use crate::state::SharedState;
+use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -31,11 +34,28 @@ pub struct VersionInfo {
     pub upgrade_available: Option<bool>,
     /// release page URL,user click 直跳。
     pub upgrade_url: Option<String>,
+    /// Latest release notes URL. Usually the same page as `upgrade_url`, kept as
+    /// a separate field so UI can expose "what changed" even when already on
+    /// latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_notes_url: Option<String>,
+    /// Latest release title from GitHub, metadata-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_title: Option<String>,
+    /// Latest release publish timestamp from GitHub, metadata-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_published_at: Option<String>,
     /// 是否为 breaking change(semver major bump)。
     /// `Some(true)` 提示走 docs/UPGRADING.md。
     pub breaking_changes: Option<bool>,
     /// 是否支持 rollback(v1.0.1+ 内置 `attune rollback` CLI 后恒 `true`)。
     pub rollback_supported: bool,
+    /// R1.1b: `Some("disabled-by-privacy-settings")` when the GitHub update
+    /// check was refused by the outbound gate (privacy `telemetry` toggle off,
+    /// the default). Omitted (`None`) on normal responses — additive field,
+    /// existing clients unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check: Option<String>,
 }
 
 /// 简单内存 cache(6h TTL),无需 ETag 持久化 — server restart 时重新 fetch 即可。
@@ -44,14 +64,44 @@ struct VersionCache {
     fetched_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct LatestRelease {
+    tag_name: String,
+    html_url: Option<String>,
+    name: Option<String>,
+    published_at: Option<String>,
+}
+
 static CACHE: OnceLock<Mutex<Option<VersionCache>>> = OnceLock::new();
 
 const CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
 const GH_API_URL: &str = "https://api.github.com/repos/qiurui144/attune/releases/latest";
 
 /// Public endpoint handler — `GET /api/v1/version`.
-pub async fn get_version() -> Json<VersionInfo> {
+pub async fn get_version(State(state): State<SharedState>) -> Json<VersionInfo> {
     let current = env!("CARGO_PKG_VERSION").to_string();
+
+    // R1.1b: the GitHub release lookup is a network egress and MUST pass the
+    // OutboundGate like every other outbound point. Destination class:
+    // `Telemetry` — the request carries zero vault/user data (metadata-only GET
+    // to api.github.com) and must work pre-unlock, exactly the telemetry
+    // contract (gate skips the vault-locked check for Telemetry). It therefore
+    // honors `settings.privacy.telemetry` and fails closed (all 5 egress points
+    // default off) until the user opts in. On refusal we degrade gracefully:
+    // current version only + `update_check: disabled`, no network touched.
+    let telemetry_enabled =
+        crate::routes::privacy::outbound_enabled(&state, OutboundKind::Telemetry.as_str());
+    let policy = OutboundPolicy {
+        kind: OutboundKind::Telemetry,
+        enabled: telemetry_enabled,
+        vault_unlocked: false, // ignored for Telemetry (no vault data on the wire)
+        redactor: None,        // empty payload → no redactor needed
+        local_destination: false,
+        contains_l0: false,
+    };
+    if OutboundGate::enforce(&policy, "").is_err() {
+        return Json(update_check_disabled_info(&current));
+    }
 
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().await;
@@ -76,20 +126,27 @@ pub async fn get_version() -> Json<VersionInfo> {
 /// Fetch latest release from GitHub, gracefully fall back to current-only on any error.
 async fn fetch_with_fallback(current: &str) -> VersionInfo {
     match fetch_latest_from_github().await {
-        Ok(latest_tag) => {
-            let normalized = normalize_tag(&latest_tag);
+        Ok(release) => {
+            let normalized = normalize_tag(&release.tag_name);
             let upgrade = is_upgrade_available(current, &normalized);
             let breaking = upgrade.then(|| is_major_bump(current, &normalized));
+            let release_url = release.html_url.unwrap_or_else(|| {
+                format!(
+                    "https://github.com/qiurui144/attune/releases/tag/v{}",
+                    normalized
+                )
+            });
             VersionInfo {
                 current: current.to_string(),
                 latest_available: Some(normalized.clone()),
                 upgrade_available: Some(upgrade),
-                upgrade_url: Some(format!(
-                    "https://github.com/qiurui144/attune/releases/tag/v{}",
-                    normalized
-                )),
+                upgrade_url: Some(release_url.clone()),
+                release_notes_url: Some(release_url),
+                latest_title: release.name,
+                latest_published_at: release.published_at,
                 breaking_changes: breaking,
                 rollback_supported: true,
+                update_check: None,
             }
         }
         Err(_) => VersionInfo {
@@ -97,14 +154,36 @@ async fn fetch_with_fallback(current: &str) -> VersionInfo {
             latest_available: None,
             upgrade_available: None,
             upgrade_url: None,
+            release_notes_url: None,
+            latest_title: None,
+            latest_published_at: None,
             breaking_changes: None,
             rollback_supported: true,
+            update_check: None,
         },
     }
 }
 
+/// R1.1b graceful refusal shape — same as the offline fallback, plus an explicit
+/// `update_check` marker so the UI can tell "check disabled by privacy settings"
+/// apart from "GitHub unreachable".
+fn update_check_disabled_info(current: &str) -> VersionInfo {
+    VersionInfo {
+        current: current.to_string(),
+        latest_available: None,
+        upgrade_available: None,
+        upgrade_url: None,
+        release_notes_url: None,
+        latest_title: None,
+        latest_published_at: None,
+        breaking_changes: None,
+        rollback_supported: true,
+        update_check: Some("disabled-by-privacy-settings".to_string()),
+    }
+}
+
 /// GitHub API call. Returns tag like "v1.0.1" or "desktop-v1.0.1".
-async fn fetch_latest_from_github() -> Result<String, reqwest::Error> {
+async fn fetch_latest_from_github() -> Result<LatestRelease, reqwest::Error> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent(concat!("attune-server/", env!("CARGO_PKG_VERSION")))
@@ -118,12 +197,26 @@ async fn fetch_latest_from_github() -> Result<String, reqwest::Error> {
         .error_for_status()?;
 
     let body: serde_json::Value = resp.json().await?;
-    let tag = body
+    let tag_name = body
         .get("tag_name")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    Ok(tag)
+    Ok(LatestRelease {
+        tag_name,
+        html_url: body
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        name: body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        published_at: body
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
 }
 
 /// Strip "v" / "desktop-v" prefix → "1.0.1" / "1.0.1-rc.1".
@@ -217,13 +310,37 @@ mod tests {
             latest_available: Some("1.0.1".into()),
             upgrade_available: Some(true),
             upgrade_url: Some("https://github.com/qiurui144/attune/releases/tag/v1.0.1".into()),
+            release_notes_url: Some(
+                "https://github.com/qiurui144/attune/releases/tag/v1.0.1".into(),
+            ),
+            latest_title: Some("v1.0.1".into()),
+            latest_published_at: Some("2026-01-01T00:00:00Z".into()),
             breaking_changes: Some(false),
             rollback_supported: true,
+            update_check: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"current\":\"1.0.0\""));
         assert!(json.contains("\"upgrade_available\":true"));
         assert!(json.contains("\"rollback_supported\":true"));
+        // additive field omitted when None — existing clients see the old shape
+        assert!(!json.contains("update_check"));
+    }
+
+    #[test]
+    fn update_check_disabled_shape() {
+        // R1.1b: gate refusal → current-only + explicit disabled marker, no panic.
+        let info = update_check_disabled_info("1.2.0");
+        assert_eq!(info.current, "1.2.0");
+        assert!(info.latest_available.is_none());
+        assert!(info.upgrade_available.is_none());
+        assert!(info.rollback_supported);
+        assert_eq!(
+            info.update_check.as_deref(),
+            Some("disabled-by-privacy-settings")
+        );
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"update_check\":\"disabled-by-privacy-settings\""));
     }
 
     #[tokio::test]

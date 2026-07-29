@@ -100,7 +100,10 @@ pub fn detect_phone(text: &str) -> Vec<(usize, usize)> {
 }
 
 pub fn detect_email(text: &str) -> Vec<(usize, usize)> {
-    re_email().find_iter(text).map(|m| (m.start(), m.end())).collect()
+    re_email()
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect()
 }
 
 pub fn detect_ipv4(text: &str) -> Vec<(usize, usize)> {
@@ -173,15 +176,24 @@ pub fn detect_api_key(text: &str) -> Vec<(usize, usize)> {
 }
 
 pub fn detect_url(text: &str) -> Vec<(usize, usize)> {
-    re_url().find_iter(text).map(|m| (m.start(), m.end())).collect()
+    re_url()
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect()
 }
 
 pub fn detect_mac(text: &str) -> Vec<(usize, usize)> {
-    re_mac().find_iter(text).map(|m| (m.start(), m.end())).collect()
+    re_mac()
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect()
 }
 
 pub fn detect_plate_number(text: &str) -> Vec<(usize, usize)> {
-    re_plate().find_iter(text).map(|m| (m.start(), m.end())).collect()
+    re_plate()
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect()
 }
 
 pub fn detect_gps(text: &str) -> Vec<(usize, usize)> {
@@ -221,7 +233,10 @@ fn is_sandwiched_by<F: Fn(char) -> bool>(text: &str, start: usize, end: usize, p
     let prev_is = if start == 0 {
         false
     } else {
-        bytes.get(start - 1).map(|&b| pred(b as char)).unwrap_or(false)
+        bytes
+            .get(start - 1)
+            .map(|&b| pred(b as char))
+            .unwrap_or(false)
     };
     let next_is = bytes.get(end).map(|&b| pred(b as char)).unwrap_or(false);
     prev_is || next_is
@@ -270,7 +285,10 @@ mod tests {
     #[test]
     fn phone_inside_longer_digits_rejected() {
         let v = extract("01138123456789", detect_phone);
-        assert!(v.is_empty(), "phone should not match inside longer digit run");
+        assert!(
+            v.is_empty(),
+            "phone should not match inside longer digit run"
+        );
     }
 
     #[test]

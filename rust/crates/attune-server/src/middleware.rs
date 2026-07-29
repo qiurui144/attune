@@ -1,10 +1,30 @@
+use crate::state::SharedState;
+use attune_core::vault::VaultState;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use crate::state::SharedState;
-use attune_core::vault::VaultState;
+
+#[allow(clippy::result_large_err)] // Middleware returns Axum Response directly as the existing error contract.
+fn lock_vault_for_request<'a>(
+    state: &'a SharedState,
+    path: &str,
+) -> Result<std::sync::MutexGuard<'a, attune_core::vault::Vault>, Response> {
+    if path == crate::routes::tts::TTS_ROUTE {
+        return match state.vault.try_lock() {
+            Ok(vault) => Ok(vault),
+            Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                Err(crate::routes::tts::settings_busy_error().into_response())
+            }
+        };
+    }
+    Ok(state
+        .vault
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()))
+}
 
 /// Redact the value of a specific query-string key so it does not appear in access logs.
 ///
@@ -48,6 +68,26 @@ fn request_has_any_eval_header(request: &Request<axum::body::Body>) -> bool {
     EVAL_HEADERS.iter().any(|h| headers.contains_key(*h))
 }
 
+/// Reconcile server member runtime with the CLI/server shared session file
+/// before an API handler can consume account-bound providers or entitlements.
+pub async fn member_session_coherence_guard(
+    State(state): State<SharedState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    // Scheduler-backed TTS consumes neither member entitlements nor a cloud
+    // account provider. Skipping this reconciliation also prevents its
+    // blocking vault read from sitting ahead of the TTS-specific fail-fast
+    // lock path while a slow OCR scan owns the vault mutex.
+    if path != crate::routes::tts::TTS_ROUTE
+        && (path.starts_with("/api/v1/") || path == "/mcp" || path.starts_with("/mcp/"))
+    {
+        let _ = crate::routes::member::reconcile_member_session_epoch(&state).await;
+    }
+    next.run(request).await
+}
+
 /// Vault guard: 未 UNLOCKED 时返回 403
 pub async fn vault_guard(
     State(state): State<SharedState>,
@@ -84,6 +124,54 @@ pub async fn vault_guard(
         || path == "/api/v1/privacy/status"
         // /privacy/wipe-cloud-session 同理:用户主动清云端 footprint 不应被 vault lock 阻塞
         || path == "/api/v1/privacy/wipe-cloud-session"
+        // /api/v1/documents/* — document-intelligence (compare/summarize/chapters). Inline-text
+        // ops + the chapters `list` free-preview + the member-gate (403 membership-required for
+        // unpaid) must all work WITHOUT an unlocked vault: the handler enforces `vault-locked`
+        // itself only when a request carries an `item_id` that needs the DEK
+        // (routes/documents.rs::resolve_doc). Bypassing here lets the stronger member-gate run
+        // and keeps zero-cost text ops usable pre-unlock (mirrors the chat/search eval bypass).
+        || path.starts_with("/api/v1/documents")
+        // /api/v1/writing/* — writing-engine (draft / rewrite / outline / cite / synthesis /
+        // terms / templates). Same rationale as documents: inline ops + the member-gate
+        // (403 membership-required for unpaid on the 💰 generation endpoints) and the zero-LLM
+        // endpoints (cite / terms / templates / reverse-outline) must work WITHOUT an unlocked
+        // vault; the handler enforces `vault-locked` itself only when a request carries `item_ids`
+        // that need the DEK (routes/writing.rs::load_sources). Bypassing here lets the stronger
+        // member-gate + privacy-gate run pre-unlock.
+        || path.starts_with("/api/v1/writing")
+        // /api/v1/export — artifact export renders client-supplied IR to a
+        // downloadable file. It never touches the vault DEK (no stored data is
+        // read), so it must work pre-unlock just like writing/documents.
+        || path.starts_with("/api/v1/export")
+        // /api/v1/doc-privacy/* — classify text + dry-run the export egress gate.
+        // Pure regex+dictionary scan (no LLM, no vault DEK), so the UI can warn
+        // about a confidential / PII-bearing download before unlock, mirroring
+        // /export which it gates. export-preview reads optional pro keywords from
+        // settings best-effort (lock-tolerant).
+        || path.starts_with("/api/v1/doc-privacy")
+        // memory import: the handler itself rejects sealed/locked vaults with a
+        // user-actionable 400 `vault-not-ready` ("先建库并解锁") instead of the
+        // guard's generic 403; bypass here so that more specific guidance reaches
+        // the client (the handler still requires Unlocked before touching the DEK).
+        || path == "/api/v1/memory/import"
+        // G3① locked-mode ingest staging: /api/v1/upload must reach its handler even
+        // when the vault is LOCKED so the upload can be encrypted into the staging area
+        // (drained on unlock) instead of being lost to a 403. The handler itself decides:
+        // UNLOCKED → normal ingest (needs DEK); LOCKED → stage. (bearer_auth_guard still
+        // applies independently when require_auth is on — locked ≠ unauthenticated.)
+        // (/api/v1/vault/staging-status is already covered by the /api/v1/vault prefix
+        //  bypass above; it counts staging files with no DEK, usable while LOCKED.)
+        || path == "/api/v1/upload"
+        // /mcp + /mcp/sse — G1 原生 MCP transport. 走 scoped-token 自有认证
+        // (mcp::transport::authenticate → vault.verify_scoped_token), 不走 vault session.
+        // 必须 bypass vault_guard: vault locked 时 MCP 应返回干净的 JSON-RPC unauthorized
+        // (verify_scoped_token → Locked → unauthorized), 而非 guard 的通用 403。
+        || path == "/mcp"
+        || path.starts_with("/mcp/")
+        // /api/v1/diagnostics/* — Capability Registry projection (P0 ②). Read-only
+        // capability metadata (install/enable/health/tier), no DEK, no vault content
+        // read — usable pre-unlock so the diagnostics center renders on the lock screen.
+        || path.starts_with("/api/v1/diagnostics")
     {
         return next.run(request).await;
     }
@@ -100,28 +188,34 @@ pub async fn vault_guard(
     // Restricted to `/api/v1/chat` / `/api/v1/search*` so we don't widen the
     // bypass surface for unrelated routes (items / files / ingest still
     // require an unlocked vault even if a bench-style header is forwarded).
-    if (path == "/api/v1/chat"
-        || path.starts_with("/api/v1/search"))
+    if (path == "/api/v1/chat" || path.starts_with("/api/v1/search"))
         && request_has_any_eval_header(&request)
     {
         return next.run(request).await;
     }
 
-    let vault_state = state.vault.lock().unwrap_or_else(|e| e.into_inner()).state();
+    let vault_state = match lock_vault_for_request(&state, path) {
+        Ok(vault) => vault.state(),
+        Err(response) => return response,
+    };
     match vault_state {
         VaultState::Unlocked => next.run(request).await,
-        VaultState::Locked => {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        VaultState::Locked => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
                 "error": "vault is locked",
                 "hint": "POST /api/v1/vault/unlock to unlock"
-            }))).into_response()
-        }
-        VaultState::Sealed => {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            })),
+        )
+            .into_response(),
+        VaultState::Sealed => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
                 "error": "vault is sealed",
                 "hint": "POST /api/v1/vault/setup to initialize"
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -146,7 +240,11 @@ pub async fn access_log(
 
     // 抓 member_state 快照 (要 release lock 才能调 next)
     let (member_kind, account_id) = {
-        let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let m = state
+            .member_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let kind = match &m {
             attune_core::member_session::MemberState::LoggedOut => "logged_out",
             attune_core::member_session::MemberState::Free { .. } => "free",
@@ -211,6 +309,16 @@ pub async fn bearer_auth_guard(
     ];
     let is_always_auth = ALWAYS_AUTH_ENDPOINTS.iter().any(|ep| path == *ep);
 
+    // Normal vault sessions are invalidated when the vault locks. A token that
+    // successfully authenticates the lock request is retained as a digest-only,
+    // expiry-bound capability, and is accepted after lock for exactly these two
+    // privacy endpoints. No member/data route receives this exception.
+    const LOCK_ARMING_ENDPOINTS: &[&str] = &["/api/v1/privacy/lock", "/api/v1/vault/lock"];
+    const LOCKED_PRIVACY_ENDPOINTS: &[&str] = &[
+        "/api/v1/privacy/status",
+        "/api/v1/privacy/wipe-cloud-session",
+    ];
+
     // If not a forced-auth endpoint and global auth is disabled, allow through
     if !state.require_auth && !is_always_auth {
         return next.run(request).await;
@@ -234,7 +342,22 @@ pub async fn bearer_auth_guard(
             || path == "/api/v1/vault/status"
             || path == "/api/v1/vault/reset-with-recovery-key"
             || path == "/api/v1/vault/forgot-password-reset"
-            || path.starts_with("/api/v1/member")
+            // /mcp* — G1 MCP transport carries a scoped-token (not a vault session
+            // token); it does its own auth in mcp::transport::authenticate. Bypass
+            // the session bearer guard so external agent hosts can reach MCP even
+            // when require_auth is on. (vault_guard also bypasses /mcp*.)
+            || path == "/mcp"
+            || path.starts_with("/mcp/")
+            // R1.1a (2026-06-11): the former blanket `starts_with("/api/v1/member")`
+            // bypass is removed — NO member endpoint is exempt from bearer auth.
+            // Caller audit: every member call happens after a session token exists
+            // (Web UI wizard Step3 member login runs after Step2 vault setup/unlock
+            // issued a token via setToken; SettingsView runs post-unlock; no CLI /
+            // extension / tauri caller hits /api/v1/member/*). login-token + logout
+            // mutate member_state, login-password forwards cloud credentials, and
+            // state/locks leak account info — all must sit behind bearer auth when
+            // `require_auth` is on. (The vault_guard member bypass is unrelated: it
+            // only skips the *unlock* requirement, not authentication.)
             || path == "/ws/scan-progress")
     {
         return next.run(request).await;
@@ -259,13 +382,34 @@ pub async fn bearer_auth_guard(
         }
     };
 
-    let verify_result = {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault.verify_session(&token).map_err(|e| e.to_string())
+    let (verify_result, vault_state) = {
+        let vault = match lock_vault_for_request(&state, &path) {
+            Ok(vault) => vault,
+            Err(response) => return response,
+        };
+        (
+            vault.verify_session(&token).map_err(|e| e.to_string()),
+            vault.state(),
+        )
     };
 
     match verify_result {
-        Ok(_) => next.run(request).await,
+        Ok(_) => {
+            if LOCK_ARMING_ENDPOINTS.contains(&path.as_str()) {
+                // `verify_session` already authenticated the signature, expiry,
+                // and current nonce. Failure to parse/cache is fail-closed for
+                // post-lock access but must not make the lock itself fail.
+                let _ = state.arm_locked_privacy_authorization(&token);
+            }
+            next.run(request).await
+        }
+        Err(_)
+            if matches!(vault_state, VaultState::Locked)
+                && LOCKED_PRIVACY_ENDPOINTS.contains(&path.as_str())
+                && state.verify_locked_privacy_authorization(&token) =>
+        {
+            next.run(request).await
+        }
         Err(e) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": e})),
@@ -304,8 +448,14 @@ mod tests {
             out.contains("token=<redacted>"),
             "token key must be present with <redacted>: {out}"
         );
-        assert!(out.contains("foo=bar"), "other params must be unchanged: {out}");
-        assert!(out.contains("baz=qux"), "other params must be unchanged: {out}");
+        assert!(
+            out.contains("foo=bar"),
+            "other params must be unchanged: {out}"
+        );
+        assert!(
+            out.contains("baz=qux"),
+            "other params must be unchanged: {out}"
+        );
     }
 
     #[test]

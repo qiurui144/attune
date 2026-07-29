@@ -30,7 +30,12 @@ fn is_known_signal_kind(kind: &str) -> bool {
 impl Store {
     /// 记录一次本地搜索失败信号（非阻塞写入，失败时静默忽略）。
     /// 内部固定 kind='search_miss'（向后兼容旧调用方）。
-    pub fn record_skill_signal(&self, query: &str, knowledge_count: usize, web_used: bool) -> Result<()> {
+    pub fn record_skill_signal(
+        &self,
+        query: &str,
+        knowledge_count: usize,
+        web_used: bool,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO skill_signals (query, knowledge_count, web_used, kind) VALUES (?1, ?2, ?3, 'search_miss')",
             params![query, knowledge_count as i64, web_used as i64],
@@ -62,7 +67,7 @@ impl Store {
         // 当前 caller (annotation id / item id) 均 ≤ 64 但加 boundary 防 future caller。
         if ref_id.len() > 128 {
             return Err(crate::error::VaultError::Crypto(
-                "ref_id too long (max 128)".into()
+                "ref_id too long (max 128)".into(),
             ));
         }
         self.conn.execute(
@@ -119,7 +124,8 @@ impl Store {
                 created_at: row.get(4)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.into())
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| e.into())
     }
 
     /// 标记一批信号为已处理。
@@ -164,10 +170,7 @@ impl Store {
              WHERE kind = 'citation_hit' AND ref_id IN ({placeholders})"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let n: i64 = stmt.query_row(
-            rusqlite::params_from_iter(refs.iter()),
-            |r| r.get(0),
-        )?;
+        let n: i64 = stmt.query_row(rusqlite::params_from_iter(refs.iter()), |r| r.get(0))?;
         Ok(n.max(0) as u32)
     }
 
@@ -238,9 +241,7 @@ mod tests {
                 .conn
                 .prepare("SELECT query FROM skill_signals ORDER BY id")
                 .unwrap();
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
             rows.collect::<std::result::Result<Vec<_>, _>>().unwrap()
         };
         assert_eq!(kept.len(), 3);

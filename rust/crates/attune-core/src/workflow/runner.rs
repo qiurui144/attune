@@ -45,14 +45,13 @@ pub fn run_workflow(
     for step in &wf.steps {
         match step {
             WorkflowStep::Skill(s) => {
-                // Phase C: skill step 走 mock。Sprint 2 接 Intent Router 后真正调 LLM。
-                let resolved = resolve_inputs(&s.input, &state, event);
-                let output_value = serde_json::json!({
-                    "skill": s.skill,
-                    "resolved_input": resolved,
-                    "mock": true,
+                return Err(WorkflowError::StepFailed {
+                    step_id: s.id.clone(),
+                    cause: format!(
+                        "legacy workflow skill step '{}' is not executable; use skill_runtime for LLM-backed skills",
+                        s.skill
+                    ),
                 });
-                state.insert(s.output.clone(), output_value);
             }
             WorkflowStep::Deterministic(d) => {
                 let resolved = resolve_inputs(&d.input, &state, event);
@@ -146,9 +145,10 @@ mod tests {
     //! Unit tests covering F-13-WORKFLOW (runner.rs step execution + ref resolution).
     //!
     //! Strategy: focus on the runner control flow + `$event.x` / `$step_id.y` ref
-    //! resolution. Skill steps go through mock path (no LLM). Deterministic steps
-    //! exercise echo_input op (no Store / DEK needed). Real Store-backed ops are
-    //! covered by integration tests (`tests/workflow_test.rs`).
+    //! resolution. Legacy workflow skill steps fail closed; LLM-backed multi-step
+    //! skills are handled by `skill_runtime`. Deterministic steps exercise
+    //! echo_input op (no Store / DEK needed). Real Store-backed ops are covered by
+    //! integration tests (`tests/workflow_test.rs`).
     use super::*;
     use crate::workflow::schema::{
         DeterministicStep, SkillStep, Workflow, WorkflowStep, WorkflowTrigger,
@@ -192,11 +192,10 @@ mod tests {
         assert!(result.outputs.is_empty());
     }
 
-    // ── Skill step (mock) ───────────────────────────────────────────────────
-    // covers: F-13-WORKFLOW skill mock path until Sprint 2 LLM hookup
+    // ── Skill step ──────────────────────────────────────────────────────────
 
     #[test]
-    fn skill_step_writes_mock_output_to_state() {
+    fn skill_step_fails_closed_in_legacy_runner() {
         let skill = WorkflowStep::Skill(SkillStep {
             id: "s1".into(),
             skill: "examples/extract".into(),
@@ -204,11 +203,15 @@ mod tests {
             output: "extracted".into(),
         });
         let wf = workflow_with_steps("wf/skill", vec![skill]);
-        let result = run_workflow(&wf, &empty_event(), None, None).expect("ok");
-
-        let extracted = result.outputs.get("extracted").expect("output key present");
-        assert_eq!(extracted["skill"], serde_json::json!("examples/extract"));
-        assert_eq!(extracted["mock"], serde_json::json!(true));
+        let err = run_workflow(&wf, &empty_event(), None, None).unwrap_err();
+        match err {
+            WorkflowError::StepFailed { step_id, cause } => {
+                assert_eq!(step_id, "s1");
+                assert!(cause.contains("not executable"));
+                assert!(cause.contains("skill_runtime"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     // ── Deterministic step ──────────────────────────────────────────────────
@@ -241,7 +244,10 @@ mod tests {
         let step = det_step("s1", "echo_input", None);
         let wf = workflow_with_steps("wf/no_output", vec![step]);
         let result = run_workflow(&wf, &empty_event(), None, None).expect("ok");
-        assert!(result.outputs.is_empty(), "step without output key should not pollute state");
+        assert!(
+            result.outputs.is_empty(),
+            "step without output key should not pollute state"
+        );
     }
 
     #[test]
@@ -253,7 +259,10 @@ mod tests {
         match err {
             WorkflowError::StepFailed { step_id, cause } => {
                 assert_eq!(step_id, "my_failing_step");
-                assert!(cause.contains("unknown deterministic op"), "got cause: {cause}");
+                assert!(
+                    cause.contains("unknown deterministic op"),
+                    "got cause: {cause}"
+                );
             }
             _ => panic!("expected StepFailed, got {err:?}"),
         }
@@ -266,7 +275,9 @@ mod tests {
     fn event_ref_resolves_to_event_data() {
         let state = BTreeMap::new();
         let mut event = empty_event();
-        event.data.insert("file_id".into(), serde_json::json!("f_123"));
+        event
+            .data
+            .insert("file_id".into(), serde_json::json!("f_123"));
 
         let val = resolve_value(
             &serde_yaml::Value::String("$event.file_id".into()),
@@ -358,11 +369,7 @@ mod tests {
         );
         assert_eq!(bool_val, serde_json::json!(true));
 
-        let null_val = resolve_value(
-            &serde_yaml::Value::Null,
-            &BTreeMap::new(),
-            &empty_event(),
-        );
+        let null_val = resolve_value(&serde_yaml::Value::Null, &BTreeMap::new(), &empty_event());
         assert_eq!(null_val, serde_json::Value::Null);
     }
 
@@ -382,11 +389,7 @@ mod tests {
             serde_yaml::Value::String("hi".into()),
         );
 
-        let val = resolve_value(
-            &serde_yaml::Value::Mapping(inner),
-            &BTreeMap::new(),
-            &event,
-        );
+        let val = resolve_value(&serde_yaml::Value::Mapping(inner), &BTreeMap::new(), &event);
         assert_eq!(val["ref"], serde_json::json!("dynamic"));
         assert_eq!(val["lit"], serde_json::json!("hi"));
     }

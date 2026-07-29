@@ -150,7 +150,10 @@ fn r2_auto_escalate_off_yields_recommendation_not_applied_escalation() {
             to: "flash".to_string(),
         }
     );
-    assert!(!actions[0].applied, "escalation must NOT be auto-applied (R2)");
+    assert!(
+        !actions[0].applied,
+        "escalation must NOT be auto-applied (R2)"
+    );
     assert!(actions[0].is_recommendation());
 }
 
@@ -164,7 +167,10 @@ fn r2_auto_escalate_on_marks_escalation_applied() {
     });
     let rows = vec![health("judge", "qwen3b", 20, 8)];
     let actions = ctrl.decide(&reg, &rows);
-    assert!(actions[0].applied, "escalation applied when auto_escalate ON");
+    assert!(
+        actions[0].applied,
+        "escalation applied when auto_escalate ON"
+    );
 }
 
 // ── R7: disable needs minimum sample + consecutive periods (misfire guard) ────
@@ -197,9 +203,17 @@ fn r7_disable_requires_consecutive_periods() {
 
     // Period 1 + 2: breach observed but consecutive count not reached → NoOp.
     let a1 = ctrl.observe(&reg, &rows);
-    assert_eq!(a1[0].action, TuningAction::NoOp, "period 1 must not disable");
+    assert_eq!(
+        a1[0].action,
+        TuningAction::NoOp,
+        "period 1 must not disable"
+    );
     let a2 = ctrl.observe(&reg, &rows);
-    assert_eq!(a2[0].action, TuningAction::NoOp, "period 2 must not disable");
+    assert_eq!(
+        a2[0].action,
+        TuningAction::NoOp,
+        "period 2 must not disable"
+    );
 
     // Period 3: third consecutive breach → DisableWithAlert.
     let a3 = ctrl.observe(&reg, &rows);
@@ -249,13 +263,19 @@ fn disable_action_is_soft_and_carries_reason() {
     let actions = ctrl.decide(&reg, &rows);
     match &actions[0].action {
         TuningAction::DisableWithAlert { reason, .. } => {
-            assert!(!reason.is_empty(), "disable must carry a human-readable reason");
+            assert!(
+                !reason.is_empty(),
+                "disable must carry a human-readable reason"
+            );
         }
         other => panic!("expected DisableWithAlert, got {other:?}"),
     }
     // Soft: requires human review, never auto-deletes the agent.
     assert!(actions[0].needs_human_review());
-    assert!(!actions[0].applied, "disable is never silently auto-applied");
+    assert!(
+        !actions[0].applied,
+        "disable is never silently auto-applied"
+    );
 }
 
 // ── 0-call boundary (§9) ──────────────────────────────────────────────────────
@@ -300,7 +320,11 @@ fn next_tier_ladder_is_ordered_and_capped() {
     assert_eq!(next_model_tier("qwen3b"), Some("flash"));
     assert_eq!(next_model_tier("flash"), Some("gpt-4o-mini"));
     assert_eq!(next_model_tier("gpt-4o-mini"), Some("sonnet"));
-    assert_eq!(next_model_tier("sonnet"), None, "top tier has no higher tier");
+    assert_eq!(
+        next_model_tier("sonnet"),
+        None,
+        "top tier has no higher tier"
+    );
     assert_eq!(next_model_tier("unknown-model"), None);
 }
 
@@ -357,8 +381,7 @@ fn controller_aggregates_multiple_feedback_sources() {
     let agg = ctrl.aggregate_signals(&[&s1, &s2]);
     assert_eq!(agg.len(), 2);
     // both source names are represented
-    let sources: std::collections::BTreeSet<&str> =
-        agg.iter().map(|s| s.source.as_str()).collect();
+    let sources: std::collections::BTreeSet<&str> = agg.iter().map(|s| s.source.as_str()).collect();
     assert!(sources.contains("telemetry"));
     assert!(sources.contains("skill_evolution"));
 }
@@ -372,7 +395,11 @@ fn skill_evolution_source_reports_pending_signal_count() {
     let src = SkillEvolutionFeedback::new(&store);
     let signals = src.collect_signals();
     assert_eq!(src.source_name(), "skill_evolution");
-    assert_eq!(signals.len(), 1, "one rollup signal describing pending count");
+    assert_eq!(
+        signals.len(),
+        1,
+        "one rollup signal describing pending count"
+    );
     assert!(signals[0].detail.contains('2'), "detail mentions the count");
     assert_eq!(signals[0].severity, SignalSeverity::Info);
 }
@@ -428,7 +455,10 @@ fn render_tune_dry_run_shows_recommendation_and_not_applied() {
 #[test]
 fn render_tune_empty_is_friendly() {
     let out = render_tune(&[], false);
-    assert!(out.contains("no") || out.contains("No"), "friendly empty line");
+    assert!(
+        out.contains("no") || out.contains("No"),
+        "friendly empty line"
+    );
 }
 
 #[test]

@@ -21,7 +21,9 @@ pub async fn submit_feedback(
         return Err(AppError::BadRequest("item_id too long".into()));
     }
     if body.query.as_deref().map(|q| q.len()).unwrap_or(0) > 500 {
-        return Err(AppError::BadRequest("query too long (max 500 bytes)".into()));
+        return Err(AppError::BadRequest(
+            "query too long (max 500 bytes)".into(),
+        ));
     }
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault

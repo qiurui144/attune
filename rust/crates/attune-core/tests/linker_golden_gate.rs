@@ -86,13 +86,37 @@ fn fresh_store() -> Store {
 }
 
 fn insert_pair(store: &Store, dek: &Key32, fx: &Fixture) -> (String, String) {
-    let url_a: Option<&str> = if fx.doc_a.url.is_empty() { None } else { Some(fx.doc_a.url.as_str()) };
-    let url_b: Option<&str> = if fx.doc_b.url.is_empty() { None } else { Some(fx.doc_b.url.as_str()) };
+    let url_a: Option<&str> = if fx.doc_a.url.is_empty() {
+        None
+    } else {
+        Some(fx.doc_a.url.as_str())
+    };
+    let url_b: Option<&str> = if fx.doc_b.url.is_empty() {
+        None
+    } else {
+        Some(fx.doc_b.url.as_str())
+    };
     let id_a = store
-        .insert_item(dek, &fx.doc_a.title, &fx.doc_a.content, url_a, "note", None, None)
+        .insert_item(
+            dek,
+            &fx.doc_a.title,
+            &fx.doc_a.content,
+            url_a,
+            "note",
+            None,
+            None,
+        )
         .unwrap();
     let id_b = store
-        .insert_item(dek, &fx.doc_b.title, &fx.doc_b.content, url_b, "note", None, None)
+        .insert_item(
+            dek,
+            &fx.doc_b.title,
+            &fx.doc_b.content,
+            url_b,
+            "note",
+            None,
+            None,
+        )
         .unwrap();
     (id_a, id_b)
 }
@@ -137,14 +161,34 @@ fn golden_gate_each_fixture_emits_expected_link_kinds() {
         let (id_a, id_b) = insert_pair(&store, &dek, fx);
 
         // Pre-condition: linker runs on doc_b first so doc_a has something to link to.
-        compute_links_for_item(&store, None, &id_b, &fx.doc_b.title, &fx.doc_b.content,
-                               if fx.doc_b.url.is_empty() { None } else { Some(fx.doc_b.url.as_str()) },
-                               &LinkThresholds::default())
-            .unwrap_or_else(|e| panic!("[{}] linker doc_b: {e}", fx.id));
-        let stats = compute_links_for_item(&store, None, &id_a, &fx.doc_a.title, &fx.doc_a.content,
-                               if fx.doc_a.url.is_empty() { None } else { Some(fx.doc_a.url.as_str()) },
-                               &LinkThresholds::default())
-            .unwrap_or_else(|e| panic!("[{}] linker doc_a: {e}", fx.id));
+        compute_links_for_item(
+            &store,
+            None,
+            &id_b,
+            &fx.doc_b.title,
+            &fx.doc_b.content,
+            if fx.doc_b.url.is_empty() {
+                None
+            } else {
+                Some(fx.doc_b.url.as_str())
+            },
+            &LinkThresholds::default(),
+        )
+        .unwrap_or_else(|e| panic!("[{}] linker doc_b: {e}", fx.id));
+        let stats = compute_links_for_item(
+            &store,
+            None,
+            &id_a,
+            &fx.doc_a.title,
+            &fx.doc_a.content,
+            if fx.doc_a.url.is_empty() {
+                None
+            } else {
+                Some(fx.doc_a.url.as_str())
+            },
+            &LinkThresholds::default(),
+        )
+        .unwrap_or_else(|e| panic!("[{}] linker doc_a: {e}", fx.id));
 
         let observed: Vec<String> = link_kinds_for(&store, &id_a);
         for expected_kind in &fx.expected.link_kinds {
@@ -159,7 +203,8 @@ fn golden_gate_each_fixture_emits_expected_link_kinds() {
         // Evidence substring check (only if non-empty).
         if !fx.expected.evidence_substring.is_empty() {
             let rows = store.list_links_for_item(&id_a).unwrap();
-            let any_match = rows.iter()
+            let any_match = rows
+                .iter()
                 .any(|r| r.evidence.contains(fx.expected.evidence_substring.as_str()));
             if !any_match {
                 let evidences: Vec<&str> = rows.iter().map(|r| r.evidence.as_str()).collect();
@@ -189,14 +234,33 @@ fn golden_gate_emits_no_self_links() {
         let store = fresh_store();
         let dek = Key32::generate();
         let (id_a, id_b) = insert_pair(&store, &dek, fx);
-        let _ = compute_links_for_item(&store, None, &id_b, &fx.doc_b.title, &fx.doc_b.content,
-                                       None, &LinkThresholds::default()).unwrap();
-        let _ = compute_links_for_item(&store, None, &id_a, &fx.doc_a.title, &fx.doc_a.content,
-                                       None, &LinkThresholds::default()).unwrap();
+        let _ = compute_links_for_item(
+            &store,
+            None,
+            &id_b,
+            &fx.doc_b.title,
+            &fx.doc_b.content,
+            None,
+            &LinkThresholds::default(),
+        )
+        .unwrap();
+        let _ = compute_links_for_item(
+            &store,
+            None,
+            &id_a,
+            &fx.doc_a.title,
+            &fx.doc_a.content,
+            None,
+            &LinkThresholds::default(),
+        )
+        .unwrap();
         let rows = store.list_links_for_item(&id_a).unwrap();
         for r in &rows {
-            assert_ne!(r.other_item_id, id_a,
-                "[{}] self-link emitted: {:?}", fx.id, r);
+            assert_ne!(
+                r.other_item_id, id_a,
+                "[{}] self-link emitted: {:?}",
+                fx.id, r
+            );
         }
     }
 }
@@ -257,16 +321,53 @@ fn error_extreme_threshold_zero_links_does_not_panic() {
     // should still complete without panic, just emit zero rows.
     let store = fresh_store();
     let dek = Key32::generate();
-    let id_a = store.insert_item(&dek, "A", "甲方代表：张三、李四。", None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "B", "甲方代表：张三、李四。", None, "note", None, None).unwrap();
+    let id_a = store
+        .insert_item(
+            &dek,
+            "A",
+            "甲方代表：张三、李四。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let id_b = store
+        .insert_item(
+            &dek,
+            "B",
+            "甲方代表：张三、李四。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
     let thresholds = LinkThresholds {
         max_links_per_item_per_kind: 0,
         ..LinkThresholds::default()
     };
-    let _ = compute_links_for_item(&store, None, &id_b, "B", "甲方代表：张三、李四。", None, &thresholds).unwrap();
-    let stats = compute_links_for_item(&store, None, &id_a, "A", "甲方代表：张三、李四。", None, &thresholds).unwrap();
-    assert_eq!(stats.shared_entity_links, 0,
-        "cap=0 must zero out emission");
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "B",
+        "甲方代表：张三、李四。",
+        None,
+        &thresholds,
+    )
+    .unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "A",
+        "甲方代表：张三、李四。",
+        None,
+        &thresholds,
+    )
+    .unwrap();
+    assert_eq!(stats.shared_entity_links, 0, "cap=0 must zero out emission");
     assert_eq!(store.list_links_for_item(&id_a).unwrap().len(), 0);
 }
 
@@ -280,9 +381,19 @@ fn boundary_empty_content_emits_no_entities_no_links() {
     let dek = Key32::generate();
     // insert_item rejects "" content (parser path), but the linker should
     // tolerate it as a defense-in-depth check.
-    let id = store.insert_item(&dek, "EmptyTitle", "   ", None, "note", None, None).unwrap();
-    let stats = compute_links_for_item(&store, None, &id, "EmptyTitle", "   ", None,
-                                       &LinkThresholds::default()).unwrap();
+    let id = store
+        .insert_item(&dek, "EmptyTitle", "   ", None, "note", None, None)
+        .unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &id,
+        "EmptyTitle",
+        "   ",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
     assert_eq!(stats.entities_indexed, 0);
     assert_eq!(stats.total_links(), 0);
 }
@@ -293,14 +404,36 @@ fn boundary_single_entity_overlap_below_min_overlap() {
     // the link must NOT be emitted.
     let store = fresh_store();
     let dek = Key32::generate();
-    let id_a = store.insert_item(&dek, "Note A", "整理人：张三。", None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "Note B", "整理人：张三。", None, "note", None, None).unwrap();
-    let _ = compute_links_for_item(&store, None, &id_b, "Note B", "整理人：张三。", None,
-                                    &LinkThresholds::default()).unwrap();
-    let stats = compute_links_for_item(&store, None, &id_a, "Note A", "整理人：张三。", None,
-                                       &LinkThresholds::default()).unwrap();
-    assert_eq!(stats.shared_entity_links, 0,
-        "single-entity overlap must NOT emit a link under default min_overlap=2");
+    let id_a = store
+        .insert_item(&dek, "Note A", "整理人：张三。", None, "note", None, None)
+        .unwrap();
+    let id_b = store
+        .insert_item(&dek, "Note B", "整理人：张三。", None, "note", None, None)
+        .unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "Note B",
+        "整理人：张三。",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "Note A",
+        "整理人：张三。",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        stats.shared_entity_links, 0,
+        "single-entity overlap must NOT emit a link under default min_overlap=2"
+    );
 }
 
 #[test]
@@ -308,14 +441,36 @@ fn boundary_lowered_min_overlap_emits_single_entity_link() {
     // Same setup as above, but lowering min_overlap to 1 → link emerges.
     let store = fresh_store();
     let dek = Key32::generate();
-    let id_a = store.insert_item(&dek, "Note A", "整理人：张三。", None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "Note B", "整理人：张三。", None, "note", None, None).unwrap();
+    let id_a = store
+        .insert_item(&dek, "Note A", "整理人：张三。", None, "note", None, None)
+        .unwrap();
+    let id_b = store
+        .insert_item(&dek, "Note B", "整理人：张三。", None, "note", None, None)
+        .unwrap();
     let thresholds = LinkThresholds {
         shared_entity_min_overlap: 1,
         ..LinkThresholds::default()
     };
-    let _ = compute_links_for_item(&store, None, &id_b, "Note B", "整理人：张三。", None, &thresholds).unwrap();
-    let stats = compute_links_for_item(&store, None, &id_a, "Note A", "整理人：张三。", None, &thresholds).unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "Note B",
+        "整理人：张三。",
+        None,
+        &thresholds,
+    )
+    .unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "Note A",
+        "整理人：张三。",
+        None,
+        &thresholds,
+    )
+    .unwrap();
     assert_eq!(stats.shared_entity_links, 1);
 }
 
@@ -325,14 +480,44 @@ fn boundary_short_title_is_not_an_explicit_ref_match() {
     // explicit_ref — short titles would false-positive everything.
     let store = fresh_store();
     let dek = Key32::generate();
-    let id_a = store.insert_item(&dek, "AB", "随便写点内容包含 AB 两个字。", None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "CD", "另一篇 AB 文档", None, "note", None, None).unwrap();
-    let _ = compute_links_for_item(&store, None, &id_a, "AB", "随便写点内容包含 AB 两个字。", None,
-                                    &LinkThresholds::default()).unwrap();
-    let stats = compute_links_for_item(&store, None, &id_b, "CD", "另一篇 AB 文档", None,
-                                       &LinkThresholds::default()).unwrap();
-    assert_eq!(stats.explicit_ref_links, 0,
-        "title shorter than min_len must not match");
+    let id_a = store
+        .insert_item(
+            &dek,
+            "AB",
+            "随便写点内容包含 AB 两个字。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let id_b = store
+        .insert_item(&dek, "CD", "另一篇 AB 文档", None, "note", None, None)
+        .unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "AB",
+        "随便写点内容包含 AB 两个字。",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "CD",
+        "另一篇 AB 文档",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        stats.explicit_ref_links, 0,
+        "title shorter than min_len must not match"
+    );
 }
 
 #[test]
@@ -343,14 +528,44 @@ fn boundary_duplicate_url_only_emits_one_explicit_ref() {
     let dek = Key32::generate();
     let url = "https://example.com/page-x";
     let content_a = format!("看 {url} 再看 {url} 又一次 {url} 第四次 {url} 第五次 {url}.");
-    let id_a = store.insert_item(&dek, "A", &content_a, None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "B", "this is the cited doc", Some(url), "note", None, None).unwrap();
-    let _ = compute_links_for_item(&store, None, &id_b, "B", "this is the cited doc", Some(url),
-                                    &LinkThresholds::default()).unwrap();
-    let stats = compute_links_for_item(&store, None, &id_a, "A", &content_a, None,
-                                       &LinkThresholds::default()).unwrap();
-    assert_eq!(stats.explicit_ref_links, 1,
-        "5 URL hits must collapse to 1 link row");
+    let id_a = store
+        .insert_item(&dek, "A", &content_a, None, "note", None, None)
+        .unwrap();
+    let id_b = store
+        .insert_item(
+            &dek,
+            "B",
+            "this is the cited doc",
+            Some(url),
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "B",
+        "this is the cited doc",
+        Some(url),
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "A",
+        &content_a,
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        stats.explicit_ref_links, 1,
+        "5 URL hits must collapse to 1 link row"
+    );
     // The target is doc_b.
     let rows = store.list_links_for_item(&id_a).unwrap();
     let refs: Vec<_> = rows.iter().filter(|r| r.kind == "explicit_ref").collect();
@@ -368,8 +583,19 @@ fn boundary_df_stop_entity_filter_drops_ubiquitous_entity() {
     let dek = Key32::generate();
     let mut ids = Vec::new();
     for i in 0..4 {
-        ids.push(store.insert_item(&dek, &format!("Note {i}"),
-                                   "整理人：张三。", None, "note", None, None).unwrap());
+        ids.push(
+            store
+                .insert_item(
+                    &dek,
+                    &format!("Note {i}"),
+                    "整理人：张三。",
+                    None,
+                    "note",
+                    None,
+                    None,
+                )
+                .unwrap(),
+        );
     }
     let thresholds = LinkThresholds {
         shared_entity_min_overlap: 1,
@@ -377,13 +603,33 @@ fn boundary_df_stop_entity_filter_drops_ubiquitous_entity() {
     };
     // Link them all in sequence
     for id in &ids {
-        let _ = compute_links_for_item(&store, None, id, "Note", "整理人：张三。", None, &thresholds).unwrap();
+        let _ = compute_links_for_item(
+            &store,
+            None,
+            id,
+            "Note",
+            "整理人：张三。",
+            None,
+            &thresholds,
+        )
+        .unwrap();
     }
     // After all 4, 张三 has df=4. Now re-link item 0; the entity should be filtered.
-    let stats = compute_links_for_item(&store, None, &ids[0], "Note", "整理人：张三。", None, &thresholds).unwrap();
+    let stats = compute_links_for_item(
+        &store,
+        None,
+        &ids[0],
+        "Note",
+        "整理人：张三。",
+        None,
+        &thresholds,
+    )
+    .unwrap();
     // df_threshold = max(4 * 0.30, 2.0) = 2.0. df=4 > 2 → filtered.
-    assert_eq!(stats.shared_entity_links, 0,
-        "ubiquitous entity must be filtered by DF stop-entity");
+    assert_eq!(
+        stats.shared_entity_links, 0,
+        "ubiquitous entity must be filtered by DF stop-entity"
+    );
 }
 
 // ============================================================================
@@ -425,21 +671,58 @@ fn property_idempotent_relink_yields_same_links() {
     // the same link rows (idempotence — "清旧 → 加新" philosophy).
     let store = fresh_store();
     let dek = Key32::generate();
-    let id_a = store.insert_item(&dek, "A",
-        "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "B",
+    let id_a = store
+        .insert_item(
+            &dek,
+            "A",
+            "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let id_b = store
+        .insert_item(
+            &dek,
+            "B",
+            "日期：2024-04-20。\n金额：¥500,000。\n甲方代表：张三、李四。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "B",
         "日期：2024-04-20。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, "note", None, None).unwrap();
-    let _ = compute_links_for_item(&store, None, &id_b, "B",
-        "日期：2024-04-20。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, &LinkThresholds::default()).unwrap();
-    let s1 = compute_links_for_item(&store, None, &id_a, "A",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    let s1 = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "A",
         "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, &LinkThresholds::default()).unwrap();
-    let s2 = compute_links_for_item(&store, None, &id_a, "A",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    let s2 = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "A",
         "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, &LinkThresholds::default()).unwrap();
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
     assert_eq!(s1.shared_entity_links, s2.shared_entity_links);
     assert_eq!(s1.entities_indexed, s2.entities_indexed);
     let rows1 = store.list_links_for_item(&id_a).unwrap();
@@ -456,7 +739,9 @@ fn property_out_degree_capped_per_kind() {
     let shared = "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。";
     let mut ids = Vec::new();
     for i in 0..30 {
-        let id = store.insert_item(&dek, &format!("doc-{i}"), shared, None, "note", None, None).unwrap();
+        let id = store
+            .insert_item(&dek, &format!("doc-{i}"), shared, None, "note", None, None)
+            .unwrap();
         ids.push(id);
     }
     let thresholds = LinkThresholds {
@@ -466,16 +751,31 @@ fn property_out_degree_capped_per_kind() {
     };
     // Link every doc once
     for (i, id) in ids.iter().enumerate() {
-        let _ = compute_links_for_item(&store, None, id, &format!("doc-{i}"), shared, None, &thresholds).unwrap();
+        let _ = compute_links_for_item(
+            &store,
+            None,
+            id,
+            &format!("doc-{i}"),
+            shared,
+            None,
+            &thresholds,
+        )
+        .unwrap();
     }
     // Final relink of doc 0 — out-degree cap must hold
-    let stats = compute_links_for_item(&store, None, &ids[0], "doc-0", shared, None, &thresholds).unwrap();
-    assert!(stats.shared_entity_links <= 5,
-        "out-degree cap=5 must hold, got {}", stats.shared_entity_links);
+    let stats =
+        compute_links_for_item(&store, None, &ids[0], "doc-0", shared, None, &thresholds).unwrap();
+    assert!(
+        stats.shared_entity_links <= 5,
+        "out-degree cap=5 must hold, got {}",
+        stats.shared_entity_links
+    );
     let rows = store.list_links_for_item(&ids[0]).unwrap();
     let shared_entity_rows = rows.iter().filter(|r| r.kind == "shared_entity").count();
-    assert!(shared_entity_rows <= 5,
-        "stored shared_entity rows must be ≤ 5, got {shared_entity_rows}");
+    assert!(
+        shared_entity_rows <= 5,
+        "stored shared_entity rows must be ≤ 5, got {shared_entity_rows}"
+    );
 }
 
 #[test]
@@ -485,11 +785,26 @@ fn property_purge_removes_all_traces_of_item() {
     let store = fresh_store();
     let dek = Key32::generate();
     let shared = "甲方代表：张三、李四。\n金额：¥100,000。";
-    let id1 = store.insert_item(&dek, "1", shared, None, "note", None, None).unwrap();
-    let id2 = store.insert_item(&dek, "2", shared, None, "note", None, None).unwrap();
-    let id3 = store.insert_item(&dek, "3", shared, None, "note", None, None).unwrap();
+    let id1 = store
+        .insert_item(&dek, "1", shared, None, "note", None, None)
+        .unwrap();
+    let id2 = store
+        .insert_item(&dek, "2", shared, None, "note", None, None)
+        .unwrap();
+    let id3 = store
+        .insert_item(&dek, "3", shared, None, "note", None, None)
+        .unwrap();
     for id in [&id1, &id2, &id3] {
-        let _ = compute_links_for_item(&store, None, id, "x", shared, None, &LinkThresholds::default()).unwrap();
+        let _ = compute_links_for_item(
+            &store,
+            None,
+            id,
+            "x",
+            shared,
+            None,
+            &LinkThresholds::default(),
+        )
+        .unwrap();
     }
     let before_links = store.count_all_item_links().unwrap();
     let before_entities = store.count_all_item_entities().unwrap();
@@ -503,8 +818,10 @@ fn property_purge_removes_all_traces_of_item() {
     assert!(rows_for_id2.is_empty(), "purged item must have zero links");
     // No row in item_entities either
     let after_entities = store.count_all_item_entities().unwrap();
-    assert!(after_entities < before_entities,
-        "item_entities row count must decrease after purge");
+    assert!(
+        after_entities < before_entities,
+        "item_entities row count must decrease after purge"
+    );
 }
 
 // ============================================================================
@@ -530,7 +847,9 @@ fn integration_ingest_pipeline_produces_links() {
     let raw_a = RawDocument {
         uri: "test://A".into(),
         title: "日报 A".into(),
-        content: "日期：2024-03-15。\n金额：¥888,000。\n甲方代表：张三、李四。".as_bytes().to_vec(),
+        content: "日期：2024-03-15。\n金额：¥888,000。\n甲方代表：张三、李四。"
+            .as_bytes()
+            .to_vec(),
         mime_hint: Some("text/plain".into()),
         source_kind: SourceKind::LocalFolder,
         source_ref: "test-A.txt".into(),
@@ -543,7 +862,9 @@ fn integration_ingest_pipeline_produces_links() {
     let raw_b = RawDocument {
         uri: "test://B".into(),
         title: "日报 B".into(),
-        content: "日期：2024-04-20。\n金额：¥888,000。\n甲方代表：张三、李四。".as_bytes().to_vec(),
+        content: "日期：2024-04-20。\n金额：¥888,000。\n甲方代表：张三、李四。"
+            .as_bytes()
+            .to_vec(),
         mime_hint: Some("text/plain".into()),
         source_kind: SourceKind::LocalFolder,
         source_ref: "test-B.txt".into(),
@@ -567,19 +888,26 @@ fn integration_ingest_pipeline_produces_links() {
 
     // Diagnostic: item_entities table must be populated for both items.
     let total_entities = store.count_all_item_entities().unwrap();
-    assert!(total_entities > 0,
-        "ingest pipeline: item_entities must be populated; got 0 (linker hook missing?)");
+    assert!(
+        total_entities > 0,
+        "ingest pipeline: item_entities must be populated; got 0 (linker hook missing?)"
+    );
     let total_links = store.count_all_item_links().unwrap();
     let rows_b = store.list_links_for_item(&id_b).unwrap();
     let rows_a = store.list_links_for_item(&id_a).unwrap();
     let shared = rows_b.iter().find(|r| r.kind == "shared_entity");
-    assert!(shared.is_some(),
+    assert!(
+        shared.is_some(),
         "integration: ingest pipeline must emit shared_entity link.\n  \
          total_entities={total_entities} total_links={total_links}\n  \
-         rows_a={rows_a:?}\n  rows_b={rows_b:?}");
+         rows_a={rows_a:?}\n  rows_b={rows_b:?}"
+    );
     let s = shared.unwrap();
     assert_eq!(s.other_item_id, id_a);
-    assert!(s.weight >= 2.0, "weight (count of shared entities) must be ≥ 2");
+    assert!(
+        s.weight >= 2.0,
+        "weight (count of shared entities) must be ≥ 2"
+    );
 }
 
 #[test]
@@ -588,20 +916,53 @@ fn integration_purge_links_after_item_delete() {
     // purge_links_for_item → verify the link is gone from the other side.
     let store = fresh_store();
     let dek = Key32::generate();
-    let id_a = store.insert_item(&dek, "A",
+    let id_a = store
+        .insert_item(
+            &dek,
+            "A",
+            "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let id_b = store
+        .insert_item(
+            &dek,
+            "B",
+            "日期：2024-04-20。\n金额：¥500,000。\n甲方代表：张三、李四。",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_a,
+        "A",
         "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, "note", None, None).unwrap();
-    let id_b = store.insert_item(&dek, "B",
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
+    let _ = compute_links_for_item(
+        &store,
+        None,
+        &id_b,
+        "B",
         "日期：2024-04-20。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, "note", None, None).unwrap();
-    let _ = compute_links_for_item(&store, None, &id_a, "A",
-        "日期：2024-03-15。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, &LinkThresholds::default()).unwrap();
-    let _ = compute_links_for_item(&store, None, &id_b, "B",
-        "日期：2024-04-20。\n金额：¥500,000。\n甲方代表：张三、李四。",
-        None, &LinkThresholds::default()).unwrap();
+        None,
+        &LinkThresholds::default(),
+    )
+    .unwrap();
     let before = store.list_links_for_item(&id_a).unwrap();
-    assert!(!before.is_empty(), "pre-delete: doc_a should have links to doc_b");
+    assert!(
+        !before.is_empty(),
+        "pre-delete: doc_a should have links to doc_b"
+    );
 
     // Soft delete doc_b
     assert!(store.delete_item(&id_b).unwrap());
@@ -611,6 +972,9 @@ fn integration_purge_links_after_item_delete() {
 
     // doc_a now has zero links because all referenced doc_b on the other side.
     let after = store.list_links_for_item(&id_a).unwrap();
-    assert!(after.is_empty(),
-        "post-delete-purge: doc_a links must be empty; saw {:?}", after);
+    assert!(
+        after.is_empty(),
+        "post-delete-purge: doc_a links must be empty; saw {:?}",
+        after
+    );
 }

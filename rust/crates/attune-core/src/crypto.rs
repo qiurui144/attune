@@ -20,6 +20,14 @@ impl Key32 {
         OsRng.fill_bytes(&mut bytes);
         Self(bytes)
     }
+
+    /// Construct from already-derived 32 bytes. WHY: portable-key derivation
+    /// (memory bundle export/import) needs to wrap an Argon2id output that is
+    /// not the vault DEK; the raw bytes must round-trip into a `Key32` without
+    /// going through `derive_master_key`.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 impl AsRef<[u8]> for Key32 {
@@ -44,7 +52,8 @@ pub fn generate_salt() -> [u8; SALT_LEN] {
 }
 
 pub fn derive_master_key(password: &[u8], device_secret: &[u8], salt: &[u8]) -> Result<Key32> {
-    let mut input: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(password.len() + device_secret.len()));
+    let mut input: Zeroizing<Vec<u8>> =
+        Zeroizing::new(Vec::with_capacity(password.len() + device_secret.len()));
     input.extend_from_slice(password);
     input.extend_from_slice(device_secret);
 
@@ -117,7 +126,8 @@ pub fn hmac_sign(key: &Key32, message: &[u8]) -> Vec<u8> {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<sha2::Sha256>;
 
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key.as_bytes()).expect("HMAC key length valid");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key.as_bytes()).expect("HMAC key length valid");
     mac.update(message);
     mac.finalize().into_bytes().to_vec()
 }
@@ -126,7 +136,8 @@ pub fn hmac_verify(key: &Key32, message: &[u8], signature: &[u8]) -> bool {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<sha2::Sha256>;
 
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key.as_bytes()).expect("HMAC key length valid");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key.as_bytes()).expect("HMAC key length valid");
     mac.update(message);
     mac.verify_slice(signature).is_ok()
 }

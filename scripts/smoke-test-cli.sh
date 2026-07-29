@@ -29,8 +29,8 @@ version: 0.1.0
 YAML
 $ATTUNE plugin-sign "$PDIR" --priv-file "$KEYDIR/key" > /dev/null 2>&1
 [ -s "$PDIR/plugin.sig" ] && pass "sig written" || fail "sig missing"
-$ATTUNE plugin-verify-sig "$PDIR" "$PUBKEY" > /dev/null 2>&1 && pass "verify OK" || fail "verify failed"
-$ATTUNE plugin-verify-sig "$PDIR" "0000000000000000000000000000000000000000000000000000000000000000" > /dev/null 2>&1 \
+$ATTUNE plugin-verify-sig "$PDIR" --pubkey "$PUBKEY" > /dev/null 2>&1 && pass "verify OK" || fail "verify failed"
+$ATTUNE plugin-verify-sig "$PDIR" --pubkey "0000000000000000000000000000000000000000000000000000000000000000" > /dev/null 2>&1 \
   && fail "wrong key should reject" || pass "wrong key rejected"
 
 step "3/7 encrypt + decrypt"

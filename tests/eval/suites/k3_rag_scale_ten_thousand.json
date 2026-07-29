@@ -1,0 +1,39 @@
+{
+  "schema_version": "attune.eval.suite.v1",
+  "suite_id": "k3_rag_scale_ten_thousand",
+  "purpose": "K3 ten-thousand-document single-industry security RAG scale and release regression contract.",
+  "corpora": ["security_generated_ten_thousand_docs"],
+  "scenarios": ["security_scale_release_regression"],
+  "gates": [
+    "manifest",
+    "generated_corpus_materialization",
+    "ingest",
+    "embedding_drain",
+    "search",
+    "chat_subset",
+    "summary_subset",
+    "multiturn_subset",
+    "delete_rescan",
+    "concurrent_read_write_smoke"
+  ],
+  "thresholds": {
+    "retrieval_hit_at_5_min": 0.85,
+    "citation_hit_rate_min": 0.9,
+    "answer_accuracy_min": 0.8,
+    "summary_coverage_min": 0.8,
+    "multiturn_source_continuity_min": 0.85,
+    "negative_evidence_refusal_rate_min": 0.9,
+    "out_of_manual_boundary_rate_min": 0.8,
+    "terminal_error_rate_max": 0.03,
+    "wrong_domain_citation_rate_max": 0.02,
+    "source_drift_rate_max": 0.03,
+    "search_p95_ms_max": 10000,
+    "hot_chat_p95_ms_max": 60000,
+    "summary_p95_ms_max": 60000,
+    "pending_embeddings_drain_seconds_max": 3600
+  },
+  "ci": {
+    "hardware_required": true,
+    "default_runner": "k3_weekly_scale"
+  }
+}

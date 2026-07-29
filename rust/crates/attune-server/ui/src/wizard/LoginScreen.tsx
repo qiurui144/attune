@@ -2,7 +2,8 @@
 
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
-import { Button, Input } from '../components';
+import { Button, Input, Modal } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api, clearToken, setToken, RETRY_POLICIES } from '../store/api';
@@ -15,6 +16,12 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   const [pwd, setPwd] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [recoveryKey, setRecoveryKey] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [showWipeModal, setShowWipeModal] = useState(false);
+  const [wipeConfirm, setWipeConfirm] = useState('');
 
   async function handleUnlock(e?: Event) {
     e?.preventDefault();
@@ -38,11 +45,20 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   }
 
   async function handleForgotPasswordReset() {
-    const first = window.confirm(t('lock.confirm.wipe'));
+    const first = await confirmDialog({
+      title: t('confirm.title.wipePassword'),
+      message: t('lock.confirm.wipe'),
+      danger: true,
+    });
     if (!first) return;
 
-    const typed = window.prompt(t('lock.prompt.reset_confirm'));
-    if (typed !== 'RESET') {
+    // 二次防呆：要求手动键入 RESET（不可逆 wipe 的强 gate）。
+    setWipeConfirm('');
+    setShowWipeModal(true);
+  }
+
+  async function executeForgotPasswordReset() {
+    if (wipeConfirm !== 'RESET') {
       toast('error', t('lock.toast.reset_cancelled'));
       return;
     }
@@ -64,26 +80,33 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
     }
   }
 
+  function openRecoveryModal() {
+    setRecoveryKey('');
+    setNewPassword('');
+    setRecoveryError(null);
+    setShowRecoveryModal(true);
+  }
+
   async function handleResetWithRecoveryKey() {
-    const recoveryKey = window.prompt(t('lock.prompt.recovery_key'));
-    if (!recoveryKey) return;
-    const newPassword = window.prompt(t('lock.prompt.new_password'));
-    if (!newPassword) return;
+    const key = recoveryKey.trim();
+    if (!key || !newPassword) return;
 
     setSubmitting(true);
-    setError(null);
+    setRecoveryError(null);
     try {
       const res = await api.post<{ status: string; token?: string }>(
         '/vault/reset-with-recovery-key',
-        { recovery_key: recoveryKey.trim(), new_password: newPassword },
+        { recovery_key: key, new_password: newPassword },
         RETRY_POLICIES.destructive,
       );
       if (res.token) setToken(res.token);
+      setSubmitting(false);
+      setShowRecoveryModal(false);
       toast('success', t('lock.toast.password_reset'));
       onUnlock();
     } catch (e) {
       setSubmitting(false);
-      setError(e instanceof Error ? e.message : String(e));
+      setRecoveryError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -180,7 +203,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
           variant="secondary"
           size="sm"
           disabled={submitting}
-          onClick={() => handleResetWithRecoveryKey()}
+          onClick={openRecoveryModal}
         >
           {t('lock.reset_with_recovery')}
         </Button>
@@ -194,6 +217,89 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
           {t('lock.reset_wipe')}
         </Button>
       </form>
+
+      <Modal
+        open={showRecoveryModal}
+        onClose={() => setShowRecoveryModal(false)}
+        title={t('lock.recovery_modal.title')}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <Input
+            label={t('lock.recovery_modal.key_label')}
+            value={recoveryKey}
+            onInput={(e) => setRecoveryKey(e.currentTarget.value)}
+            placeholder="ATN-..."
+            autoFocus
+            required
+          />
+          <Input
+            type="password"
+            label={t('lock.recovery_modal.new_password_label')}
+            value={newPassword}
+            onInput={(e) => setNewPassword(e.currentTarget.value)}
+            hint={t('lock.recovery_modal.new_password_hint')}
+            error={recoveryError ?? undefined}
+            required
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button variant="ghost" onClick={() => setShowRecoveryModal(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              loading={submitting}
+              disabled={!recoveryKey.trim() || !newPassword}
+              onClick={() => void handleResetWithRecoveryKey()}
+            >
+              {t('lock.recovery_modal.submit')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showWipeModal}
+        onClose={() => {
+          if (!submitting) {
+            setShowWipeModal(false);
+            setWipeConfirm('');
+          }
+        }}
+        title={t('confirm.title.wipePassword')}
+        disableBackdropClose
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <p style={{ margin: 0, color: 'var(--color-error)', fontSize: 'var(--text-sm)' }}>
+            {t('lock.prompt.reset_confirm')}
+          </p>
+          <Input
+            value={wipeConfirm}
+            onInput={(e) => setWipeConfirm(e.currentTarget.value)}
+            autoFocus
+            placeholder="RESET"
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button
+              variant="ghost"
+              disabled={submitting}
+              onClick={() => {
+                setShowWipeModal(false);
+                setWipeConfirm('');
+              }}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              loading={submitting}
+              disabled={wipeConfirm !== 'RESET'}
+              onClick={() => void executeForgotPasswordReset()}
+            >
+              {t('lock.reset_wipe_confirm')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

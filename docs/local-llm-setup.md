@@ -1,13 +1,35 @@
 # 本地 LLM 部署指导 (可选)
 
-attune **主要使用云版本大模型** — 默认走 OpenAI / Anthropic / Gemini / DeepSeek
-等云端兼容 API. **本文档仅适用于**:
+attune **主要使用云版本大模型或 edge scheduler**。生产本地 AI 路径由
+edge scheduler 统一管理 embedding、rerank、OCR、ASR 和本地 LLM worker。
+本文档只描述自管 OpenAI-compatible 本地服务，**仅适用于**:
 
 - 完全离线 / 隐私敏感场景
 - 自有 GPU 服务器, 希望节省云端 token 成本
 - 开发 / 测试 attune 时本地 mock LLM
+- 个人高级调试，不作为 Attune 默认部署路径
 
-attune **不内置 Ollama, 不打包模型权重**. 本地 LLM 由用户自行部署.
+attune **不内置 Ollama, 不打包模型权重, 不管理本地 worker 生命周期**。需要标准化本地生产部署时，请优先接入 `attune-edge-scheduler`。
+
+## 0. 生产推荐: attune-edge-scheduler
+
+`attune-edge-scheduler` 是独立交付包，不和 `attune-server` 或桌面 `.exe` 混包:
+
+| 平台 | 推荐安装 | 服务形态 |
+|------|----------|----------|
+| Debian / Ubuntu / RISC-V NAS | `attune-edge-scheduler_*.deb` | systemd service |
+| Fedora / openSUSE | `attune-edge-scheduler_*.rpm` | systemd service |
+| Windows | scheduler MSI 或 `.exe` installer | Windows Service |
+| macOS | pkg/dmg 或手动 CLI | LaunchAgent / user service |
+| Container / NAS | scheduler image | separate container |
+
+Attune 主包只配置 scheduler endpoint，例如:
+
+```bash
+ATTUNE_EDGE_SCHEDULER_URL=http://127.0.0.1:8090
+```
+
+生产知识库对话推荐 scheduler 暴露 30B 级 `rag-chat`/`rag-summary` 能力；Attune 通过 `/benchmark/contract`、`/kb/tasks/kb.query.ask` 和 `/jobs/{job_id}` 使用它，不关心底层是 CUDA、ROCm、OpenVINO、DirectML、Metal 还是 CPU。
 
 ## 1. 装 Ollama
 

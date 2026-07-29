@@ -15,15 +15,30 @@ import {
   activeSessionId,
   vaultState,
   theme,
+  backgroundTasks,
 } from '../store/signals';
 import type { View } from '../store/signals';
 import { loadSessions, clearActiveSession } from '../hooks/useChat';
 import { t } from '../i18n';
 import { api, clearToken } from '../store/api';
 import { toast } from '../components/Toast';
+import { confirmDialog } from '../components/ConfirmModal';
 
 const SIDEBAR_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 64;
+
+// 锁定 vault 单一路径（与 SettingsView 一致）：confirm → /vault/lock → 清 token → reload。
+// 顶栏常驻锁按钮 + AccountMenu 菜单项共用，避免逻辑漂移。
+async function lockVault(): Promise<void> {
+  if (!(await confirmDialog({ title: t('confirm.title.lockVault'), message: t('sidebar.menu.lock_vault.confirm'), danger: true }))) return;
+  try {
+    await api.post('/vault/lock');
+    clearToken();
+    location.reload();
+  } catch (e) {
+    toast('error', `${t('sidebar.menu.lock_vault.error')}：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 export function Sidebar(): JSX.Element {
   const collapsed = sidebarCollapsed.value;
@@ -36,7 +51,7 @@ export function Sidebar(): JSX.Element {
 
   return (
     <aside
-      aria-label="Navigation"
+      aria-label={t('sidebar.aria.navigation')}
       style={{
         width,
         flexShrink: 0,
@@ -51,6 +66,7 @@ export function Sidebar(): JSX.Element {
       <BrandAndSearch collapsed={collapsed} />
       <NewChatButton collapsed={collapsed} />
       <SessionList collapsed={collapsed} />
+      <BackgroundTasksPanel collapsed={collapsed} />
       <SecondaryNav collapsed={collapsed} />
       <StatusBar collapsed={collapsed} />
     </aside>
@@ -89,23 +105,27 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
         >
           🌿 {!collapsed && t('app.name')}
         </span>
-        <button
-          type="button"
-          onClick={() => (sidebarCollapsed.value = !collapsed)}
-          aria-label={collapsed ? t('sidebar.action.expand') : t('sidebar.action.collapse')}
-          className="interactive"
-          style={{
-            padding: '4px 6px',
-            background: 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-sm)',
-            color: 'var(--color-text-secondary)',
-            cursor: 'pointer',
-            fontSize: 'var(--text-base)',
-          }}
-        >
-          {collapsed ? '»' : '«'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+          {/* 全局顶栏常驻锁定按钮：vault 解锁时一键锁定，折叠态仍可见 */}
+          <LockVaultButton />
+          <button
+            type="button"
+            onClick={() => (sidebarCollapsed.value = !collapsed)}
+            aria-label={collapsed ? t('sidebar.action.expand') : t('sidebar.action.collapse')}
+            className="interactive"
+            style={{
+              padding: '4px 6px',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--color-text-secondary)',
+              cursor: 'pointer',
+              fontSize: 'var(--text-base)',
+            }}
+          >
+            {collapsed ? '»' : '«'}
+          </button>
+        </div>
       </div>
       {!collapsed && (
         <button
@@ -149,6 +169,32 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
         </button>
       )}
     </div>
+  );
+}
+
+// 全局顶栏常驻锁按钮 — 仅在 vault 解锁时显示（已锁/未知态无意义）
+function LockVaultButton(): JSX.Element | null {
+  if (vaultState.value !== 'unlocked') return null;
+  return (
+    <button
+      type="button"
+      onClick={() => void lockVault()}
+      title={t('sidebar.menu.lock_vault')}
+      aria-label={t('sidebar.menu.lock_vault')}
+      className="interactive"
+      style={{
+        padding: '4px 6px',
+        background: 'transparent',
+        border: 'none',
+        borderRadius: 'var(--radius-sm)',
+        color: 'var(--color-text-secondary)',
+        cursor: 'pointer',
+        fontSize: 'var(--text-base)',
+        lineHeight: 1,
+      }}
+    >
+      <span aria-hidden="true">🔒</span>
+    </button>
   );
 }
 
@@ -217,7 +263,7 @@ function SessionList({ collapsed }: { collapsed: boolean }): JSX.Element {
 
   return (
     <nav
-      aria-label="Sessions"
+      aria-label={t('sidebar.aria.sessions')}
       style={{
         flex: 1,
         overflow: 'auto',
@@ -279,11 +325,131 @@ function SessionItem({ session: s }: { session: { id: string; title: string } })
   );
 }
 
+function BackgroundTasksPanel({ collapsed }: { collapsed: boolean }): JSX.Element | null {
+  const tasks = backgroundTasks.value;
+  if (collapsed || tasks.length === 0) return null;
+
+  return (
+    <section
+      aria-label={t('sidebar.background.aria')}
+      style={{
+        borderTop: '1px solid var(--color-border)',
+        padding: 'var(--space-3) var(--space-4)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-2)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 'var(--space-2)',
+        }}
+      >
+        <span
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-secondary)',
+            fontWeight: 600,
+          }}
+        >
+          {t('sidebar.background.title')}
+        </span>
+        <span
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-disabled)',
+          }}
+        >
+          {tasks.length}
+        </span>
+      </div>
+      {tasks.slice(-3).map((task) => {
+        const pct = Math.max(0, Math.min(100, Math.round(task.progress * 100)));
+        const statusLabel =
+          task.status === 'done'
+            ? t('sidebar.background.done')
+            : task.status === 'failed'
+              ? t('sidebar.background.failed')
+              : t('sidebar.background.running');
+        const statusColor =
+          task.status === 'failed'
+            ? 'var(--color-error)'
+            : task.status === 'done'
+              ? 'var(--color-success)'
+              : 'var(--color-accent)';
+        return (
+          <div key={task.task_id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                minWidth: 0,
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: statusColor,
+                  flexShrink: 0,
+                }}
+              />
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  color: 'var(--color-text)',
+                  fontSize: 'var(--text-xs)',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+                title={task.message || task.task_id}
+              >
+                {task.message || task.task_id}
+              </span>
+              <span style={{ color: statusColor, fontSize: 'var(--text-xs)', flexShrink: 0 }}>
+                {statusLabel}
+              </span>
+            </div>
+            <div
+              aria-hidden="true"
+              style={{
+                height: 4,
+                width: '100%',
+                borderRadius: 2,
+                background: 'var(--color-border)',
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  height: '100%',
+                  width: `${pct}%`,
+                  background: statusColor,
+                  transition: 'width var(--duration-base) var(--ease-out)',
+                }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 // ── ④ 次级导航 ──────────────────────────────────────────────
 type NavItem = { view: View; icon: string; labelKey: string };
 
 // Primary tier — always visible
 const PRIMARY_NAV: NavItem[] = [
+  { view: 'workbench', icon: '🛠', labelKey: 'sidebar.nav.workbench' },
   { view: 'items', icon: '📄', labelKey: 'sidebar.nav.items' },
   { view: 'projects', icon: '🗂', labelKey: 'sidebar.nav.projects' },
   { view: 'knowledge', icon: '📊', labelKey: 'sidebar.nav.knowledge' },
@@ -294,8 +460,13 @@ const MORE_NAV: NavItem[] = [
   { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
   { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
   { view: 'office', icon: '📋', labelKey: 'sidebar.nav.office' },
+  { view: 'doc-intel', icon: '📄', labelKey: 'sidebar.nav.docintel' }, // T-10: 文档对比/总结/逐章
+  { view: 'writing', icon: '✍️', labelKey: 'sidebar.nav.writing' }, // W1-W6: 起草/改写/大纲/综述/引用/模板
+  { view: 'skill-runner', icon: '⚙️', labelKey: 'sidebar.nav.skillRunner' }, // CAP-2: skill 编排（比对成表→下载）
+  { view: 'monitoring', icon: '📡', labelKey: 'sidebar.nav.monitoring' }, // info-monitoring (spec 2026-06-19)
   { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
   { view: 'privacy', icon: '🔐', labelKey: 'sidebar.nav.privacy' }, // v1.0.6
+  { view: 'quota', icon: '📊', labelKey: 'sidebar.nav.quota' }, // v1.0.7: 用量配额仪表板
 ];
 
 const MORE_VIEWS = new Set<View>(MORE_NAV.map((i) => i.view));
@@ -349,7 +520,7 @@ function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
 
   return (
     <nav
-      aria-label="Features"
+      aria-label={t('sidebar.aria.features')}
       style={{
         borderTop: '1px solid var(--color-border)',
         padding: 'var(--space-2) 0',
@@ -519,17 +690,9 @@ function AccountMenu({ onClose }: { onClose: () => void }): JSX.Element {
         {t('sidebar.menu.settings')}
       </MenuItem>
       <MenuItem onClick={async () => {
-        // UI-S8 fix (2026-05-02): 之前仅关闭菜单，**未实际锁定 vault**。
-        // 现在走与 SettingsView 同一路径：调 /vault/lock + 清 token + reload。
+        // 走顶栏常驻锁同一 lockVault() 路径（confirm → /vault/lock → 清 token → reload）
         onClose();
-        if (!confirm(t('sidebar.menu.lock_vault.confirm'))) return;
-        try {
-          await api.post('/vault/lock');
-          clearToken();
-          location.reload();
-        } catch (e) {
-          toast('error', `${t('sidebar.menu.lock_vault.error')}：${e instanceof Error ? e.message : String(e)}`);
-        }
+        await lockVault();
       }}>
         {t('sidebar.menu.lock_vault')}
       </MenuItem>

@@ -34,9 +34,7 @@
 //! invariants without the per-test Argon2id cost. Full HTTP coverage of the
 //! eval surface lives in `tests/amd_laptop_e2e_smoke.rs` (`#[ignore]` E2E).
 
-use attune_core::chat_reliability::{
-    evaluate_response, ChatReliabilityConfig, RetrievedChunk,
-};
+use attune_core::chat_reliability::{evaluate_response, ChatReliabilityConfig, RetrievedChunk};
 use attune_server::eval::{
     build_citation, build_cost_block, build_eval_block, build_grounding_block,
     build_latency_breakdown, parse_eval_headers, GroundingLevel,
@@ -73,8 +71,14 @@ fn citation_preserves_existing_legacy_keys() {
     assert_eq!(c["item_id"], "doc-001", "legacy item_id must be preserved");
     assert_eq!(c["title"], "Rust Book", "legacy title must be preserved");
     assert_eq!(c["relevance"], 0.85, "legacy relevance must be preserved");
-    assert_eq!(c["chunk_offset_start"], 100, "legacy chunk_offset_start preserved");
-    assert_eq!(c["chunk_offset_end"], 250, "legacy chunk_offset_end preserved");
+    assert_eq!(
+        c["chunk_offset_start"], 100,
+        "legacy chunk_offset_start preserved"
+    );
+    assert_eq!(
+        c["chunk_offset_end"], 250,
+        "legacy chunk_offset_end preserved"
+    );
     assert!(c["breadcrumb"].is_array(), "legacy breadcrumb preserved");
 }
 
@@ -146,15 +150,24 @@ fn grounding_high_when_response_well_supported() {
         "doc-001",
         "Rust ownership ensures memory safety without GC.",
     )];
-    let report = evaluate_response(response, &chunks, "what is rust ownership?",
-                                    &ChatReliabilityConfig::default());
+    let report = evaluate_response(
+        response,
+        &chunks,
+        "what is rust ownership?",
+        &ChatReliabilityConfig::default(),
+    );
 
     let block = build_grounding_block(&report);
     let score = block["score"].as_f64().expect("score must be number");
-    assert!(score >= 0.5, "well-supported response should ground >= 0.5, got {score}");
+    assert!(
+        score >= 0.5,
+        "well-supported response should ground >= 0.5, got {score}"
+    );
     let level = block["level"].as_str().expect("level must be string");
-    assert!(matches!(level, "high" | "medium"),
-            "well-grounded should be high/medium, got {level}");
+    assert!(
+        matches!(level, "high" | "medium"),
+        "well-grounded should be high/medium, got {level}"
+    );
 }
 
 #[test]
@@ -165,20 +178,29 @@ fn grounding_surfaces_fabricated_citation_marker_in_report() {
         "doc-001",
         "Rust ownership ensures memory safety without GC.",
     )];
-    let report = evaluate_response(response, &chunks, "what is rust ownership?",
-                                    &ChatReliabilityConfig::default());
+    let report = evaluate_response(
+        response,
+        &chunks,
+        "what is rust ownership?",
+        &ChatReliabilityConfig::default(),
+    );
 
     // The chat_reliability agent owns: when a response cites an item_id
     // that isn't in the retrieved set, citation_grounded MUST contain a
     // Fabricated entry. Bench R3 reads citations_count + status to compute
     // its own aggregate; the f32 score is a coarse summary.
     let block = build_grounding_block(&report);
-    assert_eq!(block["citations_count"].as_u64().unwrap(), 1,
-               "fabricated cite must show up in citations_count");
+    assert_eq!(
+        block["citations_count"].as_u64().unwrap(),
+        1,
+        "fabricated cite must show up in citations_count"
+    );
     // Score will not be 1.0 — citation_penalty triggered
     let score = block["score"].as_f64().unwrap();
-    assert!(score < 1.0,
-            "fabricated cite must lower score below 1.0, got {score}");
+    assert!(
+        score < 1.0,
+        "fabricated cite must lower score below 1.0, got {score}"
+    );
 }
 
 #[test]
@@ -192,16 +214,22 @@ fn grounding_contradiction_pushes_level_down() {
         RetrievedChunk::new("doc-001", "The event happened on 2023-01-10."),
         RetrievedChunk::new("doc-002", "The event happened on 2025-12-31."),
     ];
-    let report = evaluate_response(response, &chunks, "when?",
-                                    &ChatReliabilityConfig::default());
+    let report = evaluate_response(
+        response,
+        &chunks,
+        "when?",
+        &ChatReliabilityConfig::default(),
+    );
     let block = build_grounding_block(&report);
     let level = block["level"].as_str().unwrap();
     let score = block["score"].as_f64().unwrap();
     // With or without exact contradiction detection, the test asserts the
     // invariant: when contradictions_count > 0, level is not "high".
     if block["contradictions_count"].as_u64().unwrap() > 0 {
-        assert_ne!(level, "high",
-                   "contradictions present must not earn high level (score={score})");
+        assert_ne!(
+            level, "high",
+            "contradictions present must not earn high level (score={score})"
+        );
     }
 }
 
@@ -212,12 +240,18 @@ fn grounding_block_includes_counts_for_eval_consumers() {
     let report = evaluate_response(response, &chunks, "", &ChatReliabilityConfig::default());
     let block = build_grounding_block(&report);
 
-    assert!(block["citations_count"].is_u64(),
-            "grounding.citations_count must be u64 for bench R3 aggregator");
-    assert!(block["contradictions_count"].is_u64(),
-            "grounding.contradictions_count must be u64");
-    assert!(block["hallucination_flags_count"].is_u64(),
-            "grounding.hallucination_flags_count must be u64");
+    assert!(
+        block["citations_count"].is_u64(),
+        "grounding.citations_count must be u64 for bench R3 aggregator"
+    );
+    assert!(
+        block["contradictions_count"].is_u64(),
+        "grounding.contradictions_count must be u64"
+    );
+    assert!(
+        block["hallucination_flags_count"].is_u64(),
+        "grounding.hallucination_flags_count must be u64"
+    );
 }
 
 #[test]
@@ -241,10 +275,17 @@ fn cost_block_for_cloud_model() {
     assert_eq!(block["tokens_in"], 120);
     assert_eq!(block["tokens_out"], 80);
     assert_eq!(block["model"], "gpt-4o-mini");
-    assert_eq!(block["provider"], "openai",
-               "gpt-4o-mini provider must be 'openai'");
-    let usd = block["estimated_usd"].as_f64().expect("estimated_usd must be f64");
-    assert!(usd > 0.0, "cloud model should have positive cost, got {usd}");
+    assert_eq!(
+        block["provider"], "openai",
+        "gpt-4o-mini provider must be 'openai'"
+    );
+    let usd = block["estimated_usd"]
+        .as_f64()
+        .expect("estimated_usd must be f64");
+    assert!(
+        usd > 0.0,
+        "cloud model should have positive cost, got {usd}"
+    );
 }
 
 #[test]
@@ -253,10 +294,14 @@ fn cost_block_for_local_model() {
     assert_eq!(block["tokens_in"], 120);
     assert_eq!(block["tokens_out"], 80);
     assert_eq!(block["model"], "qwen2.5:3b");
-    assert_eq!(block["provider"], "ollama",
-               "qwen models must report ollama provider");
+    assert_eq!(
+        block["provider"], "local_scheduler",
+        "local models must report the unified scheduler provider"
+    );
     // Local must return 0.0 (not null) so bench can sum without filter
-    let usd = block["estimated_usd"].as_f64().expect("estimated_usd must be f64");
+    let usd = block["estimated_usd"]
+        .as_f64()
+        .expect("estimated_usd must be f64");
     assert_eq!(usd, 0.0, "local model cost must be 0.0, got {usd}");
 }
 
@@ -308,8 +353,10 @@ fn eval_block_surfaces_when_eval_mode_set() {
     let block = build_eval_block(&parsed, 50);
     assert!(!block.is_null(), "eval_mode header → block must be present");
     assert_eq!(block["determinism"], "best_effort");
-    assert!(block["seed_used"].is_null(),
-            "no seed header → seed_used is null but key present");
+    assert!(
+        block["seed_used"].is_null(),
+        "no seed header → seed_used is null but key present"
+    );
 }
 
 #[test]
@@ -330,7 +377,10 @@ fn eval_block_invalid_seed_does_not_panic() {
     headers.insert("x-attune-eval-seed", "not-a-number".parse().unwrap());
     let parsed = parse_eval_headers(&headers);
     // Invalid seed → drop silently to None (per spec §7 graceful degradation)
-    assert!(parsed.seed.is_none(), "invalid seed must drop to None, not panic");
+    assert!(
+        parsed.seed.is_none(),
+        "invalid seed must drop to None, not panic"
+    );
 }
 
 #[test]
@@ -348,8 +398,10 @@ fn eval_block_trace_full_adds_latency_breakdown() {
     assert_eq!(lb["total"], 123);
     // Per-stage stays at 0 until v1.1 SearchTracer ships (per plan §9.5 #6)
     for key in ["rewrite", "bm25", "vector", "rrf", "rerank"] {
-        assert!(lb[key].is_u64(),
-                "latency_breakdown_ms.{key} must be u64 (0 placeholder OK)");
+        assert!(
+            lb[key].is_u64(),
+            "latency_breakdown_ms.{key} must be u64 (0 placeholder OK)"
+        );
     }
 }
 
