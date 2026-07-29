@@ -81,6 +81,119 @@ fn ingest_options_control_chunking_levels_and_size() {
 }
 
 #[test]
+fn enqueue_content_embeddings_preserves_generic_structure_metadata() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let content = "\
+Table of Contents
+3.1 open_device ................ 7
+
+3 API Reference
+3.1 open_device
+Prototype: int open_device(void)
+Purpose: initialize the device.
+
+4 Operation Flow
+Step 1 Call open_device().
+start_transfer();
+";
+
+    let doc = md_doc("/tmp/controller-manual.txt", content);
+    let item_id = match ingest_document(&store, &dek, &doc).unwrap() {
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => {
+            assert!(chunks_enqueued >= 3);
+            item_id
+        }
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+
+    let chunks = store.peek_embed_queue_chunk_texts(&item_id).unwrap();
+    assert!(chunks.iter().any(|chunk| {
+        chunk.contains("[kind: ApiReference]") && chunk.contains("Prototype: int open_device")
+    }));
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk.contains("[section: 3 API Reference")));
+    assert!(chunks
+        .iter()
+        .any(|chunk| { chunk.contains("[kind: ProcedureStep]") && chunk.contains("Step 1") }));
+    assert!(chunks.iter().any(|chunk| {
+        chunk.contains("[kind: CommandBlock]") && chunk.contains("start_transfer")
+    }));
+}
+
+#[test]
+fn structured_ingest_packs_many_lines_into_bounded_chunks() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let mut content = String::from("3 API Reference\n3.1 Transfer APIs\n");
+    for idx in 0..200 {
+        content.push_str(&format!(
+            "Prototype: int transfer_api_{idx}(struct device *dev)\n"
+        ));
+    }
+
+    let doc = md_doc("/tmp/large-api-manual.txt", &content);
+    let options = IngestOptions::with_profile(None).with_chunking(
+        attune_core::chunker::ChunkingOptions::new(4096, 0).with_levels(false, true),
+    );
+    let (item_id, chunks_enqueued) =
+        match ingest_document_with_options(&store, &dek, &doc, &options).unwrap() {
+            IngestOutcome::Inserted {
+                item_id,
+                chunks_enqueued,
+                ..
+            } => (item_id, chunks_enqueued),
+            other => panic!("expected Inserted, got {other:?}"),
+        };
+
+    assert!(
+        chunks_enqueued < 20,
+        "structured ingest must pack same-section lines instead of queueing one chunk per line"
+    );
+    assert!(
+        store.pending_count_by_type("embed").unwrap() < 20,
+        "embed queue should stay bounded for one large API section"
+    );
+    let chunks = store.peek_embed_queue_chunk_texts(&item_id).unwrap();
+    assert!(chunks
+        .iter()
+        .any(|chunk| chunk.contains("[kind: ApiReference]")));
+}
+
+#[test]
+fn structured_ingest_falls_back_when_outline_would_explode_chunk_count() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let mut content = String::new();
+    for idx in 0..700 {
+        content.push_str(&format!(
+            "3.{idx} transfer_api_{idx}\nPrototype: int transfer_api_{idx}(void)\n"
+        ));
+    }
+
+    let doc = md_doc("/tmp/many-tiny-sections.txt", &content);
+    let options = IngestOptions::with_profile(None).with_chunking(
+        attune_core::chunker::ChunkingOptions::new(4096, 0).with_levels(false, true),
+    );
+    let chunks_enqueued = match ingest_document_with_options(&store, &dek, &doc, &options).unwrap()
+    {
+        IngestOutcome::Inserted {
+            chunks_enqueued, ..
+        } => chunks_enqueued,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+
+    assert!(
+        chunks_enqueued < 100,
+        "pathological outlines should fall back to legacy chunk budget"
+    );
+}
+
+#[test]
 fn duplicate_content_returns_duplicate_and_skips_pipeline() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();

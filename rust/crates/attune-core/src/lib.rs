@@ -124,6 +124,8 @@ pub mod context_admission;
 pub mod context_budget;
 pub mod context_compress;
 pub mod document_intelligence;
+pub mod document_model;
+pub mod document_transform;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;

@@ -50,6 +50,7 @@ pub mod skill_runtime; // skills 编排运行时 REST: list / estimate / run (�
 pub mod skills;
 pub mod status;
 pub mod suggestions; // 零成本主动建议引擎 REST(A2)
+pub mod summary;
 pub mod tags;
 pub mod third_party_accounts; // 第三方账号统一管理 REST(波 C / 能力 B):加密凭据 CRUD,脱敏响应
 pub mod tts;
@@ -57,6 +58,7 @@ pub mod ui;
 pub mod upload;
 pub mod vault;
 pub mod version;
+pub mod voice;
 pub mod watches; // info-monitoring loop: watch / digest / triage / ask / research (spec 2026-06-19)
 pub mod web_search_cache;
 pub mod writing;

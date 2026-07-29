@@ -7,9 +7,12 @@
 //! 是否加载，无需让用户配置（默认全部自动检测 / 加载）。
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 use serde_json::json;
+use serde_json::Value;
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 fn note(available: bool, msg: &str) -> Option<String> {
@@ -20,10 +23,255 @@ fn note(available: bool, msg: &str) -> Option<String> {
     }
 }
 
+fn model_is_ready(model: &attune_core::edge_cloud::SchedulerModelStatus) -> bool {
+    crate::routes::voice::scheduler_model_ready(model)
+}
+
+fn task_capabilities(task_name: &str) -> &'static [&'static str] {
+    match task_name {
+        "kb.query.ask" | "kb.query.ask_hq" | "kb.query.answer" => &["chat"],
+        "kb.document.summary" | "kb.document.long_summary" | "doc.summarize" => &["summary"],
+        "kb.query.embed" | "kb.ingest.embed_batch" => &["embedding"],
+        "kb.query.rerank" | "kb.ingest.rerank_batch" => &["rerank"],
+        "kb.document.ocr_detect" | "kb.document.ocr_recognize" => &["ocr"],
+        "kb.meeting.asr_frontend" => &["asr"],
+        "kb.speech.synthesize" => &["tts"],
+        "kb.query.vlm_extract"
+        | "kb.document.extract"
+        | "kb.document.intel"
+        | "kb.document.vlm_extract"
+        | "doc.extract" => &["vlm"],
+        _ => &[],
+    }
+}
+
+#[cfg(test)]
+fn task_has_capability(task_name: &str, capability: &str) -> bool {
+    task_capabilities(task_name)
+        .iter()
+        .any(|cap| *cap == capability)
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn dynamic_model_capabilities(
+    scheduler: &crate::local_scheduler::SchedulerRuntimeProbe,
+    settings: &Value,
+    llm_configured: bool,
+) -> Vec<Value> {
+    let mut rows = scheduler
+        .models
+        .iter()
+        .filter(|model| !model.name.trim().is_empty())
+        .map(|model| {
+            let mut capabilities = Vec::<String>::new();
+            let mut task_names = Vec::<String>::new();
+            for task in scheduler
+                .runtime_tasks
+                .iter()
+                .filter(|task| task.model == model.name)
+            {
+                push_unique(&mut task_names, &task.name);
+                for cap in task_capabilities(&task.name) {
+                    push_unique(&mut capabilities, cap);
+                }
+            }
+            json!({
+                "name": model.name,
+                "source": "scheduler",
+                "capability_source": "scheduler-runtime-task",
+                "capabilities": capabilities,
+                "ready": model_is_ready(model),
+                "state": model.state,
+                "lifecycle": model.lifecycle,
+                "dispatchable": model.dispatchable,
+                "queue_depth": model.queue_depth,
+                "queue_capacity": model.queue_capacity,
+                "task_names": task_names,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        let configured_model = settings
+            .pointer("/llm/model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        if let Some(model) = configured_model {
+            rows.push(json!({
+                "name": model,
+                "source": "attune-settings",
+                "capability_source": "attune-llm-settings",
+                "capabilities": ["chat", "summary"],
+                "ready": llm_configured,
+                "state": if llm_configured { "configured" } else { "missing" },
+                "lifecycle": if llm_configured { "ready" } else { "unknown" },
+                "dispatchable": if llm_configured { "FREE" } else { "UNAVAILABLE" },
+                "task_names": [],
+            }));
+        }
+    }
+
+    rows
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelCapabilityGate {
+    Allowed,
+    ModelNotFound,
+    CapabilityUnsupported { available: Vec<String> },
+    ModelNotReady,
+}
+
+pub(crate) fn model_capability_gate_result(
+    rows: &[Value],
+    model: &str,
+    capability: &str,
+) -> ModelCapabilityGate {
+    let requested_model = model.trim();
+    let Some(row) = rows
+        .iter()
+        .find(|row| row.get("name").and_then(Value::as_str) == Some(requested_model))
+    else {
+        return ModelCapabilityGate::ModelNotFound;
+    };
+    let capabilities = row
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !capabilities.iter().any(|cap| cap == capability) {
+        return ModelCapabilityGate::CapabilityUnsupported {
+            available: capabilities,
+        };
+    }
+    if row.get("ready").and_then(Value::as_bool) != Some(true) {
+        return ModelCapabilityGate::ModelNotReady;
+    }
+    ModelCapabilityGate::Allowed
+}
+
+fn model_capability_gate_error(
+    rows: &[Value],
+    model: &str,
+    capability: &str,
+    outcome: ModelCapabilityGate,
+) -> AppError {
+    let available_models = rows
+        .iter()
+        .filter_map(|row| row.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect::<Vec<_>>();
+    let row = rows
+        .iter()
+        .find(|row| row.get("name").and_then(Value::as_str) == Some(model));
+    let ready = row
+        .and_then(|row| row.get("ready"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let lifecycle = row
+        .and_then(|row| row.get("lifecycle"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let dispatchable = row
+        .and_then(|row| row.get("dispatchable"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let (status, error, code, available_capabilities) = match outcome {
+        ModelCapabilityGate::Allowed => unreachable!("allowed gate is not an error"),
+        ModelCapabilityGate::ModelNotFound => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("model '{model}' is not known to Attune"),
+            "model-not-found",
+            Vec::new(),
+        ),
+        ModelCapabilityGate::CapabilityUnsupported { available } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("model '{model}' does not support capability '{capability}'"),
+            "model-capability-unsupported",
+            available,
+        ),
+        ModelCapabilityGate::ModelNotReady => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("model '{model}' is not ready for capability '{capability}'"),
+            "model-not-ready",
+            row.and_then(|row| row.get("capabilities"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        ),
+    };
+    AppError::detailed(
+        status,
+        json!({
+            "error": error,
+            "code": code,
+            "model": model,
+            "capability": capability,
+            "ready": ready,
+            "lifecycle": lifecycle,
+            "dispatchable": dispatchable,
+            "available_capabilities": available_capabilities,
+            "available_models": available_models,
+        }),
+    )
+}
+
+pub(crate) async fn require_model_capability_ready(
+    state: &SharedState,
+    model: &str,
+    capability: &str,
+) -> AppResult<()> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AppError::Unprocessable("model cannot be empty".into()));
+    }
+    let scheduler_base = crate::local_scheduler::base_from_state(state);
+    let scheduler = crate::local_scheduler::probe_scheduler_runtime(scheduler_base).await;
+    let settings = state
+        .vault
+        .lock()
+        .ok()
+        .and_then(|vault| vault.store().get_meta("app_settings").ok().flatten())
+        .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+        .unwrap_or_else(|| json!({}));
+    let llm_configured = state.llm.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    let rows = dynamic_model_capabilities(&scheduler, &settings, llm_configured);
+    match model_capability_gate_result(&rows, model, capability) {
+        ModelCapabilityGate::Allowed => Ok(()),
+        outcome => Err(model_capability_gate_error(
+            &rows, model, capability, outcome,
+        )),
+    }
+}
+
 /// GET /api/v1/ai_stack — 返各底座状态 + 硬件 tier + 模型推荐 + region
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let scheduler_base = crate::local_scheduler::base_from_state(&state);
     let scheduler = crate::local_scheduler::probe_scheduler_runtime(scheduler_base.clone()).await;
+    let settings = state
+        .vault
+        .lock()
+        .ok()
+        .and_then(|vault| vault.store().get_meta("app_settings").ok().flatten())
+        .and_then(|data| serde_json::from_slice::<Value>(&data).ok())
+        .unwrap_or_else(|| json!({}));
     let embedding_loaded = state
         .embedding
         .lock()
@@ -56,36 +304,19 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     } else {
         "scheduler"
     };
-    let asr_available = has_scheduler_task("kb.meeting.asr_frontend");
-    let asr_engine = if asr_available {
+    let voice_readiness = crate::routes::voice::scheduler_voice_readiness(&scheduler);
+    let asr_engine = if voice_readiness.asr.available {
         "scheduler:kb.meeting.asr_frontend"
     } else {
         "scheduler"
     };
-    let tts_registered = has_scheduler_task(crate::routes::tts::TTS_TASK);
-    let tts_task_dispatchable = scheduler.runtime_tasks.iter().any(|task| {
-        task.name == crate::routes::tts::TTS_TASK
-            && task.model == crate::routes::tts::TTS_ENGINE
-            && task.async_only
-    });
-    let tts_model = scheduler
-        .models
-        .iter()
-        .find(|model| model.name == "tts-default");
-    let tts_model_ready = tts_model.is_some_and(|model| {
-        model.lifecycle.eq_ignore_ascii_case("ready")
-            && matches!(
-                model.dispatchable.trim().to_ascii_uppercase().as_str(),
-                "FREE" | "BUSY" | "QUEUED"
-            )
-    });
-    let tts_available = tts_registered && tts_task_dispatchable && tts_model_ready;
-    state.set_tts_capability_ready(tts_available);
+    state.set_tts_capability_ready(voice_readiness.tts.available);
     let scheduler_models = scheduler
         .models
         .iter()
         .map(|model| model.name.clone())
         .collect::<Vec<_>>();
+    let model_capabilities = dynamic_model_capabilities(&scheduler, &settings, llm_configured);
 
     // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
     let hw = &state.hardware;
@@ -154,8 +385,10 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "status": scheduler.status,
             "tasks": scheduler.tasks,
             "models": scheduler_models,
+            "model_capabilities": model_capabilities,
             "error": scheduler.error,
         },
+        "model_capabilities": model_capabilities,
         "recommendation": recommendation.as_ref().map(|r| json!({
             "embedding_repo": r.embedding_repo,
             "embedding_size_mb": r.embedding_size_mb,
@@ -181,28 +414,26 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "note": note(ocr_available, "local scheduler 未暴露 kb.document.ocr_detect / kb.document.ocr_recognize")
         },
         "asr": {
-            "available": asr_available,
+            "available": voice_readiness.asr.available,
+            "registered": voice_readiness.asr.registered,
             "engine": asr_engine,
-            "model": serde_json::Value::Null,
+            "task": "kb.meeting.asr_frontend",
+            "model": voice_readiness.asr.model,
+            "model_state": voice_readiness.asr.model_state,
+            "dispatchable": voice_readiness.asr.dispatchable,
             "gpu_capable": serde_json::Value::Null,
-            "note": note(asr_available, "local scheduler 未暴露 kb.meeting.asr_frontend"),
+            "note": voice_readiness.asr.note,
             "gpu_note": serde_json::Value::Null
         },
         "tts": {
-            "available": tts_available,
-            "registered": tts_registered,
+            "available": voice_readiness.tts.available,
+            "registered": voice_readiness.tts.registered,
             "task": crate::routes::tts::TTS_TASK,
             "model": "tts-default",
-            "model_state": tts_model.map(|model| model.state.clone()),
-            "dispatchable": tts_model.map(|model| model.dispatchable.clone()),
-            "engine": if tts_available { "scheduler:tts-default" } else { "scheduler" },
-            "note": if !tts_registered {
-                Some("local scheduler 未暴露 kb.speech.synthesize".to_string())
-            } else if !tts_model_ready {
-                Some("local scheduler 已注册 TTS task，但 tts-default 模型尚未配置或不可调度".to_string())
-            } else {
-                None
-            }
+            "model_state": voice_readiness.tts.model_state,
+            "dispatchable": voice_readiness.tts.dispatchable,
+            "engine": if voice_readiness.tts.available { "scheduler:tts-default" } else { "scheduler" },
+            "note": voice_readiness.tts.note
         },
         "llm": {
             "configured": llm_configured,
@@ -239,4 +470,115 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
             "kb.speech.synthesize"
         ],
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(
+        name: &str,
+        lifecycle: &str,
+        dispatchable: &str,
+    ) -> attune_core::edge_cloud::SchedulerModelStatus {
+        attune_core::edge_cloud::SchedulerModelStatus {
+            name: name.to_string(),
+            lifecycle: lifecycle.to_string(),
+            dispatchable: dispatchable.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn task(name: &str, model: &str) -> attune_core::edge_cloud::SchedulerRuntimeTaskSpec {
+        attune_core::edge_cloud::SchedulerRuntimeTaskSpec {
+            name: name.to_string(),
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scheduler_model_capabilities_are_explicit_task_mappings_not_name_heuristics() {
+        let scheduler = crate::local_scheduler::SchedulerRuntimeProbe {
+            status: "ready".to_string(),
+            tasks: vec![],
+            runtime_tasks: vec![
+                task("kb.query.embed", "embedding-int8"),
+                task("kb.speech.synthesize", "tts-default"),
+                task("kb.document.summary", "llm-summary"),
+                task("kb.query.ask", "llm-chat"),
+            ],
+            models: vec![
+                model("embedding-int8", "ready", "FREE"),
+                model("tts-default", "ready", "FREE"),
+                model("llm-summary", "loading", "UNAVAILABLE"),
+                model("llm-chat", "ready", "FREE"),
+                model("qwen-instruct-unknown", "ready", "FREE"),
+            ],
+            error: None,
+        };
+
+        let rows = dynamic_model_capabilities(&scheduler, &json!({}), false);
+        let caps_for = |name: &str| {
+            rows.iter()
+                .find(|row| row["name"] == name)
+                .and_then(|row| row["capabilities"].as_array())
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(caps_for("embedding-int8"), vec!["embedding"]);
+        assert_eq!(caps_for("tts-default"), vec!["tts"]);
+        assert_eq!(caps_for("llm-summary"), vec!["summary"]);
+        assert_eq!(caps_for("llm-chat"), vec!["chat"]);
+        assert!(caps_for("qwen-instruct-unknown").is_empty());
+    }
+
+    #[test]
+    fn model_capability_gate_rejects_unready_or_wrong_capability_models() {
+        let rows = vec![
+            json!({
+                "name": "llm-chat",
+                "capabilities": ["chat"],
+                "ready": true,
+            }),
+            json!({
+                "name": "llm-summary",
+                "capabilities": ["summary"],
+                "ready": false,
+            }),
+        ];
+
+        assert_eq!(
+            model_capability_gate_result(&rows, "llm-chat", "chat"),
+            ModelCapabilityGate::Allowed
+        );
+        assert_eq!(
+            model_capability_gate_result(&rows, "llm-chat", "summary"),
+            ModelCapabilityGate::CapabilityUnsupported {
+                available: vec!["chat".to_string()]
+            }
+        );
+        assert_eq!(
+            model_capability_gate_result(&rows, "llm-summary", "summary"),
+            ModelCapabilityGate::ModelNotReady
+        );
+        assert_eq!(
+            model_capability_gate_result(&rows, "missing", "chat"),
+            ModelCapabilityGate::ModelNotFound
+        );
+    }
+
+    #[test]
+    fn task_capability_registry_covers_k3_scheduler_contract_tasks() {
+        assert!(task_has_capability("kb.query.ask", "chat"));
+        assert!(task_has_capability("kb.query.ask_hq", "chat"));
+        assert!(task_has_capability("kb.query.answer", "chat"));
+        assert!(task_has_capability("kb.document.summary", "summary"));
+        assert!(task_has_capability("doc.summarize", "summary"));
+        assert!(task_has_capability("kb.document.long_summary", "summary"));
+        assert!(!task_has_capability("kb.query.embed", "chat"));
+        assert!(!task_has_capability("kb.speech.synthesize", "summary"));
+    }
 }

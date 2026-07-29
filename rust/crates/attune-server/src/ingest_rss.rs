@@ -114,9 +114,7 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
         if !existing_item_active {
             if let Some(stale_item_id) = existing.as_ref().and_then(|row| row.item_id.as_ref()) {
                 if let Err(e) = store.enqueue_reindex(stale_item_id, "purge") {
-                    errors.push(format!(
-                        "{source_ref}: enqueue stale tracking purge {e}"
-                    ));
+                    errors.push(format!("{source_ref}: enqueue stale tracking purge {e}"));
                     continue;
                 }
             }
@@ -158,9 +156,7 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
                         continue;
                     }
                     if let Err(e) = store.record_signal_event("doc_update", old, None) {
-                        tracing::debug!(
-                            "sync_rss_feed: record_signal_event failed for {old}: {e}"
-                        );
+                        tracing::debug!("sync_rss_feed: record_signal_event failed for {old}: {e}");
                     }
                     old_item_id = Some(old.clone());
                 }

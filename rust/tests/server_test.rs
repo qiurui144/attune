@@ -262,6 +262,100 @@ async fn test_list_items_forbidden_when_locked() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+#[tokio::test]
+async fn test_demo_reset_requires_confirmation() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_post(
+        state,
+        "/api/v1/demo/reset",
+        serde_json::json!({"confirm": "WRONG"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("CLEAR_DEMO"));
+}
+
+#[tokio::test]
+async fn test_demo_reset_clears_items() {
+    let (state, _tmp) = make_unlocked_state();
+    do_post(
+        state.clone(),
+        "/api/v1/ingest",
+        serde_json::json!({"title": "History", "content": "old content", "source_type": "note"}),
+    )
+    .await;
+
+    let (reset_status, reset_body) = do_post(
+        state.clone(),
+        "/api/v1/demo/reset",
+        serde_json::json!({"confirm": "CLEAR_DEMO"}),
+    )
+    .await;
+    assert_eq!(reset_status, StatusCode::OK);
+    assert_eq!(reset_body["status"], "ok");
+    assert_eq!(reset_body["items_deleted"], 1);
+
+    let (list_status, list_body) = do_get(state, "/api/v1/items").await;
+    assert_eq!(list_status, StatusCode::OK);
+    assert_eq!(list_body["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_demo_reset_clears_bound_dirs_and_source_tracking() {
+    let (state, _tmp) = make_unlocked_state();
+    {
+        let vault = state.vault.lock().unwrap();
+        let dek = vault.dek_db().unwrap();
+        let item_id = vault
+            .store()
+            .insert_item(
+                &dek,
+                "Bound Source",
+                "old bound source content",
+                Some("file:///tmp/old-source.md"),
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+        let dir_id = vault
+            .store()
+            .bind_directory("/tmp/old-demo-source", true, &["md"])
+            .unwrap();
+        vault
+            .store()
+            .upsert_indexed_file(&dir_id, "/tmp/old-demo-source/a.md", "sha", &item_id)
+            .unwrap();
+        assert_eq!(vault.store().list_bound_directories().unwrap().len(), 1);
+        assert!(vault
+            .store()
+            .get_indexed_file_for_dir(&dir_id, "/tmp/old-demo-source/a.md")
+            .unwrap()
+            .is_some());
+    }
+
+    let (reset_status, reset_body) = do_post(
+        state.clone(),
+        "/api/v1/demo/reset",
+        serde_json::json!({"confirm": "CLEAR_DEMO"}),
+    )
+    .await;
+    assert_eq!(reset_status, StatusCode::OK);
+    assert_eq!(reset_body["bound_dirs_cleared"], 1);
+    assert_eq!(reset_body["source_tracking_cleared"], 1);
+
+    let vault = state.vault.lock().unwrap();
+    assert_eq!(vault.store().list_bound_directories().unwrap().len(), 0);
+    assert!(vault
+        .store()
+        .get_indexed_file("/tmp/old-demo-source/a.md")
+        .unwrap()
+        .is_none());
+}
+
 // ─── POST /api/v1/chat — input validation ────────────────────────────────────
 
 #[tokio::test]
@@ -464,8 +558,54 @@ fn make_multipart_body(filename: &str, content: &[u8]) -> (String, Vec<u8>) {
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
+fn make_multipart_body_with_relative_path(
+    filename: &str,
+    relative_path: &str,
+    content: &[u8],
+) -> (String, Vec<u8>) {
+    let boundary = "test_boundary_xyz";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"relative_path\"\r\n\r\n");
+    body.extend_from_slice(relative_path.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
 async fn do_upload(state: Arc<AppState>, filename: &str, content: &[u8]) -> (StatusCode, Value) {
     let (content_type, body_bytes) = make_multipart_body(filename, content);
+    let router = attune_server::build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/upload")
+        .header("content-type", content_type)
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json)
+}
+
+async fn do_upload_with_relative_path(
+    state: Arc<AppState>,
+    filename: &str,
+    relative_path: &str,
+    content: &[u8],
+) -> (StatusCode, Value) {
+    let (content_type, body_bytes) =
+        make_multipart_body_with_relative_path(filename, relative_path, content);
     let router = attune_server::build_router(state);
     let req = Request::builder()
         .method("POST")
@@ -495,6 +635,39 @@ async fn test_upload_markdown_returns_ok_with_id() {
     assert!(
         body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
         "response should contain non-empty id: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_accepts_safe_folder_relative_path() {
+    let (state, _tmp) = make_unlocked_state();
+    let md = b"# Folder Upload\n\nThis markdown file came from a dropped folder.";
+    let (status, body) =
+        do_upload_with_relative_path(state, "note.md", "docs/network/note.md", md).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "folder relative upload should succeed: {body}"
+    );
+    assert_eq!(body["source_ref"], "upload://docs/network/note.md");
+}
+
+#[tokio::test]
+async fn test_upload_rejects_unsafe_folder_relative_path() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) =
+        do_upload_with_relative_path(state, "note.md", "../secrets/note.md", b"bad").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "path traversal should be rejected: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("relative_path"),
+        "error should mention relative_path: {body}"
     );
 }
 

@@ -216,19 +216,19 @@ impl Store {
         )?;
 
         let chunk_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM embed_queue WHERE item_id = ?1",
+            "SELECT COUNT(*) FROM embed_queue WHERE item_id = ?1 AND task_type = 'embed'",
             params![id],
             |row| row.get(0),
         )?;
 
         let embedding_pending: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM embed_queue WHERE item_id = ?1 AND status = 'pending'",
+            "SELECT COUNT(*) FROM embed_queue WHERE item_id = ?1 AND status = 'pending' AND task_type = 'embed'",
             params![id],
             |row| row.get(0),
         )?;
 
         let embedding_done: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM embed_queue WHERE item_id = ?1 AND status = 'done'",
+            "SELECT COUNT(*) FROM embed_queue WHERE item_id = ?1 AND status = 'done' AND task_type = 'embed'",
             params![id],
             |row| row.get(0),
         )?;
@@ -378,6 +378,8 @@ impl Store {
                 "DELETE FROM chunk_breadcrumbs WHERE item_id = ?1",
                 params![id],
             )?;
+            self.conn
+                .execute("DELETE FROM chunk_spans WHERE item_id = ?1", params![id])?;
             // v0.7 记忆护城河：删 embed_queue 里该 item 所有 pending 任务。
             // 否则 worker 会拿到 stale chunk 继续走 embedding → 浪费 + 给已删 item
             // 写向量（vectors.delete_by_item_id 必须先于此调用，由 reindex::purge 协调）。
@@ -470,6 +472,14 @@ impl Store {
             params![item_id],
         )?;
         Ok(n)
+    }
+
+    /// Clear orphan async work that can survive a broad demo reset.
+    pub fn clear_demo_async_queues(&self) -> Result<usize> {
+        let embed = self.conn.execute("DELETE FROM embed_queue", [])?;
+        let reindex = self.conn.execute("DELETE FROM reindex_queue", [])?;
+        let jobs = self.conn.execute("DELETE FROM job_queue", [])?;
+        Ok(embed + reindex + jobs)
     }
 
     pub fn item_count(&self) -> Result<usize> {
@@ -848,6 +858,7 @@ mod privacy_tier_tests {
     fn sr(item_id: &str, source_type: &str) -> crate::search::SearchResult {
         crate::search::SearchResult {
             item_id: item_id.to_string(),
+            chunk_idx: None,
             score: 0.9,
             title: "T".into(),
             content: "secret evidence body".into(),

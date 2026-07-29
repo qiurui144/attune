@@ -112,7 +112,10 @@ fn capability_metadata_flags_are_correct() {
     assert!(asr.requires_local_model);
     let tts = state.capabilities.get("tts").unwrap();
     assert!(tts.requires_local_model);
-    assert!(!tts.enabled, "tts starts disabled until scheduler readiness is observed");
+    assert!(
+        !tts.enabled,
+        "tts starts disabled until scheduler readiness is observed"
+    );
     assert_eq!(tts.health, CapabilityHealth::Unavailable);
 
     let llm = state.capabilities.get("llm").unwrap();

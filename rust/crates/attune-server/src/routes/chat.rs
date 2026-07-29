@@ -1,5 +1,6 @@
 use attune_core::chat_reliability::{evaluate_response, ChatReliabilityConfig, RetrievedChunk};
 use attune_core::cost;
+use attune_core::crypto::Key32;
 use attune_core::llm::ChatMessage;
 use attune_core::pii::Redactor;
 use axum::extract::{Path, State};
@@ -12,10 +13,11 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
 use crate::rag_orchestrator::{
-    build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
-    build_local_scheduler_out_of_manual_boundary, build_local_scheduler_safety_refusal,
-    local_scheduler_operational_safety_query, local_scheduler_out_of_manual_boundary_query,
-    local_scheduler_source_lookup_query, local_scheduler_summary_query,
+    assemble_evidence_pack, build_evidence_pack_prompt, build_local_scheduler_extractive_answer,
+    build_local_scheduler_extractive_summary, build_local_scheduler_out_of_manual_boundary,
+    build_local_scheduler_safety_refusal, local_scheduler_operational_safety_query,
+    local_scheduler_out_of_manual_boundary_query, local_scheduler_source_lookup_query,
+    local_scheduler_summary_query,
 };
 use crate::state::SharedState;
 
@@ -47,12 +49,14 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
-const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 96;
+const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 160;
 const DEFAULT_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS: u32 = 40;
 const MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 16;
 const MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 512;
-const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Use only refs. Answer concisely with citations/source names. For simple lookups use 1-2 sentences; for comparisons use up to 4 bullets. If evidence is insufficient, say insufficient. No operational instructions.";
+const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Use only refs. Answer with citations/source names. Never answer a how-to only by telling the user to read a document; first extract and present the usable method from refs, then mention where to verify the original text. For software/SDK/API how-to questions, provide ordered actionable steps with exact paths, symbols, enum/type names, search keywords, and minimal call patterns when refs support them. If the question explicitly names a platform or OS, do not substitute APIs, paths, or behavior from a different platform unless the user asks for a comparison. For exact lookups, answer only the requested values and citations; do not add speculative typo corrections or commentary. For simple factual lookups use 1-2 sentences; for comparisons use bullets. If evidence is insufficient, say insufficient. Do not provide safety-critical real-world operational procedures.";
+#[allow(dead_code)] // Unit-tested env default; integration-test builds compile without cfg(test).
 const DEFAULT_CHAT_KB_TOP_K: u32 = 5;
+#[allow(dead_code)] // Unit-tested env clamp; integration-test builds compile without cfg(test).
 const MIN_CHAT_KB_TOP_K: u32 = 1;
 const MAX_CHAT_KB_TOP_K: u32 = 20;
 const DEFAULT_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K: u32 = 3;
@@ -63,6 +67,7 @@ const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 48;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
 const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
+const LOCAL_SCHEDULER_EXACT_BOUNDARY_CONTEXT_MAX_CHARS: usize = 1_200;
 const FALLBACK_CHAT_RAG_SYSTEM_PROMPT: &str = "You answer only from the provided knowledge-base evidence. Prefer concise answers with explicit source references. If evidence is empty or does not support the question, say that the current knowledge base does not contain enough evidence.";
 const LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS: [&str; 3] = [
     "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
@@ -78,6 +83,45 @@ struct LocalSchedulerAnswerBudget {
     context_chunk_max_chars: usize,
     source_diverse: bool,
     explicit_output_override: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalSchedulerRagRuntimeConfig {
+    ask_max_output_tokens: Option<u32>,
+    context_top_k: Option<u32>,
+    context_chunk_max_chars: Option<u32>,
+    job_poll_timeout_ms: Option<u64>,
+    source_diverse_min_output_tokens: Option<u32>,
+}
+
+fn local_scheduler_rag_u32(settings: &Value, key: &str) -> Option<u32> {
+    settings
+        .get("rag")
+        .and_then(|v| v.get("local_scheduler"))
+        .and_then(|v| v.get(key))
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0)
+}
+
+fn local_scheduler_rag_runtime_config_from_settings(
+    settings: &Value,
+) -> LocalSchedulerRagRuntimeConfig {
+    LocalSchedulerRagRuntimeConfig {
+        ask_max_output_tokens: local_scheduler_rag_u32(settings, "ask_max_output_tokens"),
+        context_top_k: local_scheduler_rag_u32(settings, "context_top_k"),
+        context_chunk_max_chars: local_scheduler_rag_u32(settings, "context_chunk_max_chars"),
+        job_poll_timeout_ms: settings
+            .get("rag")
+            .and_then(|v| v.get("local_scheduler"))
+            .and_then(|v| v.get("job_poll_timeout_ms"))
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0),
+        source_diverse_min_output_tokens: local_scheduler_rag_u32(
+            settings,
+            "source_diverse_min_output_tokens",
+        ),
+    }
 }
 
 fn tiered_memory_allowed_for_provider(provider_is_local: bool, enabled: bool) -> bool {
@@ -129,6 +173,7 @@ pub async fn stream_chat(Json(body): Json<ChatStreamRequest>) -> AppResult<impl 
     ))
 }
 
+#[allow(dead_code)] // Unit-tested env parser; production chat uses scheduler profiles directly.
 fn chat_kb_top_k() -> usize {
     crate::local_scheduler::env_u32_any(
         &[
@@ -141,8 +186,13 @@ fn chat_kb_top_k() -> usize {
     .clamp(MIN_CHAT_KB_TOP_K, MAX_CHAT_KB_TOP_K) as usize
 }
 
-fn chat_context_chunk_max_chars() -> usize {
-    crate::local_scheduler::env_u32_any(
+fn configured_or_env_u32(configured: Option<u32>, keys: &[&str], default: u32) -> u32 {
+    configured.unwrap_or_else(|| crate::local_scheduler::env_u32_any(keys, default))
+}
+
+fn chat_context_chunk_max_chars(config: &LocalSchedulerRagRuntimeConfig) -> usize {
+    configured_or_env_u32(
+        config.context_chunk_max_chars,
         &[
             "ATTUNE_CHAT_CONTEXT_CHUNK_MAX_CHARS",
             "ATTUNE_RAG_CONTEXT_CHUNK_MAX_CHARS",
@@ -157,8 +207,9 @@ fn chat_context_chunk_max_chars() -> usize {
     ) as usize
 }
 
-fn local_scheduler_ask_context_top_k() -> usize {
-    crate::local_scheduler::env_u32_any(
+fn local_scheduler_ask_context_top_k(config: &LocalSchedulerRagRuntimeConfig) -> usize {
+    configured_or_env_u32(
+        config.context_top_k,
         &[
             "ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K",
             "ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K",
@@ -181,8 +232,11 @@ fn env_u32_override(keys: &[&str]) -> Option<u32> {
     })
 }
 
-fn local_scheduler_source_diverse_min_output_tokens() -> u32 {
-    crate::local_scheduler::env_u32_any(
+fn local_scheduler_source_diverse_min_output_tokens(
+    config: &LocalSchedulerRagRuntimeConfig,
+) -> u32 {
+    configured_or_env_u32(
+        config.source_diverse_min_output_tokens,
         &[
             "ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS",
             "ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS",
@@ -195,21 +249,28 @@ fn local_scheduler_source_diverse_min_output_tokens() -> u32 {
     )
 }
 
-fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSchedulerAnswerBudget {
-    let explicit = env_u32_override(&LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS).map(|tokens| {
-        tokens.clamp(
-            MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
-            MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
-        )
-    });
+fn local_scheduler_answer_budget(
+    query: &str,
+    knowledge: &[Value],
+    config: &LocalSchedulerRagRuntimeConfig,
+) -> LocalSchedulerAnswerBudget {
+    let explicit = config
+        .ask_max_output_tokens
+        .or_else(|| env_u32_override(&LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS))
+        .map(|tokens| {
+            tokens.clamp(
+                MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+                MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+            )
+        });
     let source_diverse = source_diversity_query(query);
-    let base_context_top_k = local_scheduler_ask_context_top_k();
-    let base_chunk_chars = chat_context_chunk_max_chars();
+    let base_context_top_k = local_scheduler_ask_context_top_k(config);
+    let base_chunk_chars = chat_context_chunk_max_chars(config);
     let multi_source = source_diverse || distinct_source_count(knowledge) >= 3;
 
     if let Some(tokens) = explicit {
         let tokens = if source_diverse {
-            tokens.max(local_scheduler_source_diverse_min_output_tokens())
+            tokens.max(local_scheduler_source_diverse_min_output_tokens(config))
         } else {
             tokens
         };
@@ -271,6 +332,14 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
             "流程问题",
         ],
     );
+    let asks_software_howto = asks_detailed
+        && contains_any_ascii(
+            &query_l,
+            &[
+                "sdk", "api", "rtos", "driver", "enum", "type", "id", "symbol", "code", "开发",
+                "接口", "驱动", "代码", "函数", "枚举",
+            ],
+        );
     let asks_decision_or_comparison = contains_any_ascii(
         &query_l,
         &[
@@ -299,10 +368,14 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
             ("safety", 64, 3, 96)
         } else if local_scheduler_out_of_manual_boundary_query(query) {
             ("boundary", 64, 3, 112)
-        } else if asks_topic_coverage && (asks_detailed || asks_decision_or_comparison || multi_source) {
+        } else if asks_topic_coverage
+            && (asks_detailed || asks_decision_or_comparison || multi_source)
+        {
             ("complex_topic", 224, 8, 360)
         } else if asks_diagnostic {
             ("diagnostic", 192, 6, 320)
+        } else if asks_software_howto {
+            ("software_howto", 224, 5, 640)
         } else if asks_decision_or_comparison {
             ("synthesis", 160, 6, 240)
         } else if asks_detailed && multi_source {
@@ -362,8 +435,1276 @@ fn bounded_context_text(text: &str, max_chars: usize) -> String {
     format!("{}{}{}", head.trim_end(), ELLIPSIS, tail.trim_start())
 }
 
+fn query_terms_for_context(query: &str) -> Vec<String> {
+    let mut terms = std::collections::BTreeSet::new();
+    let lower = query.to_ascii_lowercase();
+    let mut ascii = String::new();
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            ascii.push(ch);
+        } else if !ascii.is_empty() {
+            if ascii.chars().count() >= 2 {
+                terms.insert(ascii.clone());
+            }
+            ascii.clear();
+        }
+    }
+    if ascii.chars().count() >= 2 {
+        terms.insert(ascii);
+    }
+
+    for term in [
+        "时钟",
+        "查询",
+        "查找",
+        "步骤",
+        "开发",
+        "接口",
+        "驱动",
+        "函数",
+        "枚举",
+        "路径",
+        "代码",
+        "配置",
+        "调试",
+        "错误",
+        "日志",
+        "证据",
+        "环境",
+        "初始化",
+        "方案",
+        "选择",
+        "编译",
+        "打包",
+        "命令",
+        "执行",
+        "安装",
+        "工具链",
+        "单板",
+        "板级",
+        "固件",
+        "输出",
+        "流程",
+    ] {
+        if query.contains(term) {
+            terms.insert(term.to_string());
+        }
+    }
+    if contains_any_ascii(
+        &lower,
+        &[
+            "sdk",
+            "build",
+            "compile",
+            "package",
+            "first",
+            "toolchain",
+            "boardconfig",
+        ],
+    ) || query.contains("编译")
+        || query.contains("打包")
+        || query.contains("首次")
+        || query.contains("第一次")
+        || query.contains("环境")
+        || query.contains("工具链")
+        || query.contains("板级")
+    {
+        for term in [
+            "环境",
+            "初始化",
+            "配置",
+            "方案",
+            "选择",
+            "命令",
+            "执行",
+            "安装",
+            "工具链",
+            "单板",
+            "板级",
+            "固件",
+            "输出",
+            "build",
+            "compile",
+            "package",
+            "setup",
+            "env",
+            "target",
+            "config",
+            "toolchain",
+            "boardconfig",
+            "source",
+            "envsetup",
+            "lunch",
+            "pack",
+            "ubuntu",
+            "apt-get",
+            "env_install",
+        ] {
+            terms.insert(term.to_string());
+        }
+    }
+    if contains_any_ascii(&lower, &["type", "id", "clock", "clk"]) || query.contains("时钟") {
+        for term in ["hal/source", "clk_type", ".clk_type"] {
+            terms.insert(term.to_string());
+        }
+    }
+
+    terms.into_iter().collect()
+}
+
+fn concrete_context_score(query_terms: &[String], snippet: &str) -> (i32, bool) {
+    let snippet_l = snippet.to_ascii_lowercase();
+    let mut score = 0i32;
+    let mut unique_query_hits = 0i32;
+    for term in query_terms {
+        let hits = if term.is_ascii() {
+            snippet_l.matches(&term.to_ascii_lowercase()).count()
+        } else {
+            snippet.matches(term).count()
+        };
+        if hits > 0 {
+            unique_query_hits += 1;
+        }
+        score += (hits.min(3) as i32) * 10;
+    }
+    if unique_query_hits >= 2 {
+        score += unique_query_hits * 12;
+    }
+
+    let mut has_action_or_code = false;
+    for marker in [
+        "方法 1",
+        "方法1",
+        "步骤 1",
+        "步骤1",
+        "1. 方法",
+        "2. 方法",
+        "1、",
+        "2、",
+        "一、",
+        "二、",
+    ] {
+        if snippet.contains(marker) {
+            score += 20;
+            has_action_or_code = true;
+        }
+    }
+    for marker in [
+        "步骤",
+        "方法",
+        "示例",
+        "路径",
+        "文件",
+        "目录",
+        "搜索",
+        "查找",
+        "调用",
+        "接口",
+        "参数",
+        "返回",
+        "定义",
+        "枚举",
+        "结构",
+        "代码",
+        "配置",
+        "命令",
+        "打开",
+        "确认",
+        "选择",
+        "获取",
+        "如下",
+        "procedure",
+        "example",
+        "path",
+        "file",
+        "search",
+        "call",
+        "parameter",
+        "return",
+    ] {
+        if contains_any_ascii(&snippet_l, &[marker]) || snippet.contains(marker) {
+            score += 6;
+            has_action_or_code = true;
+        }
+    }
+    for marker in [
+        ".h", ".c", ".cc", ".cpp", ".hpp", ".rs", ".py", ".go", ".java", ".yaml", ".yml", ".json",
+        "#define", "typedef", "enum", "struct", "()", "->", "::", "/", "_", "=",
+    ] {
+        if contains_any_ascii(&snippet_l, &[marker]) || snippet.contains(marker) {
+            score += 8;
+            has_action_or_code = true;
+        }
+    }
+    for penalty in ["版本历史", "目录", "版权", "文档密级", "著作权声明"] {
+        score -= (snippet.matches(penalty).count().min(8) as i32) * 4;
+    }
+    if unique_query_hits < 2 {
+        score -= (snippet.matches("参数").count().min(8) as i32) * 3;
+        score -= (snippet.matches("返回").count().min(8) as i32) * 3;
+    }
+    score -= (snippet.matches(". . .").count().min(20) as i32) * 2;
+    (score, has_action_or_code)
+}
+
+fn query_focused_context_text(query: &str, evidence: &str, max_chars: usize) -> Option<String> {
+    let terms = query_terms_for_context(query);
+    if terms.is_empty() || evidence.chars().count() <= max_chars {
+        return None;
+    }
+
+    let chars = evidence.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+    let window = max_chars.min(chars.len());
+    let step = (window / 3).max(1);
+    let mut best: Option<(i32, usize)> = None;
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + window).min(chars.len());
+        let snippet = chars[start..end].iter().collect::<String>();
+        let (score, _) = concrete_context_score(&terms, &snippet);
+        if best
+            .map(|(best_score, _)| score > best_score)
+            .unwrap_or(true)
+        {
+            best = Some((score, start));
+        }
+        if end == chars.len() {
+            break;
+        }
+        start += step;
+    }
+
+    let (score, best_start) = best?;
+    if score <= 0 {
+        return None;
+    }
+    let best_start = best_start.saturating_sub(window / 3);
+    let best_end = (best_start + window).min(chars.len());
+    let mut snippet = chars[best_start..best_end].iter().collect::<String>();
+    if best_start > 0 {
+        snippet = format!("...{}", snippet.trim_start());
+    }
+    if best_end < chars.len() {
+        snippet = format!("{}...", snippet.trim_end());
+    }
+    Some(snippet)
+}
+
+fn concrete_action_context_text(query: &str, evidence: &str, max_chars: usize) -> Option<String> {
+    if !manual_howto_query(query) {
+        return None;
+    }
+    let terms = query_terms_for_context(query);
+    let chars = evidence.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+    let window = max_chars.min(chars.len());
+    let step = (window / 2).max(1);
+    let mut best: Option<(i32, usize)> = None;
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + window).min(chars.len());
+        let snippet = chars[start..end].iter().collect::<String>();
+        let (score, has_action_or_code) = concrete_context_score(&terms, &snippet);
+        if has_action_or_code
+            && best
+                .map(|(best_score, _)| score > best_score)
+                .unwrap_or(true)
+        {
+            best = Some((score, start));
+        }
+        if end == chars.len() {
+            break;
+        }
+        start += step;
+    }
+
+    let (score, best_start) = best?;
+    if score < 12 {
+        return None;
+    }
+    let start = best_start;
+    let end = (start + window).min(chars.len());
+    let mut snippet = chars[start..end].iter().collect::<String>();
+    if start > 0 {
+        snippet = format!("...{}", snippet.trim_start());
+    }
+    if end < chars.len() {
+        snippet = format!("{}...", snippet.trim_end());
+    }
+    Some(snippet)
+}
+
+fn multi_stage_context_query(query: &str) -> bool {
+    let lower = query.to_ascii_lowercase();
+    contains_any_ascii(
+        &lower,
+        &[
+            "workflow",
+            "procedure",
+            "build",
+            "compile",
+            "package",
+            "install",
+            "toolchain",
+            "boardconfig",
+        ],
+    ) || query.contains("流程")
+        || query.contains("编译")
+        || query.contains("打包")
+        || query.contains("安装")
+        || query.contains("配置")
+        || query.contains("工具链")
+        || query.contains("板级")
+        || query.contains("第一次")
+        || query.contains("首次")
+}
+
+fn multi_focused_context_text(query: &str, evidence: &str, max_chars: usize) -> Option<String> {
+    if !manual_howto_query(query) || !multi_stage_context_query(query) || max_chars < 600 {
+        return None;
+    }
+    let terms = query_terms_for_context(query);
+    if terms.len() < 3 || evidence.chars().count() <= max_chars {
+        return None;
+    }
+
+    let lines = evidence.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let mut scored = Vec::new();
+    let line_window = 7usize.min(lines.len()).max(1);
+    for start in 0..lines.len() {
+        let end = (start + line_window).min(lines.len());
+        let snippet = lines[start..end].join("\n");
+        let (score, has_action_or_code) = concrete_context_score(&terms, &snippet);
+        if score >= 18 && has_action_or_code {
+            scored.push((score, start, end));
+        }
+    }
+    if scored.len() < 2 {
+        return None;
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let max_windows = 4usize;
+    let mut selected = Vec::new();
+    for (_, start, end) in scored {
+        let overlaps = selected.iter().any(|(s, e): &(usize, usize)| {
+            start < e.saturating_add(2) && end.saturating_add(2) > *s
+        });
+        if overlaps {
+            continue;
+        }
+        selected.push((start, end));
+        if selected.len() >= max_windows {
+            break;
+        }
+    }
+    if selected.len() < 2 {
+        return None;
+    }
+    selected.sort_by_key(|(start, _)| *start);
+
+    let mut out = String::new();
+    for (idx, (start, end)) in selected.into_iter().enumerate() {
+        if idx > 0 {
+            out.push_str("\n...\n");
+        } else if start > 0 {
+            out.push_str("...\n");
+        }
+        out.push_str(lines[start..end].join("\n").trim());
+        if end < lines.len() {
+            out.push_str("\n...");
+        }
+    }
+    Some(bounded_context_text(&out, max_chars))
+}
+
+fn exact_value_lookup_query(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    contains_any_ascii(
+        &q,
+        &[
+            "exact",
+            "verbatim",
+            "copy",
+            "code",
+            "id",
+            "key",
+            "value",
+            "token",
+            "逐字",
+            "原样",
+            "复制",
+            "编码",
+            "编号",
+            "键值",
+            "分别是什么",
+            "是什么",
+        ],
+    ) || q.chars().any(|ch| ch == '_' || ch == '=')
+}
+
+fn evidence_key_value_lines(contexts: &[Value]) -> Vec<String> {
+    let mut lines = std::collections::BTreeSet::new();
+    for context in contexts {
+        let Some(text) = context.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        for raw in text.lines() {
+            let line = raw
+                .trim()
+                .trim_start_matches(|ch| matches!(ch, '-' | '*' | '[' | ']'))
+                .trim();
+            if !(8..=180).contains(&line.chars().count()) || !line.contains('=') {
+                continue;
+            }
+            let has_identifier = line
+                .chars()
+                .any(|ch| ch == '_' || ch == '-' || ch.is_ascii_digit());
+            let has_ascii_alpha = line.chars().any(|ch| ch.is_ascii_alphabetic());
+            if has_identifier && has_ascii_alpha {
+                lines.insert(line.to_string());
+            }
+        }
+    }
+    lines.into_iter().collect()
+}
+
+fn supplement_exact_value_lookup_answer(query: &str, contexts: &[Value], answer: &str) -> String {
+    if !exact_value_lookup_query(query) {
+        return answer.to_string();
+    }
+    let missing = evidence_key_value_lines(contexts)
+        .into_iter()
+        .filter(|line| !answer.contains(line))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return answer.to_string();
+    }
+
+    format!(
+        "{}\n\n精确值补充（按引用证据原样复制）：\n{}",
+        answer.trim_end(),
+        missing.join("\n")
+    )
+}
+
+fn weak_manual_howto_answer(query: &str, answer: &str) -> bool {
+    let query_l = query.to_ascii_lowercase();
+    let asks_howto = contains_any_ascii(
+        &query_l,
+        &[
+            "how",
+            "steps",
+            "procedure",
+            "操作",
+            "如何",
+            "怎么",
+            "怎样",
+            "查询",
+            "查找",
+            "开发",
+        ],
+    );
+    if !asks_howto {
+        return false;
+    }
+    let answer_l = answer.to_ascii_lowercase();
+    let redirects = contains_any_ascii(
+        &answer_l,
+        &[
+            "refer to",
+            "consult",
+            "technical support",
+            "参考",
+            "查阅",
+            "联系技术支持",
+            "获取详细信息",
+            "提供了具体的操作步骤",
+        ],
+    );
+    let unsupported_refusal = contains_any_ascii(
+        &answer_l,
+        &[
+            "does not include information",
+            "does not explain",
+            "cannot provide a direct answer",
+            "cannot answer based on the",
+            "insufficient information",
+            "no direct answer",
+            "没有包含",
+            "未包含",
+            "没有说明",
+            "无法直接回答",
+            "不能直接回答",
+            "证据不足",
+        ],
+    );
+    let vague_placeholders = contains_any_ascii(
+        &answer_l,
+        &[
+            "所需信息",
+            "相关信息",
+            "相关代码",
+            "相关章节",
+            "等文件",
+            "等信息",
+            "获取详细信息",
+        ],
+    );
+    let concrete_markers = [
+        ".c",
+        ".h",
+        ".rs",
+        ".py",
+        "路径",
+        "文件",
+        "搜索",
+        "调用",
+        "步骤 1",
+        "方法 1",
+        "参数",
+        "返回",
+        "enum",
+        "struct",
+        "#define",
+        "()",
+        "type 是",
+        "id 是",
+        "作为 id",
+        "字段",
+        "错误码",
+    ]
+    .iter()
+    .filter(|marker| answer_l.contains(&marker.to_ascii_lowercase()))
+    .count();
+    let has_operation_detail = contains_any_ascii(
+        &answer_l,
+        &[
+            "调用",
+            "参数",
+            "返回",
+            "type 是",
+            "id 是",
+            "作为 id",
+            "字段",
+            "enum",
+            "struct",
+            "#define",
+            "()",
+            "错误码",
+        ],
+    );
+    (redirects || unsupported_refusal)
+        && (concrete_markers < 2 || !has_operation_detail || vague_placeholders)
+}
+
+fn compact_manual_howto_excerpt(query: &str, title: &str, evidence: &str) -> Option<String> {
+    let focused = multi_focused_context_text(query, evidence, 1_100)
+        .or_else(|| concrete_action_context_text(query, evidence, 1_100))
+        .or_else(|| query_focused_context_text(query, evidence, 1_100))
+        .unwrap_or_else(|| bounded_context_text(evidence, 1_100));
+    let focused = normalize_extracted_evidence_text(&focused)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !contains_any_ascii(
+                line,
+                &["版权", "文档密级", "著作权声明", "免责声明", "商标声明"],
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut compact = focused.split_whitespace().collect::<Vec<_>>().join(" ");
+    let key_lines = manual_howto_key_evidence_lines(query, evidence, &compact, 10);
+    if !key_lines.is_empty() {
+        compact = format!("关键证据行：{} 上下文：{}", key_lines.join(" | "), compact);
+    }
+    if compact.chars().count() < 24 {
+        return None;
+    }
+    let compact = normalize_extracted_evidence_text(&bounded_context_text(&compact, 2_200));
+    if title.trim().is_empty() {
+        Some(compact)
+    } else {
+        Some(format!("《{}》：{}", title.trim(), compact))
+    }
+}
+
+fn manual_howto_marker_matches_line(marker: &str, line_l: &str, line: &str) -> bool {
+    let marker_l = normalize_extracted_evidence_text(marker).to_ascii_lowercase();
+    let marker_l = marker_l.trim();
+    if marker_l.is_empty() {
+        return false;
+    }
+    if !marker_l.is_ascii() {
+        return line.contains(marker);
+    }
+    if marker_l.contains('/')
+        || marker_l.contains('.')
+        || marker_l.contains('-')
+        || marker_l.contains('_')
+    {
+        return line_l.contains(marker_l);
+    }
+    let mut current = String::new();
+    for ch in line_l.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if current == marker_l {
+                return true;
+            }
+            current.clear();
+        }
+    }
+    !current.is_empty() && current == marker_l
+}
+
+fn manual_howto_priority_markers(query: &str, markers: &[String]) -> Vec<String> {
+    let query_l = query.to_ascii_lowercase();
+    let mut priorities = std::collections::BTreeSet::new();
+    if query.contains("工具链")
+        || query.contains("环境")
+        || contains_any_ascii(&query_l, &["toolchain", "setup"])
+    {
+        for marker in ["ubuntu", "apt-get", "toolchain", "env_install"] {
+            priorities.insert(marker.to_string());
+        }
+    }
+    if query.contains("打包") || contains_any_ascii(&query_l, &["package"]) {
+        priorities.insert("pack".to_string());
+    }
+    if query.contains("编译") || contains_any_ascii(&query_l, &["build", "compile"]) {
+        for marker in ["envsetup", "lunch"] {
+            priorities.insert(marker.to_string());
+        }
+    }
+    if query.contains("板级") || contains_any_ascii(&query_l, &["boardconfig", "board"]) {
+        for marker in ["build.sh", "project/cfg", "boardconfig"] {
+            priorities.insert(marker.to_string());
+        }
+    }
+    if contains_any_ascii(&query_l, &["type", "id", "clock", "clk"]) || query.contains("时钟") {
+        for marker in ["hal/source", "clk_type"] {
+            priorities.insert(marker.to_string());
+        }
+    }
+    for marker in markers {
+        let marker_l = marker.to_ascii_lowercase();
+        if marker_l.chars().any(|ch| ch.is_ascii_digit())
+            && marker_l.chars().count() >= 4
+            && marker_l.is_ascii()
+        {
+            priorities.insert(marker_l);
+        }
+    }
+    priorities.into_iter().collect()
+}
+
+fn manual_howto_key_evidence_lines(
+    query: &str,
+    evidence: &str,
+    already_selected: &str,
+    limit: usize,
+) -> Vec<String> {
+    let evidence = normalize_extracted_evidence_text(evidence);
+    let selected_l = normalize_extracted_evidence_text(already_selected).to_ascii_lowercase();
+    let query_l = query.to_ascii_lowercase();
+    let mut markers = query_terms_for_context(query);
+    if multi_stage_context_query(query) {
+        markers.extend(
+            [
+                "envsetup",
+                "build/envsetup",
+                "lunch",
+                "pack",
+                "build.sh",
+                "ubuntu",
+                "apt-get",
+                "env_install",
+                "toolchain",
+                "boardconfig",
+                "project/cfg",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    if contains_any_ascii(&query_l, &["type", "id", "clock", "clk"]) || query.contains("时钟") {
+        markers.extend(
+            ["hal/source", "clk_type", ".clk_type"]
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    markers.sort();
+    markers.dedup();
+    if markers.is_empty() {
+        return Vec::new();
+    }
+    let priority_markers = manual_howto_priority_markers(query, &markers);
+    let query_digit_markers = markers
+        .iter()
+        .filter(|marker| {
+            marker.is_ascii()
+                && marker.chars().count() >= 4
+                && marker.chars().any(|ch| ch.is_ascii_digit())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let board_config_query =
+        query.contains("板级") || contains_any_ascii(&query_l, &["boardconfig", "board"]);
+
+    struct KeyLineCandidate {
+        score: i32,
+        index: usize,
+        key: String,
+        line: String,
+        priority_hits: Vec<String>,
+    }
+
+    let lines = evidence.lines().map(str::trim).collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let line_l = line.to_ascii_lowercase();
+        let hit = markers
+            .iter()
+            .any(|marker| manual_howto_marker_matches_line(marker, &line_l, line));
+        if !hit {
+            continue;
+        }
+        if line.contains(". . .") || line.starts_with("目录 ") || *line == "目录" {
+            continue;
+        }
+        let start = idx.saturating_sub(1);
+        let end = (idx + 2).min(lines.len());
+        let combined = lines[start..end]
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .filter(|line| {
+                !contains_any_ascii(
+                    line,
+                    &["版权", "文档密级", "著作权声明", "免责声明", "商标声明"],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let combined = combined.split_whitespace().collect::<Vec<_>>().join(" ");
+        if combined.chars().count() < 8 {
+            continue;
+        }
+        let key = compact_ascii_lower(&combined);
+        if key.is_empty() || selected_l.contains(&combined.to_ascii_lowercase()) {
+            continue;
+        }
+        let combined_l = combined.to_ascii_lowercase();
+        let (mut score, has_action_or_code) = concrete_context_score(&markers, &combined);
+        let has_path_or_command_shape = combined
+            .chars()
+            .any(|ch| matches!(ch, '/' | '_' | '-' | '.'))
+            && contains_any_ascii(
+                &combined_l,
+                &[
+                    ".mk",
+                    ".h",
+                    ".c",
+                    ".sh",
+                    "build.sh",
+                    "boardconfig",
+                    "toolchain",
+                    "hal/source",
+                    "project/cfg",
+                ],
+            );
+        let has_shell_command_shape = contains_any_ascii(
+            &combined_l,
+            &[
+                "sudo ", "apt-get", "source ", "./", " make ", " pack ", " lunch",
+            ],
+        ) || combined_l.trim_start().starts_with("pack ")
+            || combined_l.trim() == "pack";
+        if !has_action_or_code && !has_path_or_command_shape && !has_shell_command_shape {
+            continue;
+        }
+        if has_action_or_code {
+            score += 20;
+        }
+        for marker in [
+            " ubuntu ",
+            "source ",
+            "sudo ",
+            "apt-get",
+            "env_install",
+            "envsetup",
+            "lunch",
+            "pack",
+            "build.sh",
+            "boardconfig",
+            "project/cfg",
+            "hal/source",
+            "clk_type",
+        ] {
+            if combined_l.contains(marker) {
+                score += 48;
+            }
+        }
+        if has_path_or_command_shape {
+            score += 42;
+        }
+        if board_config_query
+            && combined_l.contains("boardconfig-")
+            && combined_l.contains(".mk")
+            && query_digit_markers
+                .iter()
+                .any(|marker| manual_howto_marker_matches_line(marker, &combined_l, &combined))
+        {
+            score += 180;
+        }
+        for marker in &markers {
+            if manual_howto_marker_matches_line(marker, &combined_l, &combined) {
+                score += 18;
+            }
+        }
+        if combined.contains(". . .") {
+            score -= 80;
+        }
+        if combined.contains("版本历史") || combined.contains("目录") {
+            score -= 20;
+        }
+        let priority_hits = priority_markers
+            .iter()
+            .filter(|marker| manual_howto_marker_matches_line(marker, &combined_l, &combined))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !priority_hits.is_empty() {
+            score += 80;
+        }
+        candidates.push(KeyLineCandidate {
+            score,
+            index: idx,
+            key,
+            line: bounded_context_text(&combined, 300),
+            priority_hits,
+        });
+    }
+    candidates.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for priority in &priority_markers {
+        if out.len() >= limit {
+            break;
+        }
+        if let Some(candidate) = candidates
+            .iter()
+            .filter(|candidate| candidate.priority_hits.iter().any(|hit| hit == priority))
+            .max_by(|a, b| a.score.cmp(&b.score).then_with(|| b.index.cmp(&a.index)))
+        {
+            if seen.insert(candidate.key.clone()) {
+                out.push(candidate.line.clone());
+            }
+        }
+    }
+    for candidate in candidates {
+        if seen.insert(candidate.key) {
+            out.push(candidate.line);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn normalize_extracted_evidence_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{00a0}' => ' ',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn concrete_evidence_tokens(text: &str) -> Vec<String> {
+    let mut tokens = std::collections::BTreeSet::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            let token = current.trim_matches(|c| matches!(c, '.' | '-' | '/' | '_'));
+            if token.chars().count() >= 4
+                && token
+                    .chars()
+                    .any(|c| matches!(c, '_' | '-' | '/' | '.') || c.is_ascii_digit())
+            {
+                tokens.insert(token.to_string());
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        let token = current.trim_matches(|c| matches!(c, '.' | '-' | '/' | '_'));
+        if token.chars().count() >= 4
+            && token
+                .chars()
+                .any(|c| matches!(c, '_' | '-' | '/' | '.') || c.is_ascii_digit())
+        {
+            tokens.insert(token.to_string());
+        }
+    }
+    tokens.into_iter().collect()
+}
+
+fn manual_howto_excerpt_adds_missing_concrete_evidence(answer: &str, excerpt: &str) -> bool {
+    let answer_l = answer.to_ascii_lowercase();
+    concrete_evidence_tokens(excerpt)
+        .into_iter()
+        .any(|token| !answer_l.contains(&token.to_ascii_lowercase()))
+}
+
+fn supplement_weak_manual_howto_answer(query: &str, knowledge: &[Value], answer: &str) -> String {
+    if !manual_howto_query(query) {
+        return answer.to_string();
+    }
+    let mut excerpts = Vec::new();
+    let knowledge = prefer_knowledge_for_explicit_source_title_qualifiers(query, knowledge);
+    for k in knowledge.iter().take(3) {
+        let title = local_scheduler_source_title(k);
+        let evidence = k
+            .get("inject_content")
+            .and_then(|v| v.as_str())
+            .or_else(|| k.get("content").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        if evidence.trim().is_empty() {
+            continue;
+        }
+        if let Some(excerpt) = compact_manual_howto_excerpt(query, title, evidence) {
+            if weak_manual_howto_answer(query, answer)
+                || manual_howto_excerpt_adds_missing_concrete_evidence(answer, &excerpt)
+            {
+                excerpts.push(excerpt);
+            }
+        }
+        if !excerpts.is_empty() {
+            break;
+        }
+    }
+    if excerpts.is_empty() {
+        return answer.to_string();
+    }
+    format!(
+        "{answer}\n\n操作方法补充（来自引用原文）：\n- {}\n\n原文位置：可在上述引用来源对应章节核对原文。",
+        excerpts.join("\n- ")
+    )
+}
+
+fn manual_howto_query(query: &str) -> bool {
+    let query_l = query.to_ascii_lowercase();
+    contains_any_ascii(
+        &query_l,
+        &[
+            "how",
+            "steps",
+            "procedure",
+            "sdk",
+            "api",
+            "rtos",
+            "driver",
+            "type",
+            "id",
+            "操作",
+            "如何",
+            "怎么",
+            "怎样",
+            "查询",
+            "查找",
+            "开发",
+            "接口",
+            "驱动",
+            "代码",
+        ],
+    )
+}
+
+fn expand_manual_howto_knowledge_from_store(
+    state: &SharedState,
+    dek: &Key32,
+    query: &str,
+    knowledge: &[Value],
+) -> Vec<Value> {
+    if !manual_howto_query(query) || knowledge.is_empty() {
+        return knowledge.to_vec();
+    }
+
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    knowledge
+        .iter()
+        .map(|k| {
+            let mut expanded = k.clone();
+            let Some(item_id) = k.get("item_id").and_then(|v| v.as_str()) else {
+                return expanded;
+            };
+            let Ok(Some(item)) = vault.store().get_item(dek, item_id) else {
+                return expanded;
+            };
+            if item.content.trim().is_empty() {
+                return expanded;
+            }
+            if let Some(obj) = expanded.as_object_mut() {
+                obj.insert("title".into(), Value::String(item.title));
+                obj.insert("content".into(), Value::String(item.content.clone()));
+                obj.insert("inject_content".into(), Value::String(item.content));
+                obj.insert("manual_howto_expanded".into(), Value::Bool(true));
+            }
+            expanded
+        })
+        .collect()
+}
+
 fn local_scheduler_source_title(k: &Value) -> &str {
     k.get("title").and_then(|v| v.as_str()).unwrap_or("").trim()
+}
+
+fn source_title_ascii_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch.to_ascii_lowercase());
+        } else if current.len() >= 3 {
+            tokens.push(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+    if current.len() >= 3 {
+        tokens.push(current);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn explicit_source_title_qualifier_tokens(query: &str, knowledge: &[Value]) -> Vec<String> {
+    if knowledge.len() < 2 {
+        return Vec::new();
+    }
+    let query_tokens = source_title_ascii_tokens(query);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+    let source_hints = knowledge
+        .iter()
+        .map(local_scheduler_source_identity_text)
+        .collect::<Vec<_>>();
+    query_tokens
+        .into_iter()
+        .filter(|token| {
+            let matches = source_hints
+                .iter()
+                .filter(|hint| compact_ascii_lower(hint).contains(token.as_str()))
+                .count();
+            matches > 0 && matches < source_hints.len()
+        })
+        .collect()
+}
+
+fn source_title_product_or_platform_qualifier(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_digit())
+        || matches!(
+            token,
+            "rtos" | "freertos" | "linux" | "tina" | "android" | "windows" | "win"
+        )
+}
+
+fn source_title_discriminator_token(token: &str) -> bool {
+    token.len() >= 3
+        && !matches!(
+            token,
+            "guide"
+                | "manual"
+                | "doc"
+                | "docs"
+                | "pdf"
+                | "dev"
+                | "devel"
+                | "driver"
+                | "drivers"
+                | "sdk"
+                | "api"
+                | "chapter"
+                | "section"
+        )
+}
+
+fn source_title_leading_discriminator_token(title: &str) -> Option<String> {
+    let mut current = String::new();
+    for ch in title.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch.to_ascii_lowercase());
+        } else {
+            break;
+        }
+    }
+    if current.len() >= 3 && source_title_discriminator_token(&current) {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+fn source_title_clarification_request(query: &str, knowledge: &[Value]) -> Option<String> {
+    if knowledge.len() < 2 || source_diversity_query(query) {
+        return None;
+    }
+    let qualifiers = explicit_source_title_qualifier_tokens(query, knowledge);
+    if !qualifiers.is_empty() {
+        let narrowed = prefer_knowledge_for_source_title_qualifiers(knowledge, &qualifiers);
+        if !narrowed.is_empty()
+            && narrowed.len() < knowledge.len()
+            && qualifiers
+                .iter()
+                .any(|token| source_title_product_or_platform_qualifier(token))
+        {
+            return None;
+        }
+        if distinct_source_count(&narrowed) == 1 {
+            return None;
+        }
+    }
+
+    let query_tokens = source_title_ascii_tokens(query);
+    if query_tokens.is_empty() {
+        return None;
+    }
+    let query_token_set = query_tokens
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let title_tokens = knowledge
+        .iter()
+        .map(|k| source_title_ascii_tokens(local_scheduler_source_title(k)))
+        .collect::<Vec<_>>();
+    let relevant_indexes = title_tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, tokens)| {
+            let compact_title = compact_ascii_lower(local_scheduler_source_title(&knowledge[idx]));
+            let has_query_topic = query_tokens
+                .iter()
+                .any(|token| compact_title.contains(token.as_str()));
+            if has_query_topic && !tokens.is_empty() {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if relevant_indexes.len() < 2 {
+        return None;
+    }
+
+    let mut discriminator_counts = std::collections::BTreeMap::<String, usize>::new();
+    for idx in &relevant_indexes {
+        for token in &title_tokens[*idx] {
+            if query_token_set.contains(token) || !source_title_discriminator_token(token) {
+                continue;
+            }
+            *discriminator_counts.entry(token.clone()).or_insert(0) += 1;
+        }
+    }
+    let discriminators = discriminator_counts
+        .into_iter()
+        .filter_map(|(token, count)| {
+            if count > 0 && count < relevant_indexes.len() {
+                Some(token.to_ascii_uppercase())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if discriminators.len() < 2 {
+        return None;
+    }
+    let leading_discriminators = relevant_indexes
+        .iter()
+        .filter_map(|idx| {
+            source_title_leading_discriminator_token(local_scheduler_source_title(&knowledge[*idx]))
+        })
+        .filter(|token| !query_token_set.contains(token))
+        .collect::<std::collections::BTreeSet<_>>();
+    if leading_discriminators.len() < 2 {
+        return None;
+    }
+
+    let mut seen_titles = std::collections::HashSet::new();
+    let mut titles = Vec::new();
+    for idx in relevant_indexes {
+        let title = local_scheduler_source_title(&knowledge[idx]);
+        let key = compact_ascii_lower(title);
+        if !title.is_empty() && seen_titles.insert(key) {
+            titles.push(format!("《{title}》"));
+        }
+    }
+    if titles.len() < 2 {
+        return None;
+    }
+
+    let source_list = titles.into_iter().take(4).collect::<Vec<_>>().join("、");
+    let option_list = discriminators
+        .into_iter()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Some(format!(
+        "这个问题命中了多个可能的来源/平台：{source_list}。请先指定要使用哪一个来源或平台（例如 {option_list}），我再按对应文档给出接口和操作方法。"
+    ))
+}
+
+fn prefer_knowledge_for_explicit_source_title_qualifiers(
+    query: &str,
+    knowledge: &[Value],
+) -> Vec<Value> {
+    let qualifiers = explicit_source_title_qualifier_tokens(query, knowledge);
+    if qualifiers.is_empty() {
+        return knowledge.to_vec();
+    }
+    let filtered = prefer_knowledge_for_source_title_qualifiers(knowledge, &qualifiers);
+    if filtered.is_empty() {
+        knowledge.to_vec()
+    } else {
+        filtered
+    }
+}
+
+fn prefer_knowledge_for_source_title_qualifiers(
+    knowledge: &[Value],
+    qualifiers: &[String],
+) -> Vec<Value> {
+    let filtered = knowledge
+        .iter()
+        .filter(|k| {
+            let source = compact_ascii_lower(&local_scheduler_source_identity_text(k));
+            qualifiers
+                .iter()
+                .all(|token| source.contains(token.as_str()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    filtered
 }
 
 fn local_scheduler_source_key(k: &Value) -> String {
@@ -378,6 +1719,29 @@ fn local_scheduler_source_key(k: &Value) -> String {
         return "unknown".to_string();
     }
     compact
+}
+
+fn local_scheduler_source_identity_text(k: &Value) -> String {
+    let mut parts = Vec::new();
+    for key in ["title", "source_path", "uri", "url", "item_id"] {
+        if let Some(value) = k.get(key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                parts.push(value.to_string());
+            }
+        }
+    }
+    if let Some(crumbs) = k.get("breadcrumb").and_then(Value::as_array) {
+        for crumb in crumbs {
+            if let Some(value) = crumb.as_str() {
+                let value = value.trim();
+                if !value.is_empty() {
+                    parts.push(value.to_string());
+                }
+            }
+        }
+    }
+    parts.join(" ")
 }
 
 fn distinct_source_count(knowledge: &[Value]) -> usize {
@@ -762,8 +2126,12 @@ fn rag_response_contract_prompt_block(plan: Option<&RagIntentPlan>) -> String {
     format!(
         "RAG response contract:\n\
          - Use only cited refs for factual claims and attach citation markers to concrete claims.\n\
+         - Do not answer a how-to/manual question only with \"check the guide/source\"; first give the actionable method supported by refs, then add where the user can verify the original wording.\n\
+         - If the question is underspecified and refs contain multiple candidate platforms, products, or source scopes for the same requested topic, ask a concise clarification question before giving a sourced answer.\n\
          - Preserve user-named domain, product, component, standard, source-key, and topic terms verbatim at least once; if you translate them, keep the original token beside the translation.\n\
+         - For exact lookup questions, copy codes, IDs, numeric values, and key-value pairs from refs verbatim; do not normalize, rename, or invent replacements for evidence tokens.\n\
          {topic_line}\
+         - For software, SDK, driver, and API development questions: include exact file paths, enum/type names, IDs, function names, command/search keywords, and a minimal usage pattern whenever those details are present in refs.\n\
          - For operation, troubleshooting, and support guidance: include the problem/symptom, the cited evidence, the logs/configuration/topology/screenshots/timelines/approvals or other missing materials to collect, ordered next steps, and an explicit warning not to invent unsupported operational conclusions.\n\
          - For decisions, compliance, diagnosis, negative-evidence, or out-of-manual questions: explicitly say evidence is insufficient when required evidence is absent, say the conclusion cannot be made directly, and name what to request or collect next.\n\
          - If the requested practice is industry-general but not directly covered by the refs, label it as industry-general guidance and do not present it as a manual/source conclusion.\n"
@@ -836,7 +2204,14 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
         if text_contains_any(query, &["路由", "route", "routing"])
             && !text_contains_any(
                 answer,
-                &["路由", "route", "routing", "route table", "routing table", "default gateway"],
+                &[
+                    "路由",
+                    "route",
+                    "routing",
+                    "route table",
+                    "routing table",
+                    "default gateway",
+                ],
             )
         {
             missing_operational_items.push("路由/route table/default gateway");
@@ -899,6 +2274,32 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
         }
     }
 
+    if matches!(
+        plan.answer_mode,
+        RagAnswerMode::Decision | RagAnswerMode::Troubleshooting | RagAnswerMode::NegativeEvidence
+    ) && text_contains_any(
+        query,
+        &[
+            "先",
+            "优先",
+            "排序",
+            "排查步骤",
+            "before",
+            "ordered",
+            "sequence",
+        ],
+    ) && !text_contains_any(
+        answer,
+        &["先", "优先", "before", "first", "再", "ordered", "sequence"],
+    ) {
+        additions.push(if chinese {
+            "流程顺序补充：先收集引用证据、日志、配置、拓扑、截图、时间线、审批或其他现场材料，再按证据排序排查步骤；证据不足时不要直接给整改或根因结论。"
+        } else {
+            "Sequence supplement: collect cited evidence, logs, configuration, topology, screenshots, timelines, approvals, or other field material before ordering troubleshooting steps; when evidence is insufficient, do not give a final remediation or root-cause conclusion."
+        }
+        .to_string());
+    }
+
     if query_requests_out_of_manual_boundary(query) {
         let missing_boundary = !text_contains_any(answer, &["证据不足", "insufficient evidence"])
             || !text_contains_any(
@@ -957,7 +2358,10 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
         && text_has_cjk(answer)
         && !text_contains_any(answer, &["中文", "Chinese"])
     {
-        additions.push("中文说明：以上回答保留了用户指定的原始英文术语，并使用中文解释其含义和边界。".to_string());
+        additions.push(
+            "中文说明：以上回答保留了用户指定的原始英文术语，并使用中文解释其含义和边界。"
+                .to_string(),
+        );
     }
 
     if matches!(plan.answer_mode, RagAnswerMode::Followup)
@@ -1121,10 +2525,17 @@ fn select_local_scheduler_context_knowledge<'a>(
     }
 }
 
-fn local_scheduler_context_text(title: &str, evidence: &str, max_chars: usize) -> String {
+fn local_scheduler_context_text(
+    query: &str,
+    title: &str,
+    evidence: &str,
+    max_chars: usize,
+) -> String {
     let title = title.trim();
     if title.is_empty() {
-        return bounded_context_text(evidence, max_chars);
+        return concrete_action_context_text(query, evidence, max_chars)
+            .or_else(|| query_focused_context_text(query, evidence, max_chars))
+            .unwrap_or_else(|| bounded_context_text(evidence, max_chars));
     }
 
     let title_budget = (max_chars / 4).clamp(32, LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS);
@@ -1135,10 +2546,95 @@ fn local_scheduler_context_text(title: &str, evidence: &str, max_chars: usize) -
     }
 
     let evidence_budget = max_chars - prefix.chars().count();
-    format!(
-        "{prefix}{}",
-        bounded_context_text(evidence, evidence_budget)
-    )
+    let evidence = multi_focused_context_text(query, evidence, evidence_budget)
+        .or_else(|| concrete_action_context_text(query, evidence, evidence_budget))
+        .or_else(|| query_focused_context_text(query, evidence, evidence_budget))
+        .unwrap_or_else(|| bounded_context_text(evidence, evidence_budget));
+    format!("{prefix}{}", evidence)
+}
+
+fn query_requests_start_and_end_evidence(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    if contains_any_ascii(&q, &["首尾", "前后两端", "两端信息"]) {
+        return true;
+    }
+
+    let asks_start = contains_any_ascii(
+        &q,
+        &[
+            "开头",
+            "开篇",
+            "起始",
+            "文首",
+            "前面",
+            "opening",
+            "beginning",
+            "begin",
+            "start",
+            "first",
+        ],
+    );
+    let asks_end = contains_any_ascii(
+        &q,
+        &[
+            "末尾", "结尾", "文末", "最后", "尾部", "ending", "final", "end", "last",
+        ],
+    );
+    asks_start && asks_end
+}
+
+fn local_scheduler_boundary_context_text(
+    query: &str,
+    title: &str,
+    full_text: &str,
+    max_chars: usize,
+) -> Option<String> {
+    if !query_requests_start_and_end_evidence(query) {
+        return None;
+    }
+    let max_chars = if exact_value_lookup_query(query) {
+        max_chars.min(LOCAL_SCHEDULER_EXACT_BOUNDARY_CONTEXT_MAX_CHARS)
+    } else {
+        max_chars
+    };
+    let full_text = full_text.trim();
+    let total_chars = full_text.chars().count();
+    if total_chars == 0 || total_chars <= max_chars {
+        return None;
+    }
+
+    let title = title.trim();
+    let title_budget = (max_chars / 4).clamp(32, LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS);
+    let title = bounded_context_text(title, title_budget);
+    let prefix = if title.is_empty() {
+        String::new()
+    } else {
+        format!("{title}: ")
+    };
+    let labels_budget = "\n\n[Ending evidence]\n".chars().count()
+        + "[Beginning evidence]\n".chars().count()
+        + prefix.chars().count();
+    if max_chars <= labels_budget + 16 {
+        return None;
+    }
+
+    let evidence_budget = max_chars - labels_budget;
+    let head_budget = evidence_budget / 2 + evidence_budget % 2;
+    let tail_budget = evidence_budget / 2;
+    let head = full_text.chars().take(head_budget).collect::<String>();
+    let tail = full_text
+        .chars()
+        .rev()
+        .take(tail_budget)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    Some(format!(
+        "{prefix}[Beginning evidence]\n{}\n\n[Ending evidence]\n{}",
+        head.trim_end(),
+        tail.trim_start()
+    ))
 }
 
 fn build_chat_search_params(
@@ -1178,11 +2674,12 @@ fn rerank_enabled(state: &SharedState) -> bool {
 
 #[cfg(test)]
 fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
+    let config = LocalSchedulerRagRuntimeConfig::default();
     let budget = LocalSchedulerAnswerBudget {
         profile: "legacy",
         max_output_tokens: local_scheduler_ask_max_output_tokens(),
-        context_top_k: local_scheduler_ask_context_top_k(),
-        context_chunk_max_chars: chat_context_chunk_max_chars(),
+        context_top_k: local_scheduler_ask_context_top_k(&config),
+        context_chunk_max_chars: chat_context_chunk_max_chars(&config),
         source_diverse: false,
         explicit_output_override: env_u32_override(&LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS)
             .is_some(),
@@ -1195,25 +2692,43 @@ fn build_local_scheduler_kb_contexts_with_budget(
     knowledge: &[Value],
     budget: LocalSchedulerAnswerBudget,
 ) -> Vec<Value> {
+    let knowledge = prefer_knowledge_for_explicit_source_title_qualifiers(query, knowledge);
     select_local_scheduler_context_knowledge(
         query,
-        knowledge,
+        &knowledge,
         budget.context_top_k,
         budget.source_diverse,
     )
     .into_iter()
     .filter_map(|k| {
         let title = local_scheduler_source_title(k);
-        let text = k
+        let inject_text = k
             .get("inject_content")
             .and_then(|v| v.as_str())
-            .or_else(|| k.get("content").and_then(|v| v.as_str()))
             .unwrap_or("")
             .trim();
+        let full_text = k
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let text = if !inject_text.is_empty() {
+            inject_text
+        } else {
+            full_text
+        };
         if text.is_empty() {
             return None;
         }
-        let text = local_scheduler_context_text(title, text, budget.context_chunk_max_chars);
+        let text = local_scheduler_boundary_context_text(
+            query,
+            title,
+            full_text,
+            budget.context_chunk_max_chars,
+        )
+        .unwrap_or_else(|| {
+            local_scheduler_context_text(query, title, text, budget.context_chunk_max_chars)
+        });
         Some(serde_json::json!({
             "text": text,
             "source_id": k.get("item_id").and_then(|v| v.as_str()).unwrap_or(""),
@@ -1297,12 +2812,31 @@ fn rag_intent_plan_prompt_block(plan: &RagIntentPlan) -> Option<String> {
     ))
 }
 
+#[allow(dead_code)] // Compatibility wrapper used by focused tests; production uses evidence-pack variant.
 fn build_local_scheduler_admission_messages_with_plan(
     query: &str,
     history: &[HistoryMessage],
     contexts: &[Value],
     system_prompt: &str,
     intent_plan: Option<&RagIntentPlan>,
+) -> Vec<ChatMessage> {
+    build_local_scheduler_admission_messages_with_plan_and_evidence_pack_prompt(
+        query,
+        history,
+        contexts,
+        system_prompt,
+        intent_plan,
+        None,
+    )
+}
+
+fn build_local_scheduler_admission_messages_with_plan_and_evidence_pack_prompt(
+    query: &str,
+    history: &[HistoryMessage],
+    contexts: &[Value],
+    system_prompt: &str,
+    intent_plan: Option<&RagIntentPlan>,
+    evidence_pack_prompt: Option<&str>,
 ) -> Vec<ChatMessage> {
     let mut user = String::new();
     if !history.is_empty() {
@@ -1337,7 +2871,13 @@ fn build_local_scheduler_admission_messages_with_plan(
     }
     user.push_str("\n\n");
     user.push_str(&rag_response_contract_prompt_block(intent_plan));
-    if !contexts.is_empty() {
+    if let Some(evidence_pack_prompt) = evidence_pack_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        user.push_str("\n\n");
+        user.push_str(evidence_pack_prompt);
+    } else if !contexts.is_empty() {
         user.push_str("\n\nRefs:\n");
         for (idx, ctx) in contexts.iter().enumerate() {
             let text = ctx.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -1433,6 +2973,7 @@ fn search_results_to_knowledge_values(
             serde_json::json!({
                 "item_id": r.item_id,
                 "title": r.title,
+                "source_path": r.source_path,
                 "inject_content": r.inject_content,
                 "content": r.content,
                 "score": r.score,
@@ -1637,6 +3178,7 @@ fn build_deterministic_local_scheduler_answer(
         })
 }
 
+#[allow(dead_code)] // Unit-tested compatibility helper kept for profile regression coverage.
 fn local_scheduler_ask_matches_llm_model(
     profiles: &attune_core::edge_cloud::RuntimeProfileSet,
     desired_model: &str,
@@ -1992,7 +3534,10 @@ fn local_scheduler_async_content(job_id: Option<&str>, eta_ms: Option<u32>) -> S
     }
 }
 
-fn local_scheduler_chat_job_poll_timeout(eta_ms: Option<u32>) -> std::time::Duration {
+fn local_scheduler_chat_job_poll_timeout(
+    eta_ms: Option<u32>,
+    config: &LocalSchedulerRagRuntimeConfig,
+) -> std::time::Duration {
     const DEFAULT_MS: u64 = 30_000;
     const ETA_CUSHION_MS: u64 = 5_000;
     const MIN_MS: u64 = 1_000;
@@ -2005,7 +3550,11 @@ fn local_scheduler_chat_job_poll_timeout(eta_ms: Option<u32>) -> std::time::Dura
         .map(|eta| u64::from(eta).saturating_add(ETA_CUSHION_MS))
         .unwrap_or(DEFAULT_MS)
         .max(DEFAULT_MS);
-    let ms = from_env.unwrap_or(inferred_ms).clamp(MIN_MS, MAX_MS);
+    let ms = config
+        .job_poll_timeout_ms
+        .or(from_env)
+        .unwrap_or(inferred_ms)
+        .clamp(MIN_MS, MAX_MS);
     std::time::Duration::from_millis(ms)
 }
 
@@ -2339,87 +3888,96 @@ pub async fn chat(
     // partial result (spec §7 / §11 R8); the chat answer is still produced by RAG.
     //
     // Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3b
-    let acp_flow: Option<serde_json::Value> = if let Some(flows_reg) = state.agent_flows.clone() {
-        // The flow seed currently contains only this request's user message; it
-        // does not include retrieved vault evidence, so there is no L0 source to
-        // report here. If vault content is ever added to the seed, its real L0 bit
-        // must be threaded into this boundary. Cloud providers are returned behind
-        // the shared redacting decorator; local providers bypass cloud consent and
-        // remain unwrapped.
-        let flow_llm = crate::routes::privacy::governed_llm(&state, false)?;
-        let entitlement = {
-            let member = state
-                .member_state
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or(attune_core::member_session::MemberState::LoggedOut);
-            let local_available = flow_llm.is_local();
-            match member {
-                attune_core::member_session::MemberState::Paid {
-                    llm_quota_remaining,
-                    ..
-                } => attune_core::agents::scheduler::Entitlement {
-                    paid: true,
-                    cloud_quota_remaining: llm_quota_remaining,
-                    // GovernedStepRunner currently has one concrete provider;
-                    // claim local fallback only when that provider is local.
-                    local_available,
-                },
-                _ => attune_core::agents::scheduler::Entitlement {
-                    paid: false,
-                    cloud_quota_remaining: 0,
-                    local_available,
-                },
-            }
-        };
-        // ACP-3 soft-disabled agent ids (same source as the skills observer above).
-        let disabled: std::collections::HashSet<String> = {
-            let bytes = match state.vault.lock() {
-                Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
-                Err(_) => None,
+    let run_acp_flow = !manual_howto_query(&body.message)
+        && !local_scheduler_source_lookup_query(&body.message)
+        && !local_scheduler_summary_query(&body.message);
+    let acp_flow: Option<serde_json::Value> = if run_acp_flow {
+        if let Some(flows_reg) = state.agent_flows.clone() {
+            // The flow seed currently contains only this request's user message; it
+            // does not include retrieved vault evidence, so there is no L0 source to
+            // report here. If vault content is ever added to the seed, its real L0 bit
+            // must be threaded into this boundary. Cloud providers are returned behind
+            // the shared redacting decorator; local providers bypass cloud consent and
+            // remain unwrapped.
+            let flow_llm = crate::routes::privacy::governed_llm(&state, false)?;
+            let entitlement = {
+                let member = state
+                    .member_state
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or(attune_core::member_session::MemberState::LoggedOut);
+                let local_available = flow_llm.is_local();
+                match member {
+                    attune_core::member_session::MemberState::Paid {
+                        llm_quota_remaining,
+                        ..
+                    } => attune_core::agents::scheduler::Entitlement {
+                        paid: true,
+                        cloud_quota_remaining: llm_quota_remaining,
+                        // GovernedStepRunner currently has one concrete provider;
+                        // claim local fallback only when that provider is local.
+                        local_available,
+                    },
+                    _ => attune_core::agents::scheduler::Entitlement {
+                        paid: false,
+                        cloud_quota_remaining: 0,
+                        local_available,
+                    },
+                }
             };
-            bytes
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .and_then(|v| {
-                    v.get("agents")
-                        .and_then(|s| s.get("disabled"))
-                        .and_then(|d| d.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|x| x.as_str().map(String::from))
-                                .collect()
-                        })
-                })
-                .unwrap_or_default()
-        };
-        let flow_cache = state.cache_backend();
-        let flow_usage = state.usage();
-        let flow_msg = body.message.clone();
-        // run_flow is synchronous and may issue governed LLM calls → spawn_blocking
-        // so the async worker is never blocked (per Rust async-safe rule).
-        tokio::task::spawn_blocking(move || {
-            // Server has no embedded agent binaries — deterministic steps degrade
-            // gracefully (the LLM lead steps still run + are telemetered).
-            let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec,
-                                _i: &attune_core::agents::flow::Payload|
-             -> std::result::Result<serde_json::Value, String> {
-                Err("deterministic agent binary not available in server process".to_string())
+            // ACP-3 soft-disabled agent ids (same source as the skills observer above).
+            let disabled: std::collections::HashSet<String> = {
+                let bytes = match state.vault.lock() {
+                    Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
+                    Err(_) => None,
+                };
+                bytes
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| {
+                        v.get("agents")
+                            .and_then(|s| s.get("disabled"))
+                            .and_then(|d| d.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                    })
+                    .unwrap_or_default()
             };
-            crate::acp_chat::run_chat_flow(
-                &flow_msg,
-                &flows_reg.0,
-                &flows_reg.1,
-                flow_llm.as_ref(),
-                flow_cache.as_deref(),
-                flow_usage.as_deref(),
-                entitlement,
-                &disabled,
-                &mut dispatch,
-            )
-            .and_then(|o| serde_json::to_value(o).ok())
-        })
-        .await
-        .unwrap_or(None)
+            let flow_cache = state.cache_backend();
+            let flow_usage = state.usage();
+            let flow_msg = body.message.clone();
+            // run_flow is synchronous and may issue governed LLM calls → spawn_blocking
+            // so the async worker is never blocked (per Rust async-safe rule).
+            tokio::task::spawn_blocking(move || {
+                // Server has no embedded agent binaries — deterministic steps degrade
+                // gracefully (the LLM lead steps still run + are telemetered).
+                let mut dispatch =
+                    |_a: &attune_core::agents::registry::AgentSpec,
+                     _i: &attune_core::agents::flow::Payload|
+                     -> std::result::Result<serde_json::Value, String> {
+                        Err("deterministic agent binary not available in server process"
+                            .to_string())
+                    };
+                crate::acp_chat::run_chat_flow(
+                    &flow_msg,
+                    &flows_reg.0,
+                    &flows_reg.1,
+                    flow_llm.as_ref(),
+                    flow_cache.as_deref(),
+                    flow_usage.as_deref(),
+                    entitlement,
+                    &disabled,
+                    &mut dispatch,
+                )
+                .and_then(|o| serde_json::to_value(o).ok())
+            })
+            .await
+            .unwrap_or(None)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -2450,6 +4008,12 @@ pub async fn chat(
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_else(|| serde_json::json!({}))
     };
+    let local_scheduler_rag_config =
+        local_scheduler_rag_runtime_config_from_settings(&app_settings);
+    if crate::local_scheduler::native_kb_ask_enabled(&app_settings) {
+        crate::routes::ai_stack::require_model_capability_ready(&state, llm.model_name(), "chat")
+            .await?;
+    }
 
     // 历史压缩（多层记忆 §3.3）：超窗的旧轮次不再静默丢弃，而是滚动摘要成 1 条。
     //
@@ -2903,54 +4467,54 @@ pub async fn chat(
         let (assembler_embedding, assembler_embedding_is_local) = state.embedding_with_locality();
         if tiered_memory_allowed_for_provider(llm.is_local(), memory_cfg.tiered_assembler_enabled)
             && assembler_embedding_is_local
-            && assembler_embedding.is_some()
             && !search_results.is_empty()
         {
-            let state_asm = state.clone();
-            let dek_asm = dek.clone();
-            let query_asm = body.message.clone();
-            let l0_in = search_results.clone();
-            let emb = assembler_embedding.expect("checked above");
-            let assembled = tokio::task::spawn_blocking(move || {
-                let idx_guard = state_asm
-                    .memory_index
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let idx = idx_guard.as_ref()?;
-                let vault = state_asm.vault.lock().unwrap_or_else(|e| e.into_inner());
-                attune_core::memory::assemble_context(
-                    vault.store(),
-                    &dek_asm,
-                    idx,
-                    emb.as_ref(),
-                    &query_asm,
-                    &l0_in,
-                    memory_cfg,
-                )
+            if let Some(emb) = assembler_embedding {
+                let state_asm = state.clone();
+                let dek_asm = dek.clone();
+                let query_asm = body.message.clone();
+                let l0_in = search_results.clone();
+                let assembled = tokio::task::spawn_blocking(move || {
+                    let idx_guard = state_asm
+                        .memory_index
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let idx = idx_guard.as_ref()?;
+                    let vault = state_asm.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    attune_core::memory::assemble_context(
+                        vault.store(),
+                        &dek_asm,
+                        idx,
+                        emb.as_ref(),
+                        &query_asm,
+                        &l0_in,
+                        memory_cfg,
+                    )
+                    .ok()
+                })
+                .await
                 .ok()
-            })
-            .await
-            .ok()
-            .flatten();
-            if let Some(ctx) = assembled {
-                context_tier = ctx.tier_used;
-                if ctx.tier_used != "L0" {
-                    // 记忆层应答 → 用装配后的 block 替换 search_results。
-                    // 记忆 block item_id 为空 → 下游压缩按 web/临时 chunk passthrough。
-                    search_results = ctx
-                        .blocks
-                        .into_iter()
-                        .map(|b| attune_core::search::SearchResult {
-                            item_id: b.item_id,
-                            score: b.score,
-                            title: b.title,
-                            content: b.content.clone(),
-                            source_type: "memory".to_string(),
-                            inject_content: Some(b.content),
-                            ..Default::default()
-                        })
-                        .collect();
-                    tracing::info!("chat: tiered assembler answered from {}", context_tier);
+                .flatten();
+                if let Some(ctx) = assembled {
+                    context_tier = ctx.tier_used;
+                    if ctx.tier_used != "L0" {
+                        // 记忆层应答 → 用装配后的 block 替换 search_results。
+                        // 记忆 block item_id 为空 → 下游压缩按 web/临时 chunk passthrough。
+                        search_results = ctx
+                            .blocks
+                            .into_iter()
+                            .map(|b| attune_core::search::SearchResult {
+                                item_id: b.item_id,
+                                score: b.score,
+                                title: b.title,
+                                content: b.content.clone(),
+                                source_type: "memory".to_string(),
+                                inject_content: Some(b.content),
+                                ..Default::default()
+                            })
+                            .collect();
+                        tracing::info!("chat: tiered assembler answered from {}", context_tier);
+                    }
                 }
             }
         }
@@ -3080,6 +4644,93 @@ pub async fn chat(
             })
             .collect()
     };
+
+    let rag_trace = crate::rag_guardrails::RagRetrievalTrace {
+        profile_id: rag_policy.profile_id.clone(),
+        strategy: rag_policy.retrieval_strategy.clone(),
+        passes: rag_retrieval_passes.clone(),
+        queries: rag_retrieval_queries.clone(),
+        final_top_k: rag_final_top_k,
+        vector_results: None,
+        bm25_results: None,
+        citations_required: rag_policy.min_citations,
+    };
+    if !web_search_used {
+        if let Some(content) = source_title_clarification_request(&body.message, &knowledge) {
+            let citations: Vec<serde_json::Value> =
+                knowledge.iter().map(eval_surface::build_citation).collect();
+            let tokens_in = knowledge
+                .iter()
+                .map(|k| {
+                    k.get("inject_content")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                        .map(|s| cost::estimate_tokens(s, LOCAL_EXTRACTIVE_MODEL_ID))
+                        .unwrap_or(0)
+                })
+                .sum::<usize>();
+            let tokens_out = cost::estimate_tokens(&content, LOCAL_EXTRACTIVE_MODEL_ID);
+            let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+            let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+            let cost_block = eval_surface::build_cost_block(
+                tokens_in,
+                tokens_out,
+                LOCAL_EXTRACTIVE_MODEL_ID,
+                true,
+            );
+            let mut response_json = serde_json::json!({
+                "content": content,
+                "citations": citations,
+                "knowledge_count": knowledge.len(),
+                "session_id": body.session_id,
+                "web_search_used": false,
+                "confidence": 2,
+                "context_tier": context_tier,
+                "cost_estimate": {
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "cost_usd": null,
+                    "is_local": true,
+                    "input_rate_per_k": null,
+                    "cache_hit": true,
+                    "cached_tokens": tokens_in,
+                    "vendor_tokens_in": 0,
+                    "vendor_tokens_out": 0,
+                },
+                "cost": cost_block,
+                "grounding": null,
+                "eval": eval_block,
+                "latency_ms": chat_latency_ms,
+                "weight_stats": {
+                    "items_total": weight_stats.items_total,
+                    "items_boosted": weight_stats.items_boosted,
+                    "items_dropped": weight_stats.items_dropped,
+                    "items_kept": weight_stats.items_kept,
+                },
+                "compression_stats": {
+                    "chunks": 0,
+                    "cache_hits": 0,
+                    "orig_chars": 0,
+                    "strategy": "skipped-clarification",
+                },
+                "local_scheduler": null,
+                "clarification_required": true,
+            });
+            response_json["rag_intent_plan"] =
+                rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+            merge_json_object(
+                &mut response_json,
+                crate::rag_guardrails::rag_metadata_with_trace(
+                    &rag_coverage,
+                    "clarification-required",
+                    Some("ambiguous_source_scope"),
+                    knowledge.len(),
+                    &rag_trace,
+                ),
+            );
+            return Ok(Json(response_json));
+        }
+    }
 
     // 2b+. 上下文压缩（Batch B.1）
     //
@@ -3359,16 +5010,6 @@ pub async fn chat(
     if web_search_used {
         rag_coverage = crate::rag_guardrails::evaluate_evidence_coverage(&body.message, &knowledge);
     }
-    let rag_trace = crate::rag_guardrails::RagRetrievalTrace {
-        profile_id: rag_policy.profile_id.clone(),
-        strategy: rag_policy.retrieval_strategy.clone(),
-        passes: rag_retrieval_passes.clone(),
-        queries: rag_retrieval_queries.clone(),
-        final_top_k: rag_final_top_k,
-        vector_results: None,
-        bm25_results: None,
-        citations_required: rag_policy.min_citations,
-    };
     if should_refuse_insufficient_diagnostic(
         web_search_used,
         rag_coverage.sufficient(),
@@ -3474,10 +5115,130 @@ pub async fn chat(
         return Ok(Json(response_json));
     }
 
+    if !native_scheduler_ask && !web_search_used && rag_policy.allow_extractive_repair {
+        let knowledge_for_answer =
+            expand_manual_howto_knowledge_from_store(&state, &dek, &body.message, &knowledge);
+        let knowledge_for_answer = prefer_knowledge_for_explicit_source_title_qualifiers(
+            &body.message,
+            &knowledge_for_answer,
+        );
+        if let Some((content, local_task, local_reason, admission_reason)) =
+            build_deterministic_local_scheduler_answer(&body.message, &knowledge_for_answer, true)
+        {
+            let citations: Vec<serde_json::Value> = knowledge_for_answer
+                .iter()
+                .map(eval_surface::build_citation)
+                .collect();
+            let tokens_in = knowledge_for_answer
+                .iter()
+                .map(|k| {
+                    k.get("inject_content")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                        .map(|s| cost::estimate_tokens(s, LOCAL_EXTRACTIVE_MODEL_ID))
+                        .unwrap_or(0)
+                })
+                .sum::<usize>();
+            let tokens_out = cost::estimate_tokens(&content, LOCAL_EXTRACTIVE_MODEL_ID);
+            let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+            let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+            let cost_block = eval_surface::build_cost_block(
+                tokens_in,
+                tokens_out,
+                LOCAL_EXTRACTIVE_MODEL_ID,
+                true,
+            );
+            let answer_budget = local_scheduler_answer_budget(
+                &body.message,
+                &knowledge_for_answer,
+                &local_scheduler_rag_config,
+            );
+            let answer_budget_json = local_scheduler_answer_budget_json(answer_budget);
+
+            let mut response_json = serde_json::json!({
+                "content": content,
+                "citations": citations,
+                "knowledge_count": knowledge_for_answer.len(),
+                "session_id": body.session_id,
+                "web_search_used": false,
+                "confidence": 4,
+                "context_tier": context_tier,
+                "cost_estimate": {
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "cost_usd": null,
+                    "is_local": true,
+                    "input_rate_per_k": null,
+                    "cache_hit": true,
+                    "cached_tokens": tokens_in,
+                    "vendor_tokens_in": 0,
+                    "vendor_tokens_out": 0,
+                },
+                "cost": cost_block,
+                "grounding": null,
+                "eval": eval_block,
+                "latency_ms": chat_latency_ms,
+                "weight_stats": {
+                    "items_total": weight_stats.items_total,
+                    "items_boosted": weight_stats.items_boosted,
+                    "items_dropped": weight_stats.items_dropped,
+                    "items_kept": weight_stats.items_kept,
+                },
+                "compression_stats": {
+                    "chunks": compression_stats.0,
+                    "cache_hits": compression_stats.1,
+                    "orig_chars": compression_stats.2,
+                    "strategy": strategy_str,
+                },
+                "answer_budget": answer_budget_json,
+                "local_scheduler": {
+                    "task": local_task,
+                    "scheduled_as": "sync",
+                    "job_id": null,
+                    "status": "done",
+                    "reason": local_reason,
+                    "eta_ms": 0,
+                    "model": LOCAL_EXTRACTIVE_MODEL_ID,
+                    "service_class": "realtime_answer",
+                    "device_used": "attune",
+                    "latency_ms": chat_latency_ms,
+                    "queue_wait_ms": 0,
+                    "admission": {
+                        "task_name": local_task,
+                        "model_id": LOCAL_EXTRACTIVE_MODEL_ID,
+                        "service_class": "realtime_answer",
+                        "context_tokens": tokens_in,
+                        "max_output_tokens": tokens_out,
+                        "reason": admission_reason,
+                        "explicit_async": false,
+                    }
+                }
+            });
+            response_json["rag_intent_plan"] =
+                rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
+            merge_json_object(
+                &mut response_json,
+                crate::rag_guardrails::rag_metadata_with_trace(
+                    &rag_coverage,
+                    answer_mode_for_local_task(local_task),
+                    None,
+                    knowledge_for_answer.len(),
+                    &rag_trace,
+                ),
+            );
+            return Ok(Json(response_json));
+        }
+    }
+
     // Local scheduler path: answer generation goes through scheduler-native `/kb/tasks`,
     // not through the legacy OpenAI-compatible `/v1/chat/completions` path.
     if native_scheduler_ask && !web_search_used {
-        let answer_budget = local_scheduler_answer_budget(&body.message, &knowledge);
+        let knowledge =
+            expand_manual_howto_knowledge_from_store(&state, &dek, &body.message, &knowledge);
+        let knowledge =
+            prefer_knowledge_for_explicit_source_title_qualifiers(&body.message, &knowledge);
+        let answer_budget =
+            local_scheduler_answer_budget(&body.message, &knowledge, &local_scheduler_rag_config);
         let answer_budget_json = local_scheduler_answer_budget_json(answer_budget);
         let deterministic_local_answer = build_deterministic_local_scheduler_answer(
             &body.message,
@@ -3594,13 +5355,32 @@ pub async fn chat(
         };
         let scheduler_system_prompt = plugin_rag_prompt(&plugin_registry, scheduler_prompt_intent)
             .unwrap_or(LOCAL_SCHEDULER_KB_ASK_SYSTEM);
-        let admission_messages = build_local_scheduler_admission_messages_with_plan(
-            &body.message,
-            &body.history,
-            &contexts,
-            scheduler_system_prompt,
-            Some(&rag_intent_plan),
-        );
+        let retrieval_plan = attune_core::retrieval_plan::plan_query(&body.message);
+        let evidence_pack = assemble_evidence_pack(&retrieval_plan, &search_results);
+        let evidence_pack_prompt = if evidence_pack.nodes.is_empty() {
+            None
+        } else {
+            Some(build_evidence_pack_prompt(&body.message, &evidence_pack))
+        };
+        let evidence_pack_diagnostics = serde_json::json!({
+            "available": evidence_pack_prompt.is_some(),
+            "primary_source_id": evidence_pack.primary_source_id,
+            "source_title": evidence_pack.source_title,
+            "requested_needs": evidence_pack.diagnostics.requested_needs,
+            "satisfied_needs": evidence_pack.diagnostics.satisfied_needs,
+            "missing_needs": evidence_pack.diagnostics.missing_needs,
+            "sources_considered": evidence_pack.diagnostics.sources_considered,
+        });
+        let admission_messages =
+            build_local_scheduler_admission_messages_with_plan_and_evidence_pack_prompt(
+                &body.message,
+                &body.history,
+                &contexts,
+                scheduler_system_prompt,
+                Some(&rag_intent_plan),
+                evidence_pack_prompt.as_deref(),
+            );
+        let contexts_for_answer_repair = contexts.clone();
         let task_body = serde_json::json!({
             "query": body.message,
             "history": body.history.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev().map(|h| {
@@ -3610,6 +5390,7 @@ pub async fn chat(
                 })
             }).collect::<Vec<_>>(),
             "contexts": contexts,
+            "evidence_pack": evidence_pack_diagnostics,
             "answer_profile": answer_budget.profile,
             "answer_budget": answer_budget_json.clone(),
             "rag_intent_plan": rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection)),
@@ -3650,7 +5431,10 @@ pub async fn chat(
                         match poll_local_scheduler_chat_job_text(
                             scheduler_base_for_poll.clone(),
                             job_id,
-                            local_scheduler_chat_job_poll_timeout(response.eta_ms),
+                            local_scheduler_chat_job_poll_timeout(
+                                response.eta_ms,
+                                &local_scheduler_rag_config,
+                            ),
                         )
                         .await
                         {
@@ -3704,6 +5488,13 @@ pub async fn chat(
                     }
                 }
                 if !async_exposed {
+                    content =
+                        supplement_weak_manual_howto_answer(&body.message, &knowledge, &content);
+                    content = supplement_exact_value_lookup_answer(
+                        &body.message,
+                        &contexts_for_answer_repair,
+                        &content,
+                    );
                     content =
                         finalize_rag_answer_contract(&body.message, &rag_intent_plan, &content);
                 }
@@ -4659,7 +6450,10 @@ mod tests {
         let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
         std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS");
 
-        let timeout = local_scheduler_chat_job_poll_timeout(Some(15_144));
+        let timeout = local_scheduler_chat_job_poll_timeout(
+            Some(15_144),
+            &LocalSchedulerRagRuntimeConfig::default(),
+        );
 
         match saved {
             Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
@@ -4678,7 +6472,10 @@ mod tests {
         let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
         std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS");
 
-        let timeout = local_scheduler_chat_job_poll_timeout(Some(1_000));
+        let timeout = local_scheduler_chat_job_poll_timeout(
+            Some(1_000),
+            &LocalSchedulerRagRuntimeConfig::default(),
+        );
 
         match saved {
             Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
@@ -4697,7 +6494,10 @@ mod tests {
         let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
         std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS");
 
-        let timeout = local_scheduler_chat_job_poll_timeout(Some(71_100));
+        let timeout = local_scheduler_chat_job_poll_timeout(
+            Some(71_100),
+            &LocalSchedulerRagRuntimeConfig::default(),
+        );
 
         match saved {
             Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
@@ -4712,6 +6512,26 @@ mod tests {
             timeout <= std::time::Duration::from_millis(180_000),
             "timeout must remain bounded for interactive chat, got {timeout:?}"
         );
+    }
+
+    #[test]
+    fn realtime_chat_job_poll_timeout_prefers_settings_config() {
+        let _guard = env_lock();
+        let saved = std::env::var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS").ok();
+        std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", "30000");
+        let config = LocalSchedulerRagRuntimeConfig {
+            job_poll_timeout_ms: Some(120_000),
+            ..Default::default()
+        };
+
+        let timeout = local_scheduler_chat_job_poll_timeout(Some(1_000), &config);
+
+        match saved {
+            Some(v) => std::env::set_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS", v),
+            None => std::env::remove_var("ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS"),
+        }
+
+        assert_eq!(timeout, std::time::Duration::from_millis(120_000));
     }
 
     fn status_of(e: VaultError) -> u16 {
@@ -5067,7 +6887,10 @@ mod tests {
     #[test]
     fn rag_intent_fusion_pool_scales_with_sub_queries_before_final_quota() {
         assert_eq!(rag_intent_fusion_pool_limit(12, 5), 60);
-        assert_eq!(rag_intent_fusion_pool_limit(20, 20), MAX_CHAT_KB_TOP_K as usize * 6);
+        assert_eq!(
+            rag_intent_fusion_pool_limit(20, 20),
+            MAX_CHAT_KB_TOP_K as usize * 6
+        );
         assert_eq!(rag_intent_fusion_pool_limit(0, 0), 1);
     }
 
@@ -5083,11 +6906,7 @@ mod tests {
         };
 
         assert!(!should_refuse_insufficient_diagnostic(
-            false,
-            false,
-            true,
-            &plan,
-            &selection,
+            false, false, true, &plan, &selection,
         ));
     }
 
@@ -5138,7 +6957,10 @@ mod tests {
             "先收集日志，再做 packet capture，并且不要编造未被引用支持的结论。",
         );
 
-        assert!(answer.contains("路由/route table/default gateway"), "{answer}");
+        assert!(
+            answer.contains("路由/route table/default gateway"),
+            "{answer}"
+        );
         assert!(answer.contains("排查项补充"), "{answer}");
         assert!(answer.contains("不要编造"), "{answer}");
     }
@@ -5151,6 +6973,96 @@ mod tests {
 
         assert!(answer.contains("抓包/packet capture"), "{answer}");
         assert!(answer.contains("排查项补充"), "{answer}");
+    }
+
+    #[test]
+    fn rag_contract_supplements_decision_ordering_when_model_omits_sequence() {
+        let query = "同时判断应该先收集哪些证据、如何排序排查步骤，并说明缺少 packet capture 时的结论边界。";
+        let plan = build_rag_intent_plan(query, &[]);
+        let answer = finalize_rag_answer_contract(
+            query,
+            &plan,
+            "packet capture 缺少时证据不足，应说明结论边界。",
+        );
+
+        assert!(answer.contains("先收集"), "{answer}");
+        assert!(answer.contains("再"), "{answer}");
+        assert!(answer.contains("证据"), "{answer}");
+    }
+
+    #[test]
+    fn local_scheduler_context_uses_full_document_boundaries_for_start_end_queries() {
+        let filler = (0..80)
+            .map(|idx| format!("section {idx}: repeated operational notes without target facts."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full = format!(
+            "Opening Fact\nALPHA_OPENING_CODE = AX-17-PINE\n{filler}\nFinal Fact\nOMEGA_FINAL_KEY = ZX-91-RIVER\n"
+        );
+        let knowledge = vec![serde_json::json!({
+            "item_id": "long-doc",
+            "title": "K3 long context probe",
+            "inject_content": "Opening Fact\nALPHA_OPENING_CODE = AX-17-PINE\n",
+            "content": full,
+            "score": 0.9,
+        })];
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "explicit",
+            max_output_tokens: 160,
+            context_top_k: 1,
+            context_chunk_max_chars: 700,
+            source_diverse: false,
+            explicit_output_override: true,
+        };
+
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "请同时给出文档开头事实和末尾事实里的两个编码。",
+            &knowledge,
+            budget,
+        );
+        let text = contexts[0]["text"].as_str().unwrap();
+
+        assert!(text.contains("AX-17-PINE"), "{text}");
+        assert!(text.contains("ZX-91-RIVER"), "{text}");
+    }
+
+    #[test]
+    fn exact_boundary_context_is_compact_even_with_large_runtime_budget() {
+        let filler = (0..300)
+            .map(|idx| format!("section {idx}: repeated operational notes without target facts."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full = format!(
+            "Opening Fact\nALPHA_OPENING_CODE = AX-17-PINE\n{filler}\nFinal Fact\nOMEGA_FINAL_KEY = ZX-91-RIVER\n"
+        );
+        let knowledge = vec![serde_json::json!({
+            "item_id": "long-doc",
+            "title": "K3 long context probe",
+            "content": full,
+            "score": 0.9,
+        })];
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "high_context",
+            max_output_tokens: 128,
+            context_top_k: 1,
+            context_chunk_max_chars: 4096,
+            source_diverse: false,
+            explicit_output_override: true,
+        };
+
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "请逐字复制文档开头和结尾的键值：ALPHA_OPENING_CODE 和 OMEGA_FINAL_KEY 分别是什么？",
+            &knowledge,
+            budget,
+        );
+        let text = contexts[0]["text"].as_str().unwrap();
+
+        assert!(
+            text.chars().count() <= LOCAL_SCHEDULER_EXACT_BOUNDARY_CONTEXT_MAX_CHARS,
+            "{text}"
+        );
+        assert!(text.contains("ALPHA_OPENING_CODE = AX-17-PINE"), "{text}");
+        assert!(text.contains("OMEGA_FINAL_KEY = ZX-91-RIVER"), "{text}");
     }
 
     #[test]
@@ -5280,18 +7192,19 @@ mod tests {
         std::env::remove_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K");
         std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K");
         std::env::remove_var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K");
+        let config = LocalSchedulerRagRuntimeConfig::default();
         assert_eq!(
-            local_scheduler_ask_context_top_k(),
+            local_scheduler_ask_context_top_k(&config),
             DEFAULT_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize
         );
 
         std::env::set_var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K", "4");
-        assert_eq!(local_scheduler_ask_context_top_k(), 4);
+        assert_eq!(local_scheduler_ask_context_top_k(&config), 4);
         std::env::set_var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K", "2");
-        assert_eq!(local_scheduler_ask_context_top_k(), 2);
+        assert_eq!(local_scheduler_ask_context_top_k(&config), 2);
         std::env::set_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K", "99");
         assert_eq!(
-            local_scheduler_ask_context_top_k(),
+            local_scheduler_ask_context_top_k(&config),
             MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize
         );
 
@@ -5463,10 +7376,66 @@ mod tests {
         assert!(user.content.contains("RAG response contract:"));
         assert!(user
             .content
+            .contains("first give the actionable method supported by refs"));
+        assert!(user
+            .content
+            .contains("exact file paths, enum/type names, IDs"));
+        assert!(user
+            .content
+            .contains("copy codes, IDs, numeric values, and key-value pairs from refs verbatim"));
+        assert!(user
+            .content
             .contains("preserving the exact tokens at least once: alpha control; beta evidence"));
         assert!(user.content.contains(
             "industry-general guidance and do not present it as a manual/source conclusion"
         ));
+    }
+
+    #[test]
+    fn evidence_pack_prompt_replaces_plain_refs_in_scheduler_admission_prompt() {
+        let plan = build_rag_intent_plan("How do I start a transfer?", &[]);
+        let messages = build_local_scheduler_admission_messages_with_plan_and_evidence_pack_prompt(
+            "How do I start a transfer?",
+            &[],
+            &[serde_json::json!({
+                "text": "legacy plain ref",
+            })],
+            "Use refs.",
+            Some(&plan),
+            Some("Evidence Pack\n[kind: ProcedureStep]\nStep 1 Call open_device()."),
+        );
+        let user = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message");
+
+        assert!(user.content.contains("Evidence Pack"));
+        assert!(user.content.contains("ProcedureStep"));
+        assert!(!user.content.contains("Refs:\n[1] legacy plain ref"));
+    }
+
+    #[test]
+    fn exact_lookup_answer_is_supplemented_with_verbatim_context_values() {
+        let contexts = vec![serde_json::json!({
+            "text": "[Beginning evidence]\nALPHA_OPENING_CODE = AX-17-PINE\n\n[Ending evidence]\nOMEGA_FINAL_KEY = ZX-91-RIVER"
+        })];
+        let answer = "ALPH_OPENING_CODE = AX-17-PINE\nOMG_FINAL_KEY = ZX-91-RIVER";
+
+        let supplemented = supplement_exact_value_lookup_answer(
+            "请逐字复制 ALPHA_OPENING_CODE 和 OMEGA_FINAL_KEY 的值。",
+            &contexts,
+            answer,
+        );
+
+        assert!(supplemented.contains("精确值补充"), "{supplemented}");
+        assert!(
+            supplemented.contains("ALPHA_OPENING_CODE = AX-17-PINE"),
+            "{supplemented}"
+        );
+        assert!(
+            supplemented.contains("OMEGA_FINAL_KEY = ZX-91-RIVER"),
+            "{supplemented}"
+        );
     }
 
     #[test]
@@ -5618,13 +7587,43 @@ mod tests {
         clear_answer_token_env();
         std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "24");
 
-        let budget = local_scheduler_answer_budget("A320 hydraulic source", &[]);
+        let config = LocalSchedulerRagRuntimeConfig::default();
+        let budget = local_scheduler_answer_budget("A320 hydraulic source", &[], &config);
         assert_eq!(budget.profile, "explicit");
         assert_eq!(budget.max_output_tokens, 24);
         assert!(budget.explicit_output_override);
         assert!(!budget.source_diverse);
 
         restore_env(previous);
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_prefers_settings_config_over_env() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        let previous_chunk = std::env::var("ATTUNE_SCHEDULER_CONTEXT_CHUNK_MAX_CHARS").ok();
+        clear_answer_token_env();
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "24");
+        std::env::set_var("ATTUNE_SCHEDULER_CONTEXT_CHUNK_MAX_CHARS", "96");
+        let config = LocalSchedulerRagRuntimeConfig {
+            ask_max_output_tokens: Some(88),
+            context_top_k: Some(7),
+            context_chunk_max_chars: Some(700),
+            ..Default::default()
+        };
+
+        let budget = local_scheduler_answer_budget("TCP/IP 排障流程", &[], &config);
+
+        restore_env(previous);
+        match previous_chunk {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_CONTEXT_CHUNK_MAX_CHARS", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_CONTEXT_CHUNK_MAX_CHARS"),
+        }
+
+        assert_eq!(budget.profile, "explicit");
+        assert_eq!(budget.max_output_tokens, 88);
+        assert_eq!(budget.context_top_k, 7);
+        assert_eq!(budget.context_chunk_max_chars, 700);
     }
 
     #[test]
@@ -5639,8 +7638,12 @@ mod tests {
             serde_json::json!({"item_id": "airbus-a320-fcom", "title": "A320 FCOM"}),
             serde_json::json!({"item_id": "boeing-b737-qrh", "title": "B737 QRH"}),
         ];
-        let budget =
-            local_scheduler_answer_budget("A320 QRH abnormal procedure source", &knowledge);
+        let config = LocalSchedulerRagRuntimeConfig::default();
+        let budget = local_scheduler_answer_budget(
+            "A320 QRH abnormal procedure source",
+            &knowledge,
+            &config,
+        );
         assert_eq!(budget.profile, "explicit");
         assert_eq!(budget.max_output_tokens, 24);
         assert!(budget.explicit_output_override);
@@ -5662,7 +7665,9 @@ mod tests {
         std::env::remove_var("ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS");
         std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS");
 
-        let budget = local_scheduler_answer_budget("compare A320 and A330 hydraulic sources", &[]);
+        let config = LocalSchedulerRagRuntimeConfig::default();
+        let budget =
+            local_scheduler_answer_budget("compare A320 and A330 hydraulic sources", &[], &config);
         assert_eq!(budget.profile, "explicit");
         assert_eq!(
             budget.max_output_tokens,
@@ -5698,6 +7703,7 @@ mod tests {
         let budget = local_scheduler_answer_budget(
             "compare Airbus and Boeing hydraulic sources",
             &knowledge,
+            &LocalSchedulerRagRuntimeConfig::default(),
         );
         assert_eq!(budget.profile, "synthesis");
         assert_eq!(budget.max_output_tokens, 160);
@@ -5716,6 +7722,7 @@ mod tests {
         let budget = local_scheduler_answer_budget(
             "在 risk assessment 和 audit evidence 之间，应该先收集哪些证据再给建议？",
             &[],
+            &LocalSchedulerRagRuntimeConfig::default(),
         );
         assert_eq!(budget.profile, "synthesis");
         assert_eq!(budget.max_output_tokens, 160);
@@ -5739,10 +7746,14 @@ mod tests {
         let budget = local_scheduler_answer_budget(
             "同时回答三个目标：1. 如何从 access control 证据定位问题；2. 如何排查 incident response 流程；3. 在缺少 audit evidence 时能否给出 risk assessment 建议？",
             &knowledge,
+            &LocalSchedulerRagRuntimeConfig::default(),
         );
         assert_eq!(budget.profile, "complex_topic");
         assert_eq!(budget.max_output_tokens, 224);
-        assert_eq!(budget.context_top_k, MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize);
+        assert_eq!(
+            budget.context_top_k,
+            MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize
+        );
         assert!(budget.context_chunk_max_chars >= 360);
 
         restore_env(previous);
@@ -5757,6 +7768,7 @@ mod tests {
         let budget = local_scheduler_answer_budget(
             "在 security 知识库中，access control 主题的证据要点是什么？",
             &[],
+            &LocalSchedulerRagRuntimeConfig::default(),
         );
         assert_ne!(budget.profile, "synthesis");
         assert!(budget.context_top_k <= 4);
@@ -5774,11 +7786,31 @@ mod tests {
         let budget = local_scheduler_answer_budget(
             "如何基于 security 知识库证据排查 incident response 流程问题？",
             &[],
+            &LocalSchedulerRagRuntimeConfig::default(),
         );
         assert_eq!(budget.profile, "diagnostic");
         assert_eq!(budget.max_output_tokens, 192);
         assert!(budget.context_top_k >= 6);
         assert!(budget.context_chunk_max_chars >= 320);
+
+        restore_env(previous);
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_expands_for_software_howto() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
+
+        let budget = local_scheduler_answer_budget(
+            "RTOS开发中如何在CCU开发中查询时钟的type和id？",
+            &[],
+            &LocalSchedulerRagRuntimeConfig::default(),
+        );
+        assert_eq!(budget.profile, "software_howto");
+        assert_eq!(budget.max_output_tokens, 224);
+        assert!(budget.context_top_k >= 5);
+        assert!(budget.context_chunk_max_chars >= 640);
 
         restore_env(previous);
     }
@@ -5813,6 +7845,531 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_context_builder_prefers_query_focused_middle_excerpt() {
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "software_howto",
+            max_output_tokens: 224,
+            context_top_k: 1,
+            context_chunk_max_chars: 640,
+            source_diverse: false,
+            explicit_output_override: false,
+        };
+        let evidence = format!(
+            "RTOS CCU 开发指南\n版本历史：添加查找 type 和 id 的方法。\n{}\n4.2.1 查找某个时钟的 type 和 id\n步骤 1 在 hal/source/ccmu/sunxi-ng/ 下按平台打开 ccu-<platform>.h。\n步骤 2 搜索目标时钟名，找到对应 CLK_* 枚举作为 id。\n步骤 3 按所在时钟域选择 hal_clk_type_t，例如 CCU 或 CCU_AON。\n步骤 4 使用 hal_clock_get(type, id) 获取句柄。\n{}",
+            "目录 ".repeat(200),
+            "版权声明 ".repeat(200),
+        );
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "RTOS开发中如何在CCU开发中查询时钟的type和id？",
+            &[serde_json::json!({
+                "item_id": "ccu",
+                "title": "RTOS_CCU_开发指南",
+                "content": evidence,
+            })],
+            budget,
+        );
+        let text = contexts[0]["text"].as_str().unwrap();
+        assert!(text.contains("4.2.1 查找某个时钟的 type 和 id"));
+        assert!(text.contains("hal/source/ccmu/sunxi-ng"));
+        assert!(text.contains("hal_clock_get(type, id)"));
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_prefers_explicit_rtos_source_over_linux() {
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "software_howto",
+            max_output_tokens: 224,
+            context_top_k: 2,
+            context_chunk_max_chars: 640,
+            source_diverse: true,
+            explicit_output_override: false,
+        };
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "linux-dmac",
+                "title": "Linux_DMAC_开发指南",
+                "content": "2.7.1 dma_request_chan\nstruct dma_chan *dma_request_chan(struct device *dev, const char *name)\nLinux DMA Engine 申请 DMA 通道。",
+            }),
+            serde_json::json!({
+                "item_id": "rtos-dmac",
+                "title": "RTOS_DMAC_开发指南",
+                "content": "3.1 hal_dma_chan_status_t hal_dma_chan_request\n#include <hal_dma.h>\nhal_dma_chan_status_t hal_dma_chan_request(struct sunxi_dma_chan **dma_chan)\n作用：申请 DMA 通道。",
+            }),
+        ];
+
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "rtos中dmac申请dma通道的函数接口",
+            &knowledge,
+            budget,
+        );
+        let text = contexts
+            .iter()
+            .filter_map(|ctx| ctx["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("hal_dma_chan_request"), "{text}");
+        assert!(text.contains("struct sunxi_dma_chan **dma_chan"), "{text}");
+        assert!(!text.contains("dma_request_chan"), "{text}");
+    }
+
+    #[test]
+    fn search_results_to_knowledge_values_preserves_source_path() {
+        let results = vec![attune_core::search::SearchResult {
+            item_id: "doc-1".into(),
+            title: "Example Manual".into(),
+            content: "body".into(),
+            source_type: "file".into(),
+            source_path: Some("acme/x1/rtos/clock-guide.pdf".into()),
+            score: 0.9,
+            ..Default::default()
+        }];
+
+        let knowledge = search_results_to_knowledge_values(&results);
+
+        assert_eq!(
+            knowledge[0]["source_path"].as_str(),
+            Some("acme/x1/rtos/clock-guide.pdf")
+        );
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_prefers_explicit_directory_source() {
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "software_howto",
+            max_output_tokens: 224,
+            context_top_k: 2,
+            context_chunk_max_chars: 700,
+            source_diverse: true,
+            explicit_output_override: false,
+        };
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "beta-clock",
+                "title": "RTOS_Clock_Developer_Guide",
+                "source_path": "beta/y2/rtos/clock-guide.pdf",
+                "content": "Vendor B clock text with unrelated B_CLK_UART2 identifiers.",
+            }),
+            serde_json::json!({
+                "item_id": "acme-clock",
+                "title": "RTOS_Clock_Developer_Guide",
+                "source_path": "acme/x1/rtos/clock-guide.pdf",
+                "content": "查找某个时钟的 type 和 id\n在 hal/source/clock/vendor-a 下查找平台头文件。\n搜索 UART2 后确认 type 是 A_CLOCK_DOMAIN，id 是 A_CLK_UART2。",
+            }),
+        ];
+
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "acme x1 里面 RTOS 的 clock type 和 id 怎么查？",
+            &knowledge,
+            budget,
+        );
+        let text = contexts
+            .iter()
+            .filter_map(|ctx| ctx["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sources = contexts
+            .iter()
+            .map(|ctx| ctx["source_id"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>();
+
+        assert_eq!(sources, vec!["acme-clock"]);
+        assert!(text.contains("A_CLOCK_DOMAIN"), "{text}");
+        assert!(text.contains("A_CLK_UART2"), "{text}");
+        assert!(!text.contains("B_CLK_UART2"), "{text}");
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_collects_software_workflow_commands() {
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "software_howto",
+            max_output_tokens: 224,
+            context_top_k: 1,
+            context_chunk_max_chars: 900,
+            source_diverse: false,
+            explicit_output_override: false,
+        };
+        let filler = "目录 版本历史 版权声明\n".repeat(180);
+        let evidence = format!(
+            "Product X SDK Guide\n{filler}\n初始化环境\n首次编译前执行 source build/envsetup.sh 加载构建环境。\n{filler}\n选择方案\n执行 lunch 后选择 x1-demo 方案。\n{filler}\n打包\n编译完成后执行 pack，固件输出在 out 目录。\n"
+        );
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "Product X 的 SDK 第一次怎么编译和打包？",
+            &[serde_json::json!({
+                "item_id": "product-x-sdk",
+                "title": "Product_X_SDK_Guide",
+                "source_path": "acme/x1/sdk-guide.pdf",
+                "content": evidence,
+            })],
+            budget,
+        );
+        let text = contexts[0]["text"].as_str().unwrap();
+
+        assert!(text.contains("source build/envsetup.sh"), "{text}");
+        assert!(text.contains("x1-demo"), "{text}");
+        assert!(text.contains("pack"), "{text}");
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_prefers_explicit_linux_source_over_rtos() {
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "software_howto",
+            max_output_tokens: 224,
+            context_top_k: 2,
+            context_chunk_max_chars: 640,
+            source_diverse: true,
+            explicit_output_override: false,
+        };
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "rtos-dmac",
+                "title": "RTOS_DMAC_开发指南",
+                "content": "3.1 hal_dma_chan_status_t hal_dma_chan_request\n#include <hal_dma.h>\nhal_dma_chan_status_t hal_dma_chan_request(struct sunxi_dma_chan **dma_chan)\n作用：申请 DMA 通道。",
+            }),
+            serde_json::json!({
+                "item_id": "linux-dmac",
+                "title": "Linux_DMAC_开发指南",
+                "content": "2.7.1 dma_request_chan\nstruct dma_chan *dma_request_chan(struct device *dev, const char *name)\nLinux DMA Engine 申请 DMA 通道。",
+            }),
+        ];
+
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "linux中dmac申请dma通道的函数接口",
+            &knowledge,
+            budget,
+        );
+        let text = contexts
+            .iter()
+            .filter_map(|ctx| ctx["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("dma_request_chan"), "{text}");
+        assert!(!text.contains("hal_dma_chan_request"), "{text}");
+    }
+
+    #[test]
+    fn source_title_clarification_detects_missing_platform_qualifier() {
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "rtos-dmac",
+                "title": "RTOS_DMAC_开发指南",
+                "content": "hal_dma_chan_request 申请 DMA 通道。",
+            }),
+            serde_json::json!({
+                "item_id": "linux-dmac",
+                "title": "Linux_DMAC_开发指南",
+                "content": "dma_request_chan 申请 DMA 通道。",
+            }),
+        ];
+
+        let clarification =
+            source_title_clarification_request("dmac申请dma通道的函数接口", &knowledge)
+                .expect("missing platform/source qualifier should ask for clarification");
+        assert!(
+            clarification.contains("RTOS_DMAC_开发指南"),
+            "{clarification}"
+        );
+        assert!(
+            clarification.contains("Linux_DMAC_开发指南"),
+            "{clarification}"
+        );
+        assert!(clarification.contains("RTOS"), "{clarification}");
+        assert!(clarification.contains("LINUX"), "{clarification}");
+        assert!(
+            source_title_clarification_request("rtos中dmac申请dma通道的函数接口", &knowledge)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn source_title_clarification_handles_irrelevant_topk_sources() {
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "linux-dmac",
+                "title": "Linux_DMAC_开发指南 - Linux DMAC",
+                "content": "dma_request_chan 申请 DMA 通道。",
+            }),
+            serde_json::json!({
+                "item_id": "rtos-dmac",
+                "title": "RTOS_DMAC_开发指南 - RTOS DMAC",
+                "content": "hal_dma_chan_request 申请 DMA 通道。",
+            }),
+            serde_json::json!({
+                "item_id": "rtos-twi",
+                "title": "RTOS_TWI_开发指南 - RTOS TWI",
+                "content": "TWI 开发说明。",
+            }),
+            serde_json::json!({
+                "item_id": "rtos-uart",
+                "title": "RTOS_UART_开发指南 - RTOS UART",
+                "content": "UART 开发说明。",
+            }),
+        ];
+
+        let clarification =
+            source_title_clarification_request("dmac申请dma通道的函数接口", &knowledge)
+                .expect("DMAC topic across RTOS/Linux should require a source qualifier");
+        assert!(
+            clarification.contains("RTOS_DMAC_开发指南"),
+            "{clarification}"
+        );
+        assert!(
+            clarification.contains("Linux_DMAC_开发指南"),
+            "{clarification}"
+        );
+
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "software_howto",
+            max_output_tokens: 224,
+            context_top_k: 4,
+            context_chunk_max_chars: 640,
+            source_diverse: true,
+            explicit_output_override: false,
+        };
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "rtos中dmac申请dma通道的函数接口",
+            &knowledge,
+            budget,
+        );
+        let source_ids = contexts
+            .iter()
+            .map(|ctx| ctx["source_id"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>();
+        assert_eq!(source_ids, vec!["rtos-dmac"]);
+    }
+
+    #[test]
+    fn source_title_clarification_allows_same_topic_multi_source_workflows() {
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "tcpip-origin",
+                "title": "tcpip_origin",
+                "content": "TCP/IP originated from ARPANET and DARPA packet switching research.",
+            }),
+            serde_json::json!({
+                "item_id": "tcpip-troubleshooting",
+                "title": "tcpip_troubleshooting",
+                "content": "Troubleshooting checks physical link, IP address, route table, DNS, and packet capture.",
+            }),
+            serde_json::json!({
+                "item_id": "tcpip-workflow",
+                "title": "tcpip_support_workflow",
+                "content": "Collect logs, packet captures, route tables, and user symptom timelines before concluding.",
+            }),
+        ];
+
+        assert!(source_title_clarification_request(
+            "如何排查 TCP/IP 连接失败？请只基于知识库证据回答。",
+            &knowledge
+        )
+        .is_none());
+        assert!(source_title_clarification_request(
+            "请总结当前知识库中 TCP/IP 起源和排障流程的核心要点，必须给出引用。",
+            &knowledge
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn source_title_clarification_allows_explicit_product_qualifier() {
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "rv-quick",
+                "title": "Rockchip_RV1106B_RV1103B_Quick_Start_Linux_IPC_SDK_CN",
+                "content": "镜像存放目录说明 output/image update.img",
+            }),
+            serde_json::json!({
+                "item_id": "rv-release",
+                "title": "RV1106B_RV1103B_Linux_IPC_SDK_Release_V1.1.0_20241021_CN",
+                "content": "Rockchip RV1106B SDK 发布说明",
+            }),
+            serde_json::json!({
+                "item_id": "tina-storage",
+                "title": "V821_Tina_Linux_存储优化_开发指南",
+                "content": "Tina Linux 镜像优化",
+            }),
+        ];
+
+        assert!(source_title_clarification_request(
+            "RV1106B Linux IPC SDK 编译完镜像一般在哪里？",
+            &knowledge
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn weak_manual_howto_answer_is_supplemented_from_action_refs() {
+        let answer = "查询外设资源的 type 和 id 可参考《SDK Driver 开发指南》中的资源配置章节，该文档提供了具体的操作步骤和接口说明[1]。若需进一步确认，建议查阅相关代码或联系技术支持获取详细信息。";
+        let evidence = "4.2 查询某个 peripheral 的 type 和 id\n\
+            1. 方法 1 打开 drivers/platform/foo_clock.h，搜索目标外设名。\n\
+            2. 方法 2 在 drivers/platform/foo_clock.c 搜索 .type 字段，确认 type。\n\
+            3. 找到 FOO_BUS_UART2 作为 id，并用 get_clock(type, id) 获取句柄。\n\
+            4. 调用接口前检查参数是否匹配，返回值小于 0 时按错误码排查。";
+        let supplemented = supplement_weak_manual_howto_answer(
+            "驱动开发中如何查询外设资源的type和id",
+            &[serde_json::json!({
+                "title": "SDK Driver 开发指南",
+                "content": evidence,
+            })],
+            answer,
+        );
+        assert!(supplemented.contains("操作方法补充"), "{supplemented}");
+        assert!(
+            supplemented.contains("drivers/platform/foo_clock.h"),
+            "{supplemented}"
+        );
+        assert!(supplemented.contains("FOO_BUS_UART2"), "{supplemented}");
+        assert!(
+            supplemented.contains("get_clock(type, id)"),
+            "{supplemented}"
+        );
+        assert!(supplemented.contains("原文位置"), "{supplemented}");
+    }
+
+    #[test]
+    fn weak_manual_howto_refusal_is_supplemented_from_action_refs() {
+        let answer = "The provided reference material does not include information about how to query the type and ID. Therefore, I cannot provide a direct answer based on the given information.";
+        let evidence = "4.2 查询某个 peripheral 的 type 和 id\n\
+            1. 方法 1 打开 drivers/platform/foo_clock.h，搜索目标外设名。\n\
+            2. 在 foo_clock.c 搜索 .type 字段，确认 clock type。\n\
+            3. 找到 FOO_BUS_UART2 作为 clk id。\n\
+            4. 调用 get_clock(type, id) 获取句柄。";
+        let supplemented = supplement_weak_manual_howto_answer(
+            "驱动开发中如何查询外设资源的type和id",
+            &[serde_json::json!({
+                "title": "SDK Driver 开发指南",
+                "content": evidence,
+            })],
+            answer,
+        );
+
+        assert!(supplemented.contains("操作方法补充"), "{supplemented}");
+        assert!(
+            supplemented.contains("drivers/platform/foo_clock.h"),
+            "{supplemented}"
+        );
+        assert!(
+            supplemented.contains("get_clock(type, id)"),
+            "{supplemented}"
+        );
+    }
+
+    #[test]
+    fn manual_howto_answer_is_supplemented_when_evidence_identifiers_are_missing() {
+        let answer =
+            "Clock type 和 id 可以通过平台头文件和源文件查找，找到 UART2 对应的枚举后配置。";
+        let evidence = "查找某个时钟的 type 和 id\n\
+            1. 打开 drivers/clock/example_clock.h，搜索 UART2。\n\
+            2. 在 example_clock.c 搜索 .clk_type 字段。\n\
+            3. UART2 的 type 是 A_CLOCK_DOMAIN，id 是 A_CLK_UART2。";
+        let supplemented = supplement_weak_manual_howto_answer(
+            "RTOS 里 clock type 和 id 怎么查？",
+            &[serde_json::json!({
+                "title": "RTOS Clock Guide",
+                "content": evidence,
+            })],
+            answer,
+        );
+
+        assert!(supplemented.contains("操作方法补充"), "{supplemented}");
+        assert!(supplemented.contains("A_CLOCK_DOMAIN"), "{supplemented}");
+        assert!(supplemented.contains("A_CLK_UART2"), "{supplemented}");
+    }
+
+    #[test]
+    fn manual_workflow_answer_is_supplemented_with_multiple_evidence_windows() {
+        let answer = "第一次编译 SDK 时先准备环境，再选择方案，最后打包。";
+        let filler = "目录 版本历史 版权声明\n".repeat(120);
+        let evidence = format!(
+            "SDK Guide\n{filler}\nunpack_en: enabled\n初始化环境\n执行 source build/envsetup.sh 加载环境。\n{filler}\n选择方案\n执行 lunch 后选择 demo‑board。\n{filler}\n打包\n执行 pack 生成固件。\n"
+        );
+        let supplemented = supplement_weak_manual_howto_answer(
+            "SDK 第一次怎么编译和打包？",
+            &[serde_json::json!({
+                "title": "SDK Guide",
+                "content": evidence,
+            })],
+            answer,
+        );
+
+        assert!(
+            supplemented.contains("source build/envsetup.sh"),
+            "{supplemented}"
+        );
+        assert!(supplemented.contains("demo-board"), "{supplemented}");
+        assert!(supplemented.contains("执行 pack"), "{supplemented}");
+        assert!(!manual_howto_marker_matches_line(
+            "pack",
+            "unpack_en: enabled",
+            "unpack_en: enabled"
+        ));
+        assert!(manual_howto_marker_matches_line(
+            "pack",
+            "执行 pack 生成固件。",
+            "执行 pack 生成固件。"
+        ));
+    }
+
+    #[test]
+    fn manual_toolchain_answer_is_supplemented_with_setup_commands() {
+        let answer = "SDK 工具链需要在开发机上安装依赖，然后加载交叉编译环境。";
+        let filler = "目录 版本历史 版权声明\n".repeat(80);
+        let evidence = format!(
+            "SDK Quick Start\n{filler}\n开发机环境\n推荐使用 Ubuntu 18.04。\n执行 sudo apt-get install repo git make gcc g++。\n{filler}\n工具链\n交叉工具链位于 tools/linux/toolchain/arm-example-linux-uclibcgnueabihf。\n执行 source env_install_toolchain.sh 加载工具链。\n"
+        );
+        let supplemented = supplement_weak_manual_howto_answer(
+            "SDK 环境和工具链怎么准备？",
+            &[serde_json::json!({
+                "title": "SDK Quick Start",
+                "content": evidence,
+            })],
+            answer,
+        );
+
+        assert!(supplemented.contains("Ubuntu 18.04"), "{supplemented}");
+        assert!(
+            supplemented.contains("sudo apt-get install"),
+            "{supplemented}"
+        );
+        assert!(
+            supplemented.contains("arm-example-linux-uclibcgnueabihf"),
+            "{supplemented}"
+        );
+        assert!(
+            supplemented.contains("env_install_toolchain.sh"),
+            "{supplemented}"
+        );
+    }
+
+    #[test]
+    fn manual_board_config_answer_keeps_path_like_candidates() {
+        let answer = "选择板级时运行 lunch 后挑选合适配置。";
+        let filler = "目录 版本历史 版权声明\n".repeat(90);
+        let evidence = format!(
+            "SDK Quick Start\n{filler}\nRecovery 的方法。\n在 <SDK>/project/cfg/BoardConfig*.mk 中添加如下配置： export KERNEL_DEFCONFIG_FRAGMENT=\"alpha1-recovery.config\"\n{filler}\n板级配置文件说明\nSDK 的板级配置在 project/cfg/ 目录下，BoardConfig.mk 文件是 SDK 编译的重要文件。\n{filler}\n选择 BoardConfig 的命令\n./build.sh lunch\nBoardConfig_IPC/BoardConfig-EMMC-NONE-ALPHA1_EVB1_V10_V11-IPC.mk\nBoardConfig_BatteryIPC/BoardConfig-SPI_NOR-NONE-BETA2_EVB2_V10_V11-BAT_IPC.mk\n"
+        );
+        let supplemented = supplement_weak_manual_howto_answer(
+            "ALPHA1/BETA2 SDK 怎么选板级配置？",
+            &[serde_json::json!({
+                "title": "SDK Quick Start",
+                "content": evidence,
+            })],
+            answer,
+        );
+
+        assert!(supplemented.contains("project/cfg"), "{supplemented}");
+        assert!(supplemented.contains("BoardConfig.mk"), "{supplemented}");
+        assert!(supplemented.contains("./build.sh lunch"), "{supplemented}");
+        assert!(
+            supplemented.contains("BoardConfig-EMMC-NONE-ALPHA1_EVB1"),
+            "{supplemented}"
+        );
+        assert!(
+            supplemented.contains("BoardConfig-SPI_NOR-NONE-BETA2_EVB2"),
+            "{supplemented}"
+        );
+    }
+
+    #[test]
     fn local_scheduler_context_builder_bounds_large_context_text() {
         let long_text = format!("{}MID{}", "a".repeat(3000), "z".repeat(3000));
         let bounded = bounded_context_text(&long_text, 1200);
@@ -5825,7 +8382,7 @@ mod tests {
     #[test]
     fn local_scheduler_context_builder_bounds_title_and_evidence_together() {
         let text =
-            local_scheduler_context_text(&"manual-title-".repeat(30), &"e".repeat(2000), 256);
+            local_scheduler_context_text("", &"manual-title-".repeat(30), &"e".repeat(2000), 256);
         assert!(text.chars().count() <= 256);
         assert!(text.starts_with("manual-title-"));
         assert!(text.contains("\n...\n"));

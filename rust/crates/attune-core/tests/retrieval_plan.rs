@@ -1,7 +1,7 @@
 use attune_core::retrieval_plan::{
-    plan_retrieval, score_sras_candidate, IndexPartitionField, RetrievalChannel,
-    RetrievalLatencyClass, RetrievalPlanRequest, RetrievalTarget, SrasCandidateSignal,
-    SrasSelector,
+    plan_query, plan_retrieval, score_sras_candidate, EvidenceNeed, IndexPartitionField,
+    RetrievalChannel, RetrievalLatencyClass, RetrievalPlanRequest, RetrievalTarget,
+    SrasCandidateSignal, SrasSelector,
 };
 use attune_core::store::audit::PrivacyTier;
 
@@ -168,4 +168,41 @@ fn privacy_disallowed_candidate_is_hard_demoted() {
         &attune_core::retrieval_plan::SrasWeights::local_scheduler_interactive(),
     );
     assert!(score < -999_999.0);
+}
+
+#[test]
+fn planner_maps_howto_api_question_to_api_and_procedure_evidence() {
+    let plan = plan_query("How do I initialize and start a transfer?");
+
+    assert!(plan.evidence_needs.contains(&EvidenceNeed::ApiReference));
+    assert!(plan.evidence_needs.contains(&EvidenceNeed::Procedure));
+}
+
+#[test]
+fn planner_maps_debug_question_to_troubleshooting_and_command_evidence() {
+    let plan = plan_query("How do I verify the module and troubleshoot zero output?");
+
+    assert!(plan.evidence_needs.contains(&EvidenceNeed::Troubleshooting));
+    assert!(plan.evidence_needs.contains(&EvidenceNeed::Command));
+}
+
+#[test]
+fn planner_extracts_explicit_source_constraints_without_known_corpus_mapping() {
+    let plan = plan_query("For ABC123 RTOS in /docs/sdk, how do I configure the driver?");
+
+    assert!(plan
+        .source_constraints
+        .required_terms
+        .iter()
+        .any(|term| term == "ABC123"));
+    assert!(plan
+        .source_constraints
+        .required_terms
+        .iter()
+        .any(|term| term == "RTOS"));
+    assert!(plan
+        .source_constraints
+        .required_terms
+        .iter()
+        .any(|term| term == "/docs/sdk"));
 }

@@ -18,6 +18,8 @@ REPORTS_DIR="$ROOT/reports/release"
 SKIP_FRONTEND="${ATTUNE_PACKAGE_SKIP_FRONTEND:-0}"
 SKIP_BUILD="${ATTUNE_PACKAGE_SKIP_BUILD:-0}"
 SKIP_RVV_AUDIT="${ATTUNE_PACKAGE_SKIP_RVV_AUDIT:-0}"
+INCLUDE_WEB_DEMO="${ATTUNE_PACKAGE_INCLUDE_WEB_DEMO:-1}"
+INCLUDE_OSS_COMPANION="${ATTUNE_PACKAGE_INCLUDE_OSS_COMPANION:-1}"
 STRICT_RVV="${ATTUNE_PACKAGE_STRICT_RVV:-1}"
 DRY_RUN=0
 
@@ -51,6 +53,14 @@ while [ "$#" -gt 0 ]; do
       SKIP_RVV_AUDIT=1
       shift
       ;;
+    --skip-web-demo)
+      INCLUDE_WEB_DEMO=0
+      shift
+      ;;
+    --skip-oss-companion)
+      INCLUDE_OSS_COMPANION=0
+      shift
+      ;;
     --strict-rvv)
       STRICT_RVV=1
       shift
@@ -77,12 +87,16 @@ Common options:
   --reports-dir <path>  Output directory for build reports.
   --skip-frontend       Reuse existing attune-server UI dist.
   --skip-build          Reuse existing riscv64 binary.
+  --skip-web-demo       Do not build the attune-web-demo companion package.
+  --skip-oss-companion  Do not build the attune-oss-companion package.
   --no-strict-rvv       Do not require RVV instruction thresholds.
   --dry-run             Write reports without building.
 
 Environment shortcuts:
   ATTUNE_PACKAGE_SKIP_FRONTEND=1
   ATTUNE_PACKAGE_SKIP_BUILD=1
+  ATTUNE_PACKAGE_INCLUDE_WEB_DEMO=0
+  ATTUNE_PACKAGE_INCLUDE_OSS_COMPANION=0
   ATTUNE_RVA23_TOOLCHAIN=/path/to/spacemit-toolchain
 HELP
       exit 0
@@ -123,6 +137,8 @@ validate_switch() {
 validate_switch ATTUNE_PACKAGE_SKIP_FRONTEND "$SKIP_FRONTEND"
 validate_switch ATTUNE_PACKAGE_SKIP_BUILD "$SKIP_BUILD"
 validate_switch ATTUNE_PACKAGE_SKIP_RVV_AUDIT "$SKIP_RVV_AUDIT"
+validate_switch ATTUNE_PACKAGE_INCLUDE_WEB_DEMO "$INCLUDE_WEB_DEMO"
+validate_switch ATTUNE_PACKAGE_INCLUDE_OSS_COMPANION "$INCLUDE_OSS_COMPANION"
 validate_switch ATTUNE_PACKAGE_STRICT_RVV "$STRICT_RVV"
 
 if [ "$DRY_RUN" != "1" ]; then
@@ -173,6 +189,8 @@ fi
   echo "- Skip frontend: $SKIP_FRONTEND"
   echo "- Skip build: $SKIP_BUILD"
   echo "- Skip RVV audit: $SKIP_RVV_AUDIT"
+  echo "- Include web demo package: $INCLUDE_WEB_DEMO"
+  echo "- Include OSS companion package: $INCLUDE_OSS_COMPANION"
   echo "- Strict RVV audit: $STRICT_RVV"
   echo "- Dry run: $DRY_RUN"
   echo
@@ -196,3 +214,31 @@ if [ "$STRICT_RVV" = "1" ]; then
 fi
 
 bash "$ROOT/scripts/release/build-riscv64-server-deb.sh" "${BUILD_ARGS[@]}"
+
+if [ "$INCLUDE_WEB_DEMO" = "1" ]; then
+  WEB_DEMO_ARGS=(
+    --out-dir "$OUT_DIR"
+    --reports-dir "$REPORTS_DIR"
+  )
+  if [ -n "$VERSION" ]; then
+    WEB_DEMO_ARGS+=(--version "$VERSION")
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    WEB_DEMO_ARGS+=(--dry-run)
+  fi
+  bash "$ROOT/scripts/release/build-riscv64-web-demo-deb.sh" "${WEB_DEMO_ARGS[@]}"
+fi
+
+if [ "$INCLUDE_OSS_COMPANION" = "1" ]; then
+  OSS_COMPANION_ARGS=(
+    --out-dir "$OUT_DIR"
+    --reports-dir "$REPORTS_DIR"
+  )
+  if [ -n "$VERSION" ]; then
+    OSS_COMPANION_ARGS+=(--version "$VERSION")
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    OSS_COMPANION_ARGS+=(--dry-run)
+  fi
+  bash "$ROOT/scripts/release/build-riscv64-oss-companion-deb.sh" "${OSS_COMPANION_ARGS[@]}"
+fi

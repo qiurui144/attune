@@ -9,6 +9,8 @@ required=(
   "$ROOT/scripts/package-riscv64-deb.sh"
   "$ROOT/scripts/audit-rvv-vectorization.sh"
   "$ROOT/scripts/release/build-riscv64-server-deb.sh"
+  "$ROOT/scripts/release/build-riscv64-web-demo-deb.sh"
+  "$ROOT/scripts/release/build-riscv64-oss-companion-deb.sh"
   "$ROOT/scripts/release/probe-attune-package-boundary.sh"
   "$ROOT/scripts/release/test-k3-nas-web-demo.sh"
   "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh"
@@ -63,8 +65,29 @@ bash "$ROOT/scripts/package-riscv64-deb.sh" \
   --reports-dir "$TMP/one-key-reports"
 test -f "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
 test -f "$TMP/one-key-reports/build-riscv64-server-deb-dry-run.md"
+test -f "$TMP/one-key-reports/build-riscv64-web-demo-deb-dry-run.md"
+test -f "$TMP/one-key-reports/build-riscv64-oss-companion-deb-dry-run.md"
 grep -q "One-key riscv64 Debian Package" "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
 grep -q "scripts/release/build-riscv64-server-deb.sh" "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
+grep -q "Include web demo package: 1" "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
+grep -q "Include OSS companion package: 1" "$TMP/one-key-reports/package-riscv64-deb-dry-run.md"
+
+bash "$ROOT/scripts/release/build-riscv64-web-demo-deb.sh" \
+  --dry-run \
+  --version 9.9.9-test \
+  --out-dir "$TMP/web-demo-dist" \
+  --reports-dir "$TMP/reports"
+test -f "$TMP/reports/build-riscv64-web-demo-deb-dry-run.md"
+grep -q "attune-web-demo" "$TMP/reports/build-riscv64-web-demo-deb-dry-run.md"
+
+bash "$ROOT/scripts/release/build-riscv64-oss-companion-deb.sh" \
+  --dry-run \
+  --version 9.9.9-test \
+  --out-dir "$TMP/oss-companion-dist" \
+  --reports-dir "$TMP/reports"
+test -f "$TMP/reports/build-riscv64-oss-companion-deb-dry-run.md"
+grep -q "attune-oss-companion" "$TMP/reports/build-riscv64-oss-companion-deb-dry-run.md"
+grep -q "oss_rag_default" "$TMP/reports/build-riscv64-oss-companion-deb-dry-run.md"
 
 BOUNDARY_OK="$TMP/boundary-ok"
 BOUNDARY_BAD="$TMP/boundary-bad"
@@ -133,6 +156,7 @@ test "$(dpkg-deb --field "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb" A
 EXTRACTED_PKG="$TMP/extracted-contract"
 dpkg-deb -x "$FAKE_PKG/attune-server_9.9.10-contract_riscv64.deb" "$EXTRACTED_PKG"
 grep -q '\$ATTUNE_EXTRA_ARGS' "$EXTRACTED_PKG/lib/systemd/system/attune-server.service"
+grep -q "ATTUNE_CHAT_SCHEDULER_JOB_POLL_TIMEOUT_MS=180000" "$EXTRACTED_PKG/etc/default/attune-server"
 if grep -q '\${ATTUNE_EXTRA_ARGS}' "$EXTRACTED_PKG/lib/systemd/system/attune-server.service"; then
   echo "systemd unit must not pass an empty ATTUNE_EXTRA_ARGS argument" >&2
   exit 1
@@ -142,10 +166,56 @@ test -f "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/prompt
 grep -q "rag_profiles" "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/plugin.yaml"
 grep -q "30B" "$EXTRACTED_PKG/usr/share/attune/capability-packs/oss-rag-default/plugin.yaml"
 
+WEB_DEMO_PKG="$TMP/web-demo-pkg"
+bash "$ROOT/scripts/release/build-riscv64-web-demo-deb.sh" \
+  --version 9.9.10-contract \
+  --out-dir "$WEB_DEMO_PKG" \
+  --reports-dir "$TMP/reports"
+test -f "$WEB_DEMO_PKG/attune-web-demo_9.9.10-contract_all.deb"
+test -f "$WEB_DEMO_PKG/attune-web-demo_9.9.10-contract_all.deb.sha256"
+sha256sum -c "$WEB_DEMO_PKG/attune-web-demo_9.9.10-contract_all.deb.sha256"
+test "$(dpkg-deb --field "$WEB_DEMO_PKG/attune-web-demo_9.9.10-contract_all.deb" Package)" = "attune-web-demo"
+test "$(dpkg-deb --field "$WEB_DEMO_PKG/attune-web-demo_9.9.10-contract_all.deb" Architecture)" = "all"
+EXTRACTED_WEB_DEMO="$TMP/extracted-web-demo"
+dpkg-deb -x "$WEB_DEMO_PKG/attune-web-demo_9.9.10-contract_all.deb" "$EXTRACTED_WEB_DEMO"
+test -f "$EXTRACTED_WEB_DEMO/usr/share/attune/kb-web-demo/index.html"
+test -f "$EXTRACTED_WEB_DEMO/usr/share/attune/kb-web-demo/cors-proxy.py"
+test -f "$EXTRACTED_WEB_DEMO/etc/default/attune-web-demo"
+test -f "$EXTRACTED_WEB_DEMO/lib/systemd/system/attune-web-demo.service"
+test -f "$EXTRACTED_WEB_DEMO/lib/systemd/system/attune-web-demo-proxy.service"
+grep -q "清零环境" "$EXTRACTED_WEB_DEMO/usr/share/attune/kb-web-demo/index.html"
+grep -q "/api/v1/demo/reset" "$EXTRACTED_WEB_DEMO/usr/share/attune/kb-web-demo/index.html"
+grep -q "ATTUNE_TARGET_PORT=18900" "$EXTRACTED_WEB_DEMO/etc/default/attune-web-demo"
+grep -q "ATTUNE_WEB_DEMO_PORT=8968" "$EXTRACTED_WEB_DEMO/etc/default/attune-web-demo"
+grep -q "ATTUNE_PROXY_PORT=8969" "$EXTRACTED_WEB_DEMO/etc/default/attune-web-demo"
+grep -q "attune-web-demo-proxy.service" "$EXTRACTED_WEB_DEMO/lib/systemd/system/attune-web-demo.service"
+
+OSS_COMPANION_PKG="$TMP/oss-companion-pkg"
+bash "$ROOT/scripts/release/build-riscv64-oss-companion-deb.sh" \
+  --version 9.9.10-contract \
+  --out-dir "$OSS_COMPANION_PKG" \
+  --reports-dir "$TMP/reports"
+test -f "$OSS_COMPANION_PKG/attune-oss-companion_9.9.10-contract_all.deb"
+test -f "$OSS_COMPANION_PKG/attune-oss-companion_9.9.10-contract_all.deb.sha256"
+sha256sum -c "$OSS_COMPANION_PKG/attune-oss-companion_9.9.10-contract_all.deb.sha256"
+test "$(dpkg-deb --field "$OSS_COMPANION_PKG/attune-oss-companion_9.9.10-contract_all.deb" Package)" = "attune-oss-companion"
+test "$(dpkg-deb --field "$OSS_COMPANION_PKG/attune-oss-companion_9.9.10-contract_all.deb" Architecture)" = "all"
+EXTRACTED_OSS_COMPANION="$TMP/extracted-oss-companion"
+dpkg-deb -x "$OSS_COMPANION_PKG/attune-oss-companion_9.9.10-contract_all.deb" "$EXTRACTED_OSS_COMPANION"
+test -f "$EXTRACTED_OSS_COMPANION/usr/share/attune/oss-companion/plugins/oss-rag-default/plugin.yaml"
+test -f "$EXTRACTED_OSS_COMPANION/usr/share/attune/oss-companion/plugins/oss-rag-default/prompt.md"
+test -f "$EXTRACTED_OSS_COMPANION/usr/share/attune/oss-companion/skills/compare-to-table.yaml"
+test -f "$EXTRACTED_OSS_COMPANION/usr/share/attune/oss-companion/skills/reference-generate.yaml"
+test -f "$EXTRACTED_OSS_COMPANION/usr/share/attune/oss-companion/skills/research-synthesis.yaml"
+test -f "$EXTRACTED_OSS_COMPANION/etc/default/attune-oss-companion"
+grep -q "rag_profiles" "$EXTRACTED_OSS_COMPANION/usr/share/attune/oss-companion/plugins/oss-rag-default/plugin.yaml"
+grep -q "ATTUNE_OSS_COMPANION_PLUGIN_DIR=/var/lib/attune/data/attune/plugins" "$EXTRACTED_OSS_COMPANION/etc/default/attune-oss-companion"
+
 bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
   --dry-run \
   --skip-deb-check \
   --deb "$TMP/fake.deb" \
+  --web-demo-deb "$TMP/fake-web-demo.deb" \
   --base-url http://127.0.0.1:18900 \
   --reports-dir "$TMP/reports" \
   >/tmp/attune-k3-release-dry-run.log
@@ -156,6 +226,7 @@ bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
   --dry-run \
   --skip-deb-check \
   --deb "$TMP/fake.deb" \
+  --web-demo-deb "$TMP/fake-web-demo.deb" \
   --base-url http://127.0.0.1:18900 \
   --reports-dir "$TMP/reports"
 test -f "$TMP/reports/k3-nas-web-demo-dry-run.md"
@@ -185,6 +256,7 @@ grep -q "scripts/eval/validate-manifests.py" "$TMP/reports/k3-nas-web-demo-dry-r
 grep -q "scripts/eval/run-suite.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_EVAL_OUT" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "KB Web Demo Frontend Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "Web demo deb" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_WEB_DEMO_BASE_URL" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_WEB_DEMO_PROFILE" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "kb_web_demo_eval_frontend_e2e.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
@@ -206,6 +278,35 @@ grep -q "vector_indexing" "$TMP/nas-web-api-contract-dry-run.txt"
 grep -q "chat_scheduler" "$TMP/nas-web-api-contract-dry-run.txt"
 grep -q "scheduler_observations" "$TMP/nas-web-api-contract-dry-run.txt"
 grep -q "scheduler instability" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "voice_scheduler" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "/api/v1/voice/status" "$TMP/nas-web-api-contract-dry-run.txt"
+grep -q "/api/v1/voice/transcribe-file" "$TMP/nas-web-api-contract-dry-run.txt"
+if grep -q "/api/v1/voice/synthesize" "$TMP/nas-web-api-contract-dry-run.txt"; then
+  echo "voice dry-run must not advertise /api/v1/voice/synthesize" >&2
+  exit 1
+fi
+
+bash "$ROOT/scripts/release/test-k3-rvv-runtime-gate.sh" \
+  --dry-run \
+  --scheduler-url http://192.168.100.233:8090 \
+  --reports-dir "$TMP/relative-rvv-reports" \
+  --scheduler-root /data/RV/k3-scheduler \
+  >/tmp/attune-k3-rvv-gate-dry-run.log
+test -f "$TMP/relative-rvv-reports/k3-rvv-runtime-gate-dry-run.md"
+grep -q "direct /infer is commonly loopback-only" "$TMP/relative-rvv-reports/k3-rvv-runtime-gate-dry-run.md"
+grep -q "absolute report path" "$TMP/relative-rvv-reports/k3-rvv-runtime-gate-dry-run.md"
+
+UNTRACKED_HARDCODE_PROBE="$ROOT/kb-web-demo/__attune_hardcoded_audit_probe.js"
+trap 'rm -rf "$TMP"; rm -f "$UNTRACKED_HARDCODE_PROBE"' EXIT
+printf 'const leaked = "RTOS_DMAC_开发指南";\n' > "$UNTRACKED_HARDCODE_PROBE"
+if bash "$ROOT/scripts/no-hardcoded-rag-domain-audit.sh" > "$TMP/hardcoded-untracked.txt" 2>&1; then
+  echo "hardcoded audit unexpectedly ignored an untracked production file" >&2
+  exit 1
+fi
+grep -q "__attune_hardcoded_audit_probe.js" "$TMP/hardcoded-untracked.txt"
+rm -f "$UNTRACKED_HARDCODE_PROBE"
+bash "$ROOT/scripts/no-hardcoded-rag-domain-audit.sh" > "$TMP/hardcoded-clean.txt"
+grep -q "no-hardcoded-rag-domain-audit: PASS" "$TMP/hardcoded-clean.txt"
 
 test -f "$ROOT/docs/testing/k3-nas-web-remote-ci.md"
 grep -q "ATTUNE_K3_LONGTEXT_MANIFEST" "$ROOT/docs/testing/k3-nas-web-remote-ci.md"

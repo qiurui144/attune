@@ -200,6 +200,7 @@ impl ChatEngine {
                             .into_iter()
                             .map(|r| SearchResult {
                                 item_id: format!("web:{}", r.url),
+                                chunk_idx: None,
                                 score: 0.55,
                                 title: r.title,
                                 content: r.snippet.clone(),

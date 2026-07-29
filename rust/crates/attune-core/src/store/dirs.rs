@@ -103,6 +103,16 @@ impl Store {
         Ok(dirs)
     }
 
+    /// Clear all local/connector source bindings and incremental source tracking.
+    ///
+    /// Demo reset uses this to prevent previously bound test corpora from being
+    /// scanned back into an otherwise empty vault after reset.
+    pub fn clear_all_source_tracking(&self) -> Result<(usize, usize)> {
+        let indexed_files = self.conn.execute("DELETE FROM indexed_files", [])?;
+        let bound_dirs = self.conn.execute("DELETE FROM bound_dirs", [])?;
+        Ok((bound_dirs, indexed_files))
+    }
+
     /// 更新目录的 last_scan 时间戳
     pub fn update_dir_last_scan(&self, dir_id: &str) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -214,9 +224,10 @@ impl Store {
     /// 删除某 source 下全部 indexed_files tracking 行。用于 RSS feed 等非目录源删除
     /// 配置时清理增量元数据，同时保留已经入库的 items。
     pub fn delete_indexed_files_for_dir(&self, dir_id: &str) -> Result<usize> {
-        let deleted = self
-            .conn
-            .execute("DELETE FROM indexed_files WHERE dir_id = ?1", params![dir_id])?;
+        let deleted = self.conn.execute(
+            "DELETE FROM indexed_files WHERE dir_id = ?1",
+            params![dir_id],
+        )?;
         Ok(deleted)
     }
 

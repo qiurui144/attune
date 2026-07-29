@@ -29,20 +29,41 @@ pub async fn upload_file(
     mut multipart: Multipart,
 ) -> AppResult<Json<serde_json::Value>> {
     // First, read multipart data without holding any locks
-    let (filename, data) = {
-        let field = multipart
-            .next_field()
-            .await
-            .map_err(|e| AppError::BadRequest(e.to_string()))?
-            .ok_or_else(|| AppError::BadRequest("no file provided".into()))?;
-
-        let filename = field.file_name().unwrap_or("unknown").to_string();
-        let data = field
+    let mut uploaded_file: Option<(String, axum::body::Bytes)> = None;
+    let mut relative_path: Option<String> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "relative_path" {
+            relative_path = Some(
+                field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?,
+            );
+            continue;
+        }
+        if name == "file" && uploaded_file.is_none() {
+            let filename = field.file_name().unwrap_or("unknown").to_string();
+            let data = field
+                .bytes()
+                .await
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            uploaded_file = Some((filename, data));
+            continue;
+        }
+        let _ = field
             .bytes()
             .await
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        (filename, data)
-    };
+    }
+
+    let (filename, data) =
+        uploaded_file.ok_or_else(|| AppError::BadRequest("no file provided".into()))?;
+    let filename = upload_display_name(&filename, relative_path.as_deref())?;
 
     if data.len() > MAX_UPLOAD_BYTES {
         return Err(AppError::PayloadTooLarge(format!(
@@ -409,9 +430,33 @@ pub async fn upload_file(
     Ok(Json(serde_json::json!({
         "id": item_id,
         "title": parsed_title,
+        "source_ref": format!("upload://{filename}"),
         "chunks_queued": chunks_queued,
         "status": response_status
     })))
+}
+
+fn upload_display_name(filename: &str, relative_path: Option<&str>) -> AppResult<String> {
+    let Some(raw_relative_path) = relative_path.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(filename.to_string());
+    };
+    let normalized = raw_relative_path.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized.contains('\0')
+        || normalized.len() > 1024
+        || normalized
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        || normalized
+            .split('/')
+            .next()
+            .is_some_and(|segment| segment.ends_with(':'))
+    {
+        return Err(AppError::BadRequest(
+            "relative_path must be a safe relative folder path".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 /// 由文件名扩展名推断 MIME —— 用于 A1 原件留存的 Content-Type，

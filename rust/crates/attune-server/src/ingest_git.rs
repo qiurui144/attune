@@ -134,9 +134,7 @@ pub fn sync_git_source(
         if !existing_item_active {
             if let Some(stale_item_id) = existing.as_ref().and_then(|row| row.item_id.as_ref()) {
                 if let Err(e) = store.enqueue_reindex(stale_item_id, "purge") {
-                    errors.push(format!(
-                        "{source_ref}: enqueue stale tracking purge {e}"
-                    ));
+                    errors.push(format!("{source_ref}: enqueue stale tracking purge {e}"));
                     continue;
                 }
             }
@@ -253,9 +251,7 @@ pub fn sync_git_source(
                             Ok(false) => {
                                 let _ = store.delete_item(item_id);
                                 if let Err(e) = store.enqueue_reindex(item_id, "purge") {
-                                    tracing::warn!(
-                                        "sync_git_source: purge deleted {item_id}: {e}"
-                                    );
+                                    tracing::warn!("sync_git_source: purge deleted {item_id}: {e}");
                                 }
                                 let _ = store.record_signal_event("doc_delete", item_id, None);
                             }

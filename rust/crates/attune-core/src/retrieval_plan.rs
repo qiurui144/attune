@@ -31,6 +31,31 @@ pub enum RetrievalChannel {
     Recency,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceNeed {
+    Definition,
+    ApiReference,
+    Procedure,
+    Command,
+    Config,
+    Troubleshooting,
+    Comparison,
+    Summary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceConstraints {
+    pub required_terms: Vec<String>,
+    pub excluded_terms: Vec<String>,
+    pub prefer_same_source: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalDiversity {
+    PreferSameSource,
+    PreferDiverseSources,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalChannelPlan {
     pub channel: RetrievalChannel,
@@ -219,6 +244,9 @@ pub struct RetrievalPlan {
     pub final_top_k: usize,
     pub evidence_token_budget: usize,
     pub rerank_candidate_cap: usize,
+    pub evidence_needs: Vec<EvidenceNeed>,
+    pub source_constraints: SourceConstraints,
+    pub diversity: RetrievalDiversity,
     pub channels: Vec<RetrievalChannelPlan>,
     pub partitions: IndexPartitionPlan,
     pub sras_weights: SrasWeights,
@@ -315,6 +343,15 @@ pub fn plan_retrieval(req: RetrievalPlanRequest<'_>) -> RetrievalPlan {
     let rerank_candidate_cap = rerank_cap(req.target, req.latency_class);
     let evidence_token_budget = evidence_budget(req.target, req.latency_class, &features);
     let domain_hint = normalize_domain(req.corpus_domain);
+    let evidence_needs = plan_evidence_needs(req.query);
+    let source_constraints = extract_source_constraints(req.query);
+    let diversity = if evidence_needs.contains(&EvidenceNeed::Comparison)
+        || evidence_needs.contains(&EvidenceNeed::Summary) && req.query.contains(" and ")
+    {
+        RetrievalDiversity::PreferDiverseSources
+    } else {
+        RetrievalDiversity::PreferSameSource
+    };
 
     RetrievalPlan {
         target: req.target,
@@ -322,6 +359,9 @@ pub fn plan_retrieval(req: RetrievalPlanRequest<'_>) -> RetrievalPlan {
         final_top_k,
         evidence_token_budget,
         rerank_candidate_cap,
+        evidence_needs,
+        source_constraints,
+        diversity,
         channels: build_channels(
             req.target,
             req.latency_class,
@@ -340,6 +380,199 @@ pub fn plan_retrieval(req: RetrievalPlanRequest<'_>) -> RetrievalPlan {
         query_features: features,
         domain_hint,
     }
+}
+
+pub fn plan_query(query: &str) -> RetrievalPlan {
+    plan_retrieval(RetrievalPlanRequest::local_scheduler_interactive(query))
+}
+
+fn plan_evidence_needs(query: &str) -> Vec<EvidenceNeed> {
+    let lower = query.to_lowercase();
+    let mut needs = Vec::new();
+    if contains_any(
+        &lower,
+        &[
+            "what is",
+            "define",
+            "definition",
+            "meaning",
+            "是什么",
+            "定义",
+            "含义",
+        ],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Definition);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "how",
+            "flow",
+            "procedure",
+            "step",
+            "start",
+            "initialize",
+            "怎么",
+            "如何",
+            "流程",
+            "步骤",
+        ],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Procedure);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "api",
+            "interface",
+            "function",
+            "parameter",
+            "return",
+            "initialize",
+            "start",
+            "接口",
+            "函数",
+            "参数",
+            "返回",
+        ],
+    ) {
+        push_need(&mut needs, EvidenceNeed::ApiReference);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "command", "run", "build", "verify", "命令", "运行", "编译", "验证",
+        ],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Command);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "config",
+            "configure",
+            "setting",
+            "build",
+            "配置",
+            "设置",
+            "编译",
+        ],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Config);
+    }
+    if contains_any(
+        &lower,
+        &[
+            "debug",
+            "troubleshoot",
+            "failure",
+            "failed",
+            "error",
+            "zero",
+            "排查",
+            "失败",
+            "异常",
+            "错误",
+        ],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Troubleshooting);
+    }
+    if contains_any(
+        &lower,
+        &["compare", "difference", "versus", " vs ", "区别", "对比"],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Comparison);
+    }
+    if contains_any(
+        &lower,
+        &["summary", "summarize", "overview", "总结", "概览", "概括"],
+    ) {
+        push_need(&mut needs, EvidenceNeed::Summary);
+    }
+    if needs.is_empty() {
+        needs.push(EvidenceNeed::Summary);
+    }
+    needs
+}
+
+fn push_need(needs: &mut Vec<EvidenceNeed>, need: EvidenceNeed) {
+    if !needs.contains(&need) {
+        needs.push(need);
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn extract_source_constraints(query: &str) -> SourceConstraints {
+    let mut required_terms = Vec::new();
+    collect_quoted_terms(query, &mut required_terms);
+    collect_path_terms(query, &mut required_terms);
+    collect_model_like_terms(query, &mut required_terms);
+    collect_platform_terms(query, &mut required_terms);
+    dedup_terms(&mut required_terms);
+
+    SourceConstraints {
+        required_terms,
+        excluded_terms: Vec::new(),
+        prefer_same_source: true,
+    }
+}
+
+fn collect_quoted_terms(query: &str, terms: &mut Vec<String>) {
+    for quote in ['"', '\''] {
+        let mut parts = query.split(quote);
+        while let Some(_) = parts.next() {
+            if let Some(term) = parts.next().map(str::trim).filter(|s| !s.is_empty()) {
+                terms.push(term.to_string());
+            }
+        }
+    }
+}
+
+fn collect_path_terms(query: &str, terms: &mut Vec<String>) {
+    for token in query.split_whitespace() {
+        let trimmed = token.trim_matches(|c: char| c == ',' || c == ';' || c == ')' || c == '(');
+        if trimmed.contains('/') || trimmed.contains('\\') {
+            terms.push(trimmed.to_string());
+        }
+    }
+}
+
+fn collect_model_like_terms(query: &str, terms: &mut Vec<String>) {
+    for token in query.split_whitespace() {
+        let trimmed =
+            token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        let has_upper = trimmed.chars().any(|c| c.is_ascii_uppercase());
+        let has_digit = trimmed.chars().any(|c| c.is_ascii_digit());
+        if trimmed.len() >= 3 && has_upper && has_digit {
+            terms.push(trimmed.to_string());
+        }
+    }
+}
+
+fn collect_platform_terms(query: &str, terms: &mut Vec<String>) {
+    for token in query.split_whitespace() {
+        let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        let lower = trimmed.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "rtos" | "linux" | "android" | "windows" | "macos" | "ubuntu" | "debian"
+        ) {
+            terms.push(trimmed.to_string());
+        }
+    }
+}
+
+fn dedup_terms(terms: &mut Vec<String>) {
+    let mut deduped = Vec::new();
+    for term in terms.drain(..).filter(|term| !term.trim().is_empty()) {
+        if !deduped.iter().any(|existing: &String| existing == &term) {
+            deduped.push(term);
+        }
+    }
+    *terms = deduped;
 }
 
 pub fn score_sras_candidate(signal: &SrasCandidateSignal, weights: &SrasWeights) -> f32 {

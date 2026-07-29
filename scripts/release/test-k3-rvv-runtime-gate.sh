@@ -77,6 +77,7 @@ HELP
 done
 
 mkdir -p "$REPORTS_DIR"
+REPORTS_DIR="$(cd "$REPORTS_DIR" && pwd -P)"
 TS="$(date +%Y%m%d_%H%M%S)"
 if [ "$DRY_RUN" = "1" ]; then
   REPORT="$REPORTS_DIR/k3-rvv-runtime-gate-dry-run.md"
@@ -91,6 +92,20 @@ WORKER_GATE="$SCHEDULER_ROOT/tools/worker_benchmark_gate.py"
 
 log() {
   printf '[k3-rvv-gate] %s\n' "$*"
+}
+
+scheduler_url_needs_loopback_hint() {
+  case "$SCHEDULER_URL" in
+    http://127.0.0.1:*|http://127.0.0.1/*|http://localhost:*|http://localhost/*) return 1 ;;
+    http://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+append_worker_loopback_hint() {
+  if scheduler_url_needs_loopback_hint; then
+    append_report "Worker gate diagnostic: scheduler direct /infer is commonly loopback-only; run this gate on the K3 host or expose it through an SSH tunnel whose base URL is 127.0.0.1 from the worker gate process."
+  fi
 }
 
 append_report() {
@@ -117,6 +132,7 @@ record_command() {
   echo "- Commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   echo "- Scheduler URL: ${SCHEDULER_URL:-<none>}"
   echo "- Scheduler root: $SCHEDULER_ROOT"
+  echo "- Reports dir: $REPORTS_DIR"
   echo "- worker_benchmark_gate.py: $WORKER_GATE"
   echo "- Require performance evidence: $REQUIRE_PERF"
   echo "- Skip worker gate: $SKIP_WORKER_GATE"
@@ -129,6 +145,8 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "## Planned Gates"
   append_report "- Probe Attune-side scheduler contract with scripts/probe-edge-scheduler-contract.py."
   append_report "- Run k3-scheduler/tools/worker_benchmark_gate.py from cd \$SCHEDULER_ROOT so scheduler fixture paths resolve under the scheduler checkout."
+  append_report "- Pass an absolute report path to worker_benchmark_gate.py so changing cwd does not redirect JSON output."
+  append_worker_loopback_hint
   append_report "- Require scheduler /benchmark/contract, /models, or /capacity to advertise RVV/IME/SpacemiT acceleration metadata."
   append_report "- Require live p50/last latency evidence when ATTUNE_K3_RVV_REQUIRE_PERF=1."
   record_command python3 "$ROOT/scripts/probe-edge-scheduler-contract.py" --base-url "${SCHEDULER_URL:-http://<nas-ip>:8090}" --strict
@@ -156,11 +174,20 @@ if [ "$SKIP_WORKER_GATE" = "1" ]; then
   append_report "Skipped by --skip-worker-gate."
 elif [ -f "$WORKER_GATE" ]; then
   append_report "Worker gate cwd: $SCHEDULER_ROOT"
+  append_report "Worker gate JSON output: $WORKER_JSON"
   record_command bash -lc "cd \"\$SCHEDULER_ROOT\" && python3 tools/worker_benchmark_gate.py --base \"$SCHEDULER_URL\" --out \"$WORKER_JSON\" --timeout \"$TIMEOUT\""
+  set +e
   (
     cd "$SCHEDULER_ROOT"
     python3 tools/worker_benchmark_gate.py --base "$SCHEDULER_URL" --out "$WORKER_JSON" --timeout "$TIMEOUT"
   ) | tee -a "$REPORT"
+  worker_status=${PIPESTATUS[0]}
+  set -e
+  if [ "$worker_status" -ne 0 ]; then
+    append_worker_loopback_hint
+    append_report "Worker gate failed with exit code $worker_status."
+    exit "$worker_status"
+  fi
 else
   echo "missing scheduler worker benchmark gate: $WORKER_GATE" >&2
   exit 2
