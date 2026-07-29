@@ -378,6 +378,8 @@ impl Store {
                 "DELETE FROM chunk_breadcrumbs WHERE item_id = ?1",
                 params![id],
             )?;
+            self.conn
+                .execute("DELETE FROM chunk_spans WHERE item_id = ?1", params![id])?;
             // v0.7 记忆护城河：删 embed_queue 里该 item 所有 pending 任务。
             // 否则 worker 会拿到 stale chunk 继续走 embedding → 浪费 + 给已删 item
             // 写向量（vectors.delete_by_item_id 必须先于此调用，由 reindex::purge 协调）。

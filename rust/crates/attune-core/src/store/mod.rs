@@ -650,6 +650,23 @@ CREATE TABLE IF NOT EXISTS chunk_breadcrumbs (
 );
 -- 删除冗余 idx_chunk_breadcrumbs_item，PK 前缀已可用
 
+-- Chunk byte spans for retrieval evidence injection.
+--
+-- Vector metadata already stores (item_id, chunk_idx), but search must be able
+-- to recover the matched chunk text after completed embed_queue rows are
+-- cleaned. These offsets are byte ranges into encrypted items.content after it
+-- is decrypted at query time. They do not store plaintext content.
+CREATE TABLE IF NOT EXISTS chunk_spans (
+    item_id       TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    chunk_idx     INTEGER NOT NULL,
+    offset_start  INTEGER NOT NULL,
+    offset_end    INTEGER NOT NULL,
+    level         INTEGER NOT NULL,
+    section_idx   INTEGER NOT NULL,
+    PRIMARY KEY (item_id, chunk_idx)
+);
+-- 删除冗余 idx_chunk_spans_item，PK 前缀已可用
+
 -- G1 浏览状态信号 (W3 batch B, 2026-04-27)
 -- per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
 -- url + title 加密（用户浏览历史属隐私）；engagement 数值明文便于聚合查询。
