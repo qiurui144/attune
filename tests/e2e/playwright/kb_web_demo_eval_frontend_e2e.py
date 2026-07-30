@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,7 @@ def dry_run_report(args: argparse.Namespace) -> dict[str, Any]:
     rtos_dmac_case = rtos_dmac_case_metadata(args) if args.profile == "rtos" else None
     checks = [
         "upload",
+        "clear_reset",
         "folder_upload",
         "vector_chunk_render",
         "chat",
@@ -68,16 +70,21 @@ def dry_run_report(args: argparse.Namespace) -> dict[str, Any]:
         "model_switch_gate",
         "citation_render",
         "time_render",
+        "voice_file_transcribe",
+        "webrtc_voice",
+        "attune_only_network",
     ]
     if args.profile == "rtos":
         checks = [
             "upload",
+            "clear_reset",
             "vector_chunk_render",
             "chat",
             "citation_render",
             "time_render",
             "rtos_manual_howto",
             "rtos_dmac_howto",
+            "attune_only_network",
         ]
     metrics = {
         "web_demo_flow_pass_rate": 1.0,
@@ -87,6 +94,10 @@ def dry_run_report(args: argparse.Namespace) -> dict[str, Any]:
         "web_demo_model_switch_gate_rate": 1.0,
         "web_demo_complex_chat_pass_rate": 1.0,
         "web_demo_summary_workflow_pass_rate": 1.0,
+        "web_demo_clear_reset_rate": 1.0,
+        "web_demo_voice_file_transcribe_rate": 1.0,
+        "web_demo_webrtc_voice_rate": 1.0,
+        "web_demo_attune_only_network_rate": 1.0,
     }
     if args.profile == "rtos":
         metrics["web_demo_rtos_manual_howto_pass_rate"] = 1.0
@@ -184,6 +195,67 @@ def visible_text(page: Any, text: str, timeout: int = 5000) -> bool:
         return True
     except Exception:
         return False
+
+
+def make_silence_wav(path: Path, duration_seconds: float = 0.6, sample_rate: int = 16000) -> None:
+    frames = int(sample_rate * duration_seconds)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * frames)
+
+
+def install_attune_network_monitor(page: Any, base_url: str, api_url: str) -> list[dict[str, Any]]:
+    allowed_origins = {
+        urllib.parse.urlparse(base_url).scheme + "://" + urllib.parse.urlparse(base_url).netloc,
+        urllib.parse.urlparse(api_url).scheme + "://" + urllib.parse.urlparse(api_url).netloc,
+    }
+    api_origin = urllib.parse.urlparse(api_url).scheme + "://" + urllib.parse.urlparse(api_url).netloc
+    violations: list[dict[str, Any]] = []
+
+    def on_request(request: Any) -> None:
+        parsed = urllib.parse.urlparse(request.url)
+        if parsed.scheme not in {"http", "https"}:
+            return
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in allowed_origins:
+            violations.append(
+                {
+                    "url": request.url,
+                    "method": request.method,
+                    "reason": "non-attune-origin",
+                }
+            )
+            return
+        if origin == api_origin and not parsed.path.startswith("/api/v1/"):
+            violations.append(
+                {
+                    "url": request.url,
+                    "method": request.method,
+                    "reason": "non-attune-api-path",
+                }
+            )
+
+    page.on("request", on_request)
+    return violations
+
+
+def voice_gate_result(response: Any) -> dict[str, Any]:
+    payload = response_json(response)
+    status = response.status
+    code = payload.get("code") if isinstance(payload, dict) else None
+    job_id = payload.get("job_id") if isinstance(payload, dict) else None
+    accepted = 200 <= status < 300 and isinstance(job_id, str) and job_id.startswith("job_")
+    not_ready = status == 503 and code == "voice-asr-not-ready"
+    return {
+        "pass": accepted or not_ready,
+        "status": status,
+        "mode": "submitted" if accepted else "not_ready" if not_ready else "failed",
+        "job_id": job_id,
+        "code": code,
+        "payload_excerpt": json.dumps(payload, ensure_ascii=False)[:1000],
+    }
 
 
 def wait_for_demo_ready(page: Any, timeout: int) -> bool:
@@ -820,25 +892,33 @@ def run_rtos_live(args: argparse.Namespace) -> dict[str, Any]:
     stage = "init"
     checks = {
         "upload": False,
+        "clear_reset": False,
         "vector_chunk_render": False,
         "chat": False,
         "citation_render": False,
         "time_render": False,
         "rtos_manual_howto": False,
         "rtos_dmac_howto": False,
+        "attune_only_network": False,
     }
     rtos_result: dict[str, Any] = {}
     rtos_dmac_result: dict[str, Any] = {}
+    reset_result: dict[str, Any] | None = None
+    network_violations: list[dict[str, Any]] = []
     started = time.perf_counter()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=bool(args.headless))
         page = browser.new_page()
+        network_violations = install_attune_network_monitor(page, args.base_url, args.api_url)
         if args.token:
             page.add_init_script(
                 script=f"sessionStorage.setItem('attune_auth_token', {json.dumps(args.token)});",
             )
         try:
+            if args.reset_before:
+                stage = "reset_demo_environment"
+                reset_result = reset_demo_environment(args.api_url, args.timeout_ms, args.token)
             stage = "open_page"
             page_params = {"api": args.api_url}
             joiner = "&" if "?" in args.base_url else "?"
@@ -848,6 +928,21 @@ def run_rtos_live(args: argparse.Namespace) -> dict[str, Any]:
                 timeout=args.timeout_ms,
             )
             page.get_by_text("上传 & 管理", exact=False).first.wait_for(state="visible", timeout=30000)
+
+            stage = "clear_reset_button"
+            page.once("dialog", lambda dialog: dialog.accept())
+            with page.expect_response(
+                lambda r: r.request.method == "POST"
+                and r.url.rstrip("/").endswith("/api/v1/demo/reset"),
+                timeout=args.timeout_ms,
+            ) as reset_resp:
+                page.locator("#clearBtn").click(timeout=5000)
+            reset_button_payload = response_json(reset_resp.value)
+            checks["clear_reset"] = 200 <= reset_resp.value.status < 300
+            if isinstance(reset_result, dict):
+                reset_result["button"] = reset_button_payload
+            else:
+                reset_result = {"button": reset_button_payload}
 
             stage = "upload_rtos_pdf"
             page.locator('input[type="file"]').first.set_input_files(str(source_path))
@@ -917,6 +1012,7 @@ def run_rtos_live(args: argparse.Namespace) -> dict[str, Any]:
         except Exception as exc:
             raise FrontendEvalError(stage, str(exc)) from exc
         finally:
+            checks["attune_only_network"] = not network_violations
             browser.close()
 
     for name, passed in checks.items():
@@ -942,10 +1038,14 @@ def run_rtos_live(args: argparse.Namespace) -> dict[str, Any]:
                 "web_demo_vector_chunk_render_rate": 1.0 if checks["vector_chunk_render"] else 0.0,
                 "web_demo_rtos_manual_howto_pass_rate": 1.0 if checks["rtos_manual_howto"] else 0.0,
                 "web_demo_rtos_dmac_howto_pass_rate": 1.0 if checks["rtos_dmac_howto"] else 0.0,
+                "web_demo_clear_reset_rate": 1.0 if checks["clear_reset"] else 0.0,
+                "web_demo_attune_only_network_rate": 1.0 if checks["attune_only_network"] else 0.0,
                 "elapsed_ms": elapsed_ms,
             }
         },
         "artifacts": {
+            "reset_before": reset_result,
+            "network_violations": network_violations,
             "rtos_case": {
                 **rtos_case_metadata(args),
                 **rtos_result,
@@ -969,6 +1069,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
     stage = "init"
     checks = {
         "upload": False,
+        "clear_reset": False,
         "folder_upload": False,
         "vector_chunk_render": False,
         "chat": False,
@@ -976,6 +1077,9 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         "model_switch_gate": False,
         "citation_render": False,
         "time_render": False,
+        "voice_file_transcribe": False,
+        "webrtc_voice": False,
+        "attune_only_network": False,
     }
     if args.profile == "deep":
         checks["complex_chat"] = False
@@ -1003,11 +1107,17 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
     summary_case_results: list[dict[str, Any]] = []
     model_switch_result: dict[str, Any] = {}
     reset_result: dict[str, Any] | None = None
+    voice_file_result: dict[str, Any] = {}
+    webrtc_voice_result: dict[str, Any] = {}
+    network_violations: list[dict[str, Any]] = []
+    voice_path = fixture_path.with_suffix(".wav")
+    make_silence_wav(voice_path)
 
     started = time.perf_counter()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=bool(args.headless))
         page = browser.new_page()
+        network_violations = install_attune_network_monitor(page, args.base_url, args.api_url)
         if args.token:
             page.add_init_script(
                 script=f"sessionStorage.setItem('attune_auth_token', {json.dumps(args.token)});",
@@ -1025,6 +1135,22 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
                 timeout=args.timeout_ms,
             )
             page.get_by_text("上传 & 管理", exact=False).first.wait_for(state="visible", timeout=30000)
+
+            stage = "clear_reset_button"
+            page.once("dialog", lambda dialog: dialog.accept())
+            with page.expect_response(
+                lambda r: r.request.method == "POST"
+                and r.url.rstrip("/").endswith("/api/v1/demo/reset"),
+                timeout=args.timeout_ms,
+            ) as reset_resp:
+                page.locator("#clearBtn").click(timeout=5000)
+            reset_button_payload = response_json(reset_resp.value)
+            checks["clear_reset"] = 200 <= reset_resp.value.status < 300
+            if isinstance(reset_result, dict):
+                reset_result["button"] = reset_button_payload
+            else:
+                reset_result = {"button": reset_button_payload}
+
             stage = "model_switch_gate"
             try:
                 page.wait_for_function(
@@ -1051,6 +1177,27 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
                 folder_token,
                 timeout=min(args.timeout_ms, 45000),
             ) and wait_for_named_demo_ready(page, folder_token, timeout=min(args.timeout_ms, 90000))
+
+            stage = "voice_file_transcribe_gate"
+            with page.expect_response(
+                lambda r: r.request.method == "POST"
+                and r.url.rstrip("/").endswith("/api/v1/voice/transcribe-file"),
+                timeout=args.timeout_ms,
+            ) as voice_resp:
+                page.locator("#voiceInput").set_input_files(str(voice_path))
+            voice_file_result = voice_gate_result(voice_resp.value)
+            checks["voice_file_transcribe"] = bool(voice_file_result.get("pass"))
+
+            stage = "webrtc_voice_gate"
+            page.get_by_role("button", name="Chat RAG").click(timeout=5000)
+            with page.expect_response(
+                lambda r: r.request.method == "POST"
+                and r.url.rstrip("/").endswith("/api/v1/voice/transcribe-file"),
+                timeout=args.timeout_ms,
+            ) as webrtc_resp:
+                page.locator("#webrtcVoiceTestBtn").click(timeout=5000)
+            webrtc_voice_result = voice_gate_result(webrtc_resp.value)
+            checks["webrtc_voice"] = bool(webrtc_voice_result.get("pass"))
 
             stage = "vector_search"
             page.get_by_role("button", name="向量库").click(timeout=5000)
@@ -1171,9 +1318,14 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
         except Exception as exc:
             raise FrontendEvalError(stage, str(exc)) from exc
         finally:
+            checks["attune_only_network"] = not network_violations
             browser.close()
             try:
                 fixture_path.unlink()
+            except OSError:
+                pass
+            try:
+                voice_path.unlink()
             except OSError:
                 pass
             folder_tmp.cleanup()
@@ -1212,6 +1364,10 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
                 "web_demo_model_switch_gate_rate": 1.0 if checks["model_switch_gate"] else 0.0,
                 "web_demo_complex_chat_pass_rate": complex_pass_rate,
                 "web_demo_summary_workflow_pass_rate": summary_workflow_pass_rate,
+                "web_demo_clear_reset_rate": 1.0 if checks["clear_reset"] else 0.0,
+                "web_demo_voice_file_transcribe_rate": 1.0 if checks["voice_file_transcribe"] else 0.0,
+                "web_demo_webrtc_voice_rate": 1.0 if checks["webrtc_voice"] else 0.0,
+                "web_demo_attune_only_network_rate": 1.0 if checks["attune_only_network"] else 0.0,
                 "elapsed_ms": elapsed_ms,
             }
         },
@@ -1220,6 +1376,9 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
             "summary_cases": summary_case_results,
             "model_switch_gate": model_switch_result,
             "reset_before": reset_result,
+            "voice_file_transcribe": voice_file_result,
+            "webrtc_voice": webrtc_voice_result,
+            "network_violations": network_violations,
             "last_stage": stage,
         },
         "failures": failures,

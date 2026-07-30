@@ -222,6 +222,7 @@ bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
 ATTUNE_K3_EVAL_SUITE=k3_rag_release_smoke \
 ATTUNE_K3_WEB_DEMO_BASE_URL=http://127.0.0.1:8890 \
 ATTUNE_K3_WEB_DEMO_API_URL=http://127.0.0.1:8889 \
+ATTUNE_K3_WEB_DEMO_PROFILE=all \
 bash "$ROOT/scripts/release/test-k3-nas-web-demo.sh" \
   --dry-run \
   --skip-deb-check \
@@ -259,6 +260,7 @@ grep -q "KB Web Demo Frontend Gate" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "Web demo deb" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_WEB_DEMO_BASE_URL" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_WEB_DEMO_PROFILE" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "deep + rtos" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "kb_web_demo_eval_frontend_e2e.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "summary.pass" "$ROOT/scripts/release/test-k3-nas-web-demo.sh"
 grep -q "RAG eval suite failed" "$ROOT/scripts/release/test-k3-nas-web-demo.sh"

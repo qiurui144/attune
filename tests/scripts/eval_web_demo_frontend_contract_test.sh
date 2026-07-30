@@ -18,6 +18,8 @@ grep -q "向量块显示" "$DEMO"
 grep -q "/api/v1/upload" "$DEMO"
 grep -q "/api/v1/search" "$DEMO"
 grep -q "/api/v1/chat" "$DEMO"
+grep -q "/api/v1/demo/reset" "$DEMO"
+grep -q "/api/v1/voice/transcribe-file" "$DEMO"
 grep -q "18906/tcp" "$ROOT/kb-web-demo/start_k3.sh"
 
 grep -q "web_demo_flow_pass_rate" "$SCRIPT"
@@ -60,6 +62,18 @@ assert "web_demo_summary_workflow_pass_rate" in report["metrics"]["frontend"]
 assert report["metrics"]["frontend"]["web_demo_summary_workflow_pass_rate"] == 1.0
 assert "web_demo_model_switch_gate_rate" in report["metrics"]["frontend"]
 assert report["metrics"]["frontend"]["web_demo_model_switch_gate_rate"] == 1.0
+assert "web_demo_clear_reset_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_clear_reset_rate"] == 1.0
+assert "web_demo_voice_file_transcribe_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_voice_file_transcribe_rate"] == 1.0
+assert "web_demo_webrtc_voice_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_webrtc_voice_rate"] == 1.0
+assert "web_demo_attune_only_network_rate" in report["metrics"]["frontend"]
+assert report["metrics"]["frontend"]["web_demo_attune_only_network_rate"] == 1.0
+assert "clear_reset" in report["checks"]
+assert "voice_file_transcribe" in report["checks"]
+assert "webrtc_voice" in report["checks"]
+assert "attune_only_network" in report["checks"]
 for case in report["artifacts"]["summary_cases"]:
     assert {"select", "map", "synthesize", "audit"}.issubset(set(case["required_stages"]))
 PY
