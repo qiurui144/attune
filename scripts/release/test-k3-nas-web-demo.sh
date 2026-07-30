@@ -45,6 +45,7 @@ WEB_DEMO_BASE_URL="${ATTUNE_K3_WEB_DEMO_BASE_URL:-}"
 WEB_DEMO_API_URL="${ATTUNE_K3_WEB_DEMO_API_URL:-}"
 WEB_DEMO_OUT="${ATTUNE_K3_WEB_DEMO_OUT:-}"
 WEB_DEMO_PROFILE="${ATTUNE_K3_WEB_DEMO_PROFILE:-smoke}"
+WEB_DEMO_RESET_BEFORE="${ATTUNE_K3_WEB_DEMO_RESET_BEFORE:-1}"
 SKIP_DEB_CHECK=0
 SKIP_INSTALL=0
 SKIP_UI=0
@@ -175,6 +176,9 @@ Environment:
   ATTUNE_K3_WEB_DEMO_API_URL    Optional kb-web-demo API proxy URL. Defaults to ATTUNE_K3_BASE_URL.
   ATTUNE_K3_WEB_DEMO_OUT        Optional JSON output path for kb-web-demo frontend metrics.
   ATTUNE_K3_WEB_DEMO_PROFILE    kb-web-demo Playwright profile: smoke or deep. Defaults to smoke.
+  ATTUNE_K3_WEB_DEMO_RESET_BEFORE
+                                Clear demo knowledge base before kb-web-demo frontend gate.
+                                Defaults to 1 for clean K3 E2E.
 HELP
       exit 0
       ;;
@@ -537,14 +541,20 @@ run_kb_web_demo_frontend_gate() {
   append_report "- Frontend URL: $WEB_DEMO_BASE_URL"
   append_report "- API URL: $WEB_DEMO_API_URL"
   append_report "- Profile: $WEB_DEMO_PROFILE"
+  append_report "- Reset before run: $WEB_DEMO_RESET_BEFORE"
   append_report "- Output: $WEB_DEMO_OUT"
+  local reset_args=()
+  case "$WEB_DEMO_RESET_BEFORE" in
+    1|true|TRUE|yes|YES|on|ON) reset_args+=(--reset-before) ;;
+  esac
   run python3 "$ROOT/tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py" \
     --base-url "$WEB_DEMO_BASE_URL" \
     --api-url "$WEB_DEMO_API_URL" \
     --out "$WEB_DEMO_OUT" \
     --token "$TOKEN" \
     --profile "$WEB_DEMO_PROFILE" \
-    --headless "${ATTUNE_HEADLESS:-1}"
+    --headless "${ATTUNE_HEADLESS:-1}" \
+    "${reset_args[@]}"
   append_report "- Result: pass"
 }
 
@@ -562,7 +572,7 @@ if [ "$DRY_RUN" = "1" ]; then
   append_report "- Configure Attune scheduler-native AI settings when scheduler URL is provided."
   append_report "- NAS Web API Contract Gate: probe health, vault, settings, scheduler config, dynamic model capability, UI read endpoints, upload, server-side index bind/search, embedding/vector queue drain, export, Summary Workflow Gate, and chat scheduler metadata."
   append_report "- RAG Eval Suite Gate: when ATTUNE_K3_EVAL_SUITE is set, validate manifests with scripts/eval/validate-manifests.py and run scripts/eval/run-suite.py against the Attune Web/API base URL, writing ATTUNE_K3_EVAL_OUT or an auto reports/release JSON path."
-  append_report "- KB Web Demo Frontend Gate: when ATTUNE_K3_WEB_DEMO_BASE_URL is set, run tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py against kb-web-demo to validate upload, vector chunk display, Chat RAG, Summary RAG, citations, and timing display; set ATTUNE_K3_WEB_DEMO_PROFILE=deep for complex chat/summary coverage; output goes to ATTUNE_K3_WEB_DEMO_OUT."
+  append_report "- KB Web Demo Frontend Gate: when ATTUNE_K3_WEB_DEMO_BASE_URL is set, run tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py against kb-web-demo to validate upload, vector chunk display, Chat RAG, Summary RAG, citations, and timing display; set ATTUNE_K3_WEB_DEMO_PROFILE=deep for complex chat/summary coverage; output goes to ATTUNE_K3_WEB_DEMO_OUT; ATTUNE_K3_WEB_DEMO_RESET_BEFORE defaults to 1 so K3 E2E starts from a clean demo knowledge base."
   append_report "- Long-text PDF OCR guard: default ATTUNE_K3_LONGTEXT_PDF_OCR=1 clears any OCR-disabling systemd drop-in before corpus bind; set ATTUNE_K3_LONGTEXT_PDF_OCR=0 only to isolate retrieval/vector behavior."
   append_report "- Airplane GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1 and ATTUNE_K3_LONGTEXT_CORPORA includes airplane, run it on the NAS host with source repo $AIRPLANE_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized corpus under $LONGTEXT_CORPUS_DIR, then copy the generated manifest back for the optional UI gate."
   append_report "- Mechanical Design GitHub Longtext Gate: when ATTUNE_K3_LONGTEXT_E2E=1 and ATTUNE_K3_LONGTEXT_CORPORA includes mechanical_design, run it on the NAS host with source repo $MECHANICAL_LONGTEXT_REPO_URL, profile $LONGTEXT_PROFILE, materialized Git LFS corpus under $MECHANICAL_LONGTEXT_CORPUS_DIR, then include it in repeat chat and multiturn stability data."

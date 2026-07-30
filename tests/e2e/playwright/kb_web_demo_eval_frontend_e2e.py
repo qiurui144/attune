@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtos-corpus-dir", type=Path, default=DEFAULT_RTOS_CORPUS_DIR)
     parser.add_argument("--rtos-source-file", default=DEFAULT_RTOS_SOURCE_FILE)
     parser.add_argument("--rtos-dmac-source-file", default=DEFAULT_RTOS_DMAC_SOURCE_FILE)
+    parser.add_argument(
+        "--reset-before",
+        action="store_true",
+        help="Clear the Attune demo knowledge base before running this frontend gate.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -338,6 +343,16 @@ def api_get_json(
         raise RuntimeError(f"GET {path} HTTP {exc.code}: {text[:1000]}") from exc
     data = json.loads(text) if text else {}
     return data if isinstance(data, dict) else {"_payload": data}
+
+
+def reset_demo_environment(base_url: str, timeout_ms: int, token: str = "") -> dict[str, Any]:
+    return api_post_json(
+        base_url,
+        "/api/v1/demo/reset",
+        {"confirm": "CLEAR_DEMO"},
+        timeout_ms,
+        token,
+    )
 
 
 def json_contains(payload: Any, needle: str) -> bool:
@@ -987,6 +1002,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
     folder_fixture_path.write_text(web_demo_fixture(folder_token), encoding="utf-8")
     summary_case_results: list[dict[str, Any]] = []
     model_switch_result: dict[str, Any] = {}
+    reset_result: dict[str, Any] | None = None
 
     started = time.perf_counter()
     with sync_playwright() as p:
@@ -997,6 +1013,9 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
                 script=f"sessionStorage.setItem('attune_auth_token', {json.dumps(args.token)});",
             )
         try:
+            if args.reset_before:
+                stage = "reset_demo_environment"
+                reset_result = reset_demo_environment(args.api_url, args.timeout_ms, args.token)
             stage = "open_page"
             page_params = {"api": args.api_url}
             joiner = "&" if "?" in args.base_url else "?"
@@ -1200,6 +1219,7 @@ def run_live(args: argparse.Namespace) -> dict[str, Any]:
             "chat_cases": chat_case_results,
             "summary_cases": summary_case_results,
             "model_switch_gate": model_switch_result,
+            "reset_before": reset_result,
             "last_stage": stage,
         },
         "failures": failures,
