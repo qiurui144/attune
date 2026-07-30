@@ -13,11 +13,11 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
 use crate::rag_orchestrator::{
-    assemble_evidence_pack, build_evidence_pack_prompt, build_local_scheduler_extractive_answer,
-    build_local_scheduler_extractive_summary, build_local_scheduler_out_of_manual_boundary,
-    build_local_scheduler_safety_refusal, local_scheduler_operational_safety_query,
-    local_scheduler_out_of_manual_boundary_query, local_scheduler_source_lookup_query,
-    local_scheduler_summary_query,
+    assemble_evidence_pack_for_query, build_evidence_pack_prompt,
+    build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
+    build_local_scheduler_out_of_manual_boundary, build_local_scheduler_safety_refusal,
+    local_scheduler_operational_safety_query, local_scheduler_out_of_manual_boundary_query,
+    local_scheduler_source_lookup_query, local_scheduler_summary_query,
 };
 use crate::state::SharedState;
 
@@ -2999,6 +2999,58 @@ fn build_local_scheduler_admission_messages_with_plan_and_evidence_pack_prompt(
     vec![ChatMessage::system(system_prompt), ChatMessage::user(&user)]
 }
 
+fn filter_scheduler_contexts_to_evidence_pack(
+    contexts: &[Value],
+    pack: &crate::rag_orchestrator::EvidencePack,
+) -> Vec<Value> {
+    if contexts.is_empty() || pack.nodes.is_empty() {
+        return contexts.to_vec();
+    }
+    let mut source_ids = std::collections::HashSet::new();
+    let mut titles = std::collections::HashSet::new();
+    if !pack.primary_source_id.trim().is_empty() {
+        source_ids.insert(pack.primary_source_id.trim().to_string());
+    }
+    if !pack.source_title.trim().is_empty() {
+        titles.insert(pack.source_title.trim().to_string());
+    }
+    for node in &pack.nodes {
+        if !node.source_id.trim().is_empty() {
+            source_ids.insert(node.source_id.trim().to_string());
+        }
+        if !node.source_title.trim().is_empty() {
+            titles.insert(node.source_title.trim().to_string());
+        }
+    }
+    if source_ids.is_empty() && titles.is_empty() {
+        return contexts.to_vec();
+    }
+
+    let filtered = contexts
+        .iter()
+        .filter(|context| {
+            context
+                .get("source_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|source_id| source_ids.contains(*source_id))
+                .is_some()
+                || context
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|title| titles.contains(*title))
+                    .is_some()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        contexts.to_vec()
+    } else {
+        filtered
+    }
+}
+
 #[cfg(test)]
 fn local_scheduler_source_summary_line(knowledge: &[Value]) -> Option<String> {
     local_scheduler_source_summary_line_with_limit(knowledge, 3)
@@ -5583,8 +5635,6 @@ pub async fn chat(
             return Ok(Json(response_json));
         }
 
-        let contexts =
-            build_local_scheduler_kb_contexts_with_budget(&body.message, &knowledge, answer_budget);
         let scheduler_prompt_intent = match rag_coverage.intent {
             crate::rag_guardrails::RagIntent::Diagnostic => "chat.rag.diagnostic",
             crate::rag_guardrails::RagIntent::Summary => "chat.rag.summary",
@@ -5594,12 +5644,16 @@ pub async fn chat(
         let scheduler_system_prompt = plugin_rag_prompt(&plugin_registry, scheduler_prompt_intent)
             .unwrap_or(LOCAL_SCHEDULER_KB_ASK_SYSTEM);
         let retrieval_plan = attune_core::retrieval_plan::plan_query(&body.message);
-        let evidence_pack = assemble_evidence_pack(&retrieval_plan, &search_results);
+        let evidence_pack =
+            assemble_evidence_pack_for_query(&body.message, &retrieval_plan, &search_results);
         let evidence_pack_prompt = if evidence_pack.nodes.is_empty() {
             None
         } else {
             Some(build_evidence_pack_prompt(&body.message, &evidence_pack))
         };
+        let contexts_raw =
+            build_local_scheduler_kb_contexts_with_budget(&body.message, &knowledge, answer_budget);
+        let contexts = filter_scheduler_contexts_to_evidence_pack(&contexts_raw, &evidence_pack);
         let evidence_pack_diagnostics = serde_json::json!({
             "available": evidence_pack_prompt.is_some(),
             "primary_source_id": evidence_pack.primary_source_id,
@@ -7657,6 +7711,44 @@ mod tests {
         assert!(user.content.contains("Evidence Pack"));
         assert!(user.content.contains("ProcedureStep"));
         assert!(!user.content.contains("Refs:\n[1] legacy plain ref"));
+    }
+
+    #[test]
+    fn scheduler_contexts_are_filtered_to_evidence_pack_sources() {
+        let contexts = vec![
+            serde_json::json!({
+                "source_id": "noise-source",
+                "title": "Unrelated Camera Guide",
+                "text": "camera ISP tuning"
+            }),
+            serde_json::json!({
+                "source_id": "target-source",
+                "title": "Industrial Network Manual",
+                "text": "check physical link and DNS"
+            }),
+        ];
+        let pack = crate::rag_orchestrator::EvidencePack {
+            primary_source_id: "target-source".to_string(),
+            source_title: "Industrial Network Manual".to_string(),
+            nodes: vec![crate::rag_orchestrator::EvidenceNode {
+                source_id: "target-source".to_string(),
+                source_title: "Industrial Network Manual".to_string(),
+                node_kind: "ProcedureStep".to_string(),
+                text: "check physical link and DNS".to_string(),
+            }],
+            diagnostics: crate::rag_orchestrator::EvidenceDiagnostics {
+                requested_needs: vec!["Procedure".to_string()],
+                satisfied_needs: vec!["Procedure".to_string()],
+                missing_needs: vec![],
+                sources_considered: 2,
+            },
+        };
+
+        let filtered = filter_scheduler_contexts_to_evidence_pack(&contexts, &pack);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["source_id"], "target-source");
+        assert_eq!(filtered[0]["text"], "check physical link and DNS");
     }
 
     #[test]

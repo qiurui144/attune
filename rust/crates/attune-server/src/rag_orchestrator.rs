@@ -28,12 +28,21 @@ pub struct EvidencePack {
 }
 
 pub fn assemble_evidence_pack(plan: &RetrievalPlan, results: &[SearchResult]) -> EvidencePack {
+    assemble_evidence_pack_for_query("", plan, results)
+}
+
+pub fn assemble_evidence_pack_for_query(
+    question: &str,
+    plan: &RetrievalPlan,
+    results: &[SearchResult],
+) -> EvidencePack {
     let sources_considered = results
         .iter()
         .map(|result| result.item_id.as_str())
         .collect::<HashSet<_>>()
         .len();
-    let primary_source_id = select_primary_evidence_source(plan, results);
+    let query_terms = evidence_query_terms(question);
+    let primary_source_id = select_primary_evidence_source(plan, results, &query_terms);
     let primary_source_id = primary_source_id.unwrap_or_default();
     let source_title = results
         .iter()
@@ -54,6 +63,13 @@ pub fn assemble_evidence_pack(plan: &RetrievalPlan, results: &[SearchResult]) ->
             .to_string();
         let node_kind = evidence_node_kind(&text);
         if matches!(node_kind.as_str(), "Toc" | "HeaderFooter") {
+            continue;
+        }
+        if !source_diverse
+            && !query_terms.is_empty()
+            && result.item_id != primary_source_id
+            && evidence_query_overlap_score(&text, &query_terms) == 0
+        {
             continue;
         }
         nodes.push(EvidenceNode {
@@ -116,7 +132,9 @@ pub fn build_evidence_pack_prompt(question: &str, pack: &EvidencePack) -> String
          If the pack contains ApiReference nodes, include exact API names, parameters, and return semantics shown in the evidence.\n\
          If the pack contains CommandBlock or ConfigBlock nodes, include the exact command/config lines shown in evidence.\n\
          If evidence is incomplete, say what is missing instead of guessing.\n\
-         Do not use outside platform knowledge.\n",
+         Do not use outside platform knowledge.\n\
+         Do not synthesize across unrelated sources; preserve the primary source unless the evidence pack explicitly asks for comparison.\n\
+         Adaptive model discipline: strong models may synthesize only after citing supporting nodes; Small/weak models should copy short evidence-backed facts, steps, symbols, paths, and values before adding minimal connective wording.\n",
     );
     prompt
 }
@@ -132,16 +150,27 @@ fn join_or_none(values: &[String]) -> String {
 fn select_primary_evidence_source(
     plan: &RetrievalPlan,
     results: &[SearchResult],
+    query_terms: &[String],
 ) -> Option<String> {
     let mut scores: HashMap<&str, f32> = HashMap::new();
+    let has_query_overlap_candidate = !query_terms.is_empty()
+        && results.iter().any(|result| {
+            let text = result.inject_content.as_deref().unwrap_or(&result.content);
+            evidence_query_overlap_score(text, query_terms) > 0
+        });
     for (order, result) in results.iter().enumerate() {
         let text = result.inject_content.as_deref().unwrap_or(&result.content);
         let node_kind = evidence_node_kind(text);
+        let overlap_score = evidence_query_overlap_score(text, query_terms);
         let mut score = result.score.max(0.0) + 1.0 / ((order + 1) as f32);
         for need in &plan.evidence_needs {
-            if evidence_need_satisfied_by_kind(*need, &node_kind) {
+            if evidence_need_satisfied(*need, &node_kind, text) {
                 score += 2.0;
             }
+        }
+        score += overlap_score as f32 * 0.35;
+        if has_query_overlap_candidate && overlap_score == 0 {
+            score *= 0.25;
         }
         *scores.entry(result.item_id.as_str()).or_insert(0.0) += score;
     }
@@ -167,7 +196,7 @@ fn evidence_diagnostics(
         let label = evidence_need_label(*need);
         if nodes
             .iter()
-            .any(|node| evidence_need_satisfied_by_kind(*need, &node.node_kind))
+            .any(|node| evidence_need_satisfied(*need, &node.node_kind, &node.text))
         {
             satisfied_needs.push(label.to_string());
         } else {
@@ -206,6 +235,174 @@ fn evidence_need_satisfied_by_kind(need: EvidenceNeed, node_kind: &str) -> bool 
         EvidenceNeed::Comparison => false,
         EvidenceNeed::Summary => matches!(node_kind, "Section" | "Paragraph"),
     }
+}
+
+fn evidence_need_satisfied(need: EvidenceNeed, node_kind: &str, text: &str) -> bool {
+    if evidence_need_satisfied_by_kind(need, node_kind) {
+        return true;
+    }
+    let text_l = text.to_ascii_lowercase();
+    match need {
+        EvidenceNeed::Troubleshooting => {
+            matches!(
+                node_kind,
+                "Procedure" | "ProcedureStep" | "Paragraph" | "Section"
+            ) && (contains_any_ascii(
+                &text_l,
+                &[
+                    "check",
+                    "verify",
+                    "diagnose",
+                    "troubleshoot",
+                    "failure",
+                    "failed",
+                    "error",
+                    "route",
+                    "dns",
+                    "port",
+                    "log",
+                    "packet loss",
+                ],
+            ) || [
+                "检查", "验证", "诊断", "排查", "失败", "错误", "路由", "端口", "日志", "丢包",
+            ]
+            .iter()
+            .any(|term| text.contains(term)))
+        }
+        EvidenceNeed::Procedure => {
+            matches!(node_kind, "Paragraph" | "Section")
+                && (contains_any_ascii(&text_l, &["step", "procedure"])
+                    || ["步骤", "流程", "操作"]
+                        .iter()
+                        .any(|term| text.contains(term)))
+        }
+        EvidenceNeed::ApiReference => {
+            matches!(node_kind, "Paragraph" | "Section")
+                && (contains_any_ascii(&text_l, &["prototype", "signature", "parameter", "return"])
+                    || ["原型", "接口", "参数", "返回"]
+                        .iter()
+                        .any(|term| text.contains(term)))
+        }
+        EvidenceNeed::Command => {
+            contains_any_ascii(&text_l, &[" command", " run ", " shell", "$ "])
+                || ["命令", "执行"].iter().any(|term| text.contains(term))
+        }
+        EvidenceNeed::Config => {
+            contains_any_ascii(&text_l, &["config", "setting", ".conf", ".json", ".yaml"])
+                || ["配置", "设置"].iter().any(|term| text.contains(term))
+        }
+        EvidenceNeed::Definition | EvidenceNeed::Comparison | EvidenceNeed::Summary => false,
+    }
+}
+
+fn evidence_query_terms(question: &str) -> Vec<String> {
+    let mut terms = HashSet::new();
+    let lower = question.to_ascii_lowercase();
+    let mut ascii = String::new();
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.') {
+            ascii.push(ch);
+        } else if !ascii.is_empty() {
+            if ascii.chars().count() >= 2 && !generic_query_stopword(&ascii) {
+                terms.insert(ascii.clone());
+            }
+            ascii.clear();
+        }
+    }
+    if ascii.chars().count() >= 2 && !generic_query_stopword(&ascii) {
+        terms.insert(ascii);
+    }
+
+    let mut cjk_run = String::new();
+    for ch in question.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            cjk_run.push(ch);
+        } else if !cjk_run.is_empty() {
+            push_cjk_terms(&cjk_run, &mut terms);
+            cjk_run.clear();
+        }
+    }
+    if !cjk_run.is_empty() {
+        push_cjk_terms(&cjk_run, &mut terms);
+    }
+
+    let mut out = terms
+        .into_iter()
+        .filter(|term| term.chars().count() >= 2)
+        .collect::<Vec<_>>();
+    out.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    out.truncate(64);
+    out
+}
+
+fn push_cjk_terms(run: &str, terms: &mut HashSet<String>) {
+    let chars = run.chars().collect::<Vec<_>>();
+    if chars.len() < 2 {
+        return;
+    }
+    if !generic_query_stopword(run) && chars.len() <= 8 {
+        terms.insert(run.to_string());
+    }
+    for window in 2..=4 {
+        if chars.len() < window {
+            continue;
+        }
+        for slice in chars.windows(window) {
+            let term = slice.iter().collect::<String>();
+            if !generic_query_stopword(&term) {
+                terms.insert(term);
+            }
+        }
+    }
+}
+
+fn generic_query_stopword(term: &str) -> bool {
+    matches!(
+        term,
+        "how"
+            | "what"
+            | "why"
+            | "the"
+            | "and"
+            | "or"
+            | "with"
+            | "when"
+            | "where"
+            | "should"
+            | "please"
+            | "如何"
+            | "怎么"
+            | "怎样"
+            | "应该"
+            | "哪些"
+            | "什么"
+            | "时候"
+            | "一个"
+            | "这个"
+            | "那个"
+            | "继续"
+            | "基于"
+    )
+}
+
+fn evidence_query_overlap_score(text: &str, query_terms: &[String]) -> usize {
+    if query_terms.is_empty() || text.trim().is_empty() {
+        return 0;
+    }
+    let text_l = text.to_ascii_lowercase();
+    let mut score = 0usize;
+    for term in query_terms {
+        let hit = if term.is_ascii() {
+            text_l.contains(&term.to_ascii_lowercase())
+        } else {
+            text.contains(term)
+        };
+        if !hit {
+            continue;
+        }
+        score += if term.chars().count() >= 4 { 2 } else { 1 };
+    }
+    score
 }
 
 fn evidence_node_kind(text: &str) -> String {

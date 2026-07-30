@@ -1,6 +1,7 @@
 use attune_server::rag_orchestrator::{
-    assemble_evidence_pack, build_evidence_pack_prompt, build_local_scheduler_extractive_answer,
-    build_local_scheduler_extractive_summary, local_scheduler_source_lookup_query,
+    assemble_evidence_pack, assemble_evidence_pack_for_query, build_evidence_pack_prompt,
+    build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
+    local_scheduler_source_lookup_query,
 };
 
 fn search_result(
@@ -134,4 +135,79 @@ fn prompt_includes_evidence_pack_and_diagnostics_without_domain_template() {
     assert!(prompt.contains("If evidence is incomplete, say what is missing"));
     assert!(!prompt.contains("V821"));
     assert!(!prompt.contains("Rockchip"));
+}
+
+#[test]
+fn evidence_pack_for_query_filters_cross_source_noise_before_small_model_prompt() {
+    let results = vec![
+        search_result(
+            "manual-noise",
+            "Unrelated Camera Guide",
+            "Troubleshooting",
+            "If camera streaming fails, check ISP graph, sensor power, and video buffer queues.",
+        ),
+        search_result(
+            "manual-target",
+            "Industrial Network Manual",
+            "ProcedureStep",
+            "Step 1 Check the physical link indicator. Step 2 Verify route, DNS, port, firewall, logs, and packet loss.",
+        ),
+        search_result(
+            "manual-noise",
+            "Unrelated Camera Guide",
+            "ProcedureStep",
+            "Step 1 Configure image sensor MIPI lanes and ISP tuning files.",
+        ),
+    ];
+    let plan = attune_core::retrieval_plan::plan_query(
+        "网络连接失败时应该如何排查物理链路、路由、DNS、端口和日志？",
+    );
+
+    let pack = assemble_evidence_pack_for_query(
+        "网络连接失败时应该如何排查物理链路、路由、DNS、端口和日志？",
+        &plan,
+        &results,
+    );
+
+    assert_eq!(pack.primary_source_id, "manual-target");
+    assert!(pack
+        .nodes
+        .iter()
+        .all(|node| node.source_id == "manual-target"));
+    assert_eq!(pack.diagnostics.sources_considered, 2);
+    assert!(pack
+        .diagnostics
+        .satisfied_needs
+        .contains(&"Procedure".to_string()));
+    assert!(
+        pack.diagnostics
+            .satisfied_needs
+            .contains(&"Troubleshooting".to_string()),
+        "{:?}",
+        pack.diagnostics
+    );
+}
+
+#[test]
+fn evidence_pack_prompt_declares_adaptive_small_model_contract() {
+    let results = vec![search_result(
+        "manual-target",
+        "Industrial Network Manual",
+        "ProcedureStep",
+        "Step 1 Check physical link. Step 2 Verify route, DNS, port, firewall, logs, and packet loss.",
+    )];
+    let plan =
+        attune_core::retrieval_plan::plan_query("How should I troubleshoot network failure?");
+    let pack = assemble_evidence_pack_for_query(
+        "How should I troubleshoot network failure?",
+        &plan,
+        &results,
+    );
+
+    let prompt = build_evidence_pack_prompt("How should I troubleshoot network failure?", &pack);
+
+    assert!(prompt.contains("Adaptive model discipline"));
+    assert!(prompt.contains("Small/weak models"));
+    assert!(prompt.contains("copy short evidence-backed facts"));
+    assert!(prompt.contains("Do not synthesize across unrelated sources"));
 }
