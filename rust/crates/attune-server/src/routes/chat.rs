@@ -4285,6 +4285,7 @@ pub async fn chat(
     // the source constraint before retrieval. Only append compact source hints
     // when the current turn explicitly refers to prior/cited material.
     let retrieval_query = build_history_aware_retrieval_query(&body.message, &body.history);
+    let retrieval_query = attune_core::search::retrieval_semantic_query(&retrieval_query);
     let expanded_query =
         attune_core::skill_evolution::expand_query(&retrieval_query, &app_settings);
     let rag_intent_plan = build_rag_intent_plan(&body.message, &body.history);
@@ -5662,9 +5663,10 @@ pub async fn chat(
         };
         let scheduler_system_prompt = plugin_rag_prompt(&plugin_registry, scheduler_prompt_intent)
             .unwrap_or(LOCAL_SCHEDULER_KB_ASK_SYSTEM);
-        let retrieval_plan = attune_core::retrieval_plan::plan_query(&body.message);
+        let evidence_query = attune_core::search::retrieval_semantic_query(&body.message);
+        let retrieval_plan = attune_core::retrieval_plan::plan_query(&evidence_query);
         let evidence_pack =
-            assemble_evidence_pack_for_query(&body.message, &retrieval_plan, &search_results);
+            assemble_evidence_pack_for_query(&evidence_query, &retrieval_plan, &search_results);
         let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
         let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
         let model_discipline = rag_model_discipline_from_runtime_profile(

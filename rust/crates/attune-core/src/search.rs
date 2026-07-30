@@ -585,6 +585,218 @@ pub fn apply_query_coverage_boost(query: &str, results: &mut [SearchResult]) {
     }
 }
 
+/// Return the part of a user message that should drive retrieval.
+///
+/// Users often append answer-control instructions such as "answer only from the
+/// knowledge base" to an otherwise good question. Those terms are useful for
+/// generation, but they are poor retrieval anchors and can pull in unrelated
+/// documents that talk about evidence, citations, or answering. Keep the
+/// original user message for the LLM prompt; use this normalized query only for
+/// search and evidence selection.
+pub fn retrieval_semantic_query(query: &str) -> String {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut segments = sentence_segments(trimmed);
+    while segments
+        .last()
+        .map(|segment| retrieval_meta_instruction_segment(segment))
+        .unwrap_or(false)
+        && segments.len() > 1
+    {
+        segments.pop();
+    }
+    let candidate = segments.concat();
+    let candidate = candidate.trim();
+    if candidate_is_too_small(candidate, trimmed) {
+        trimmed.to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
+fn sentence_segments(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        current.push(ch);
+        if matches!(ch, '.' | '?' | '!' | ';' | '。' | '？' | '！' | '；' | '\n') {
+            let segment = current.trim();
+            if !segment.is_empty() {
+                out.push(segment.to_string());
+            }
+            current.clear();
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn retrieval_meta_instruction_segment(segment: &str) -> bool {
+    let folded = segment.to_ascii_lowercase();
+    let source_control = contains_any_str(
+        segment,
+        &[
+            "知识库",
+            "本地知识",
+            "引用",
+            "来源",
+            "证据",
+            "文档",
+            "资料",
+        ],
+    ) || contains_any_str(
+        &folded,
+        &[
+            "knowledge base",
+            "kb",
+            "citation",
+            "citations",
+            "source",
+            "sources",
+            "evidence",
+            "refs",
+            "references",
+        ],
+    );
+    let answer_control = contains_any_str(
+        segment,
+        &[
+            "回答",
+            "回复",
+            "作答",
+            "请",
+            "只基于",
+            "仅基于",
+            "不要编造",
+            "必须给出",
+        ],
+    ) || contains_any_str(
+        &folded,
+        &[
+            "answer",
+            "respond",
+            "reply",
+            "use only",
+            "only from",
+            "based only",
+            "must cite",
+            "do not invent",
+        ],
+    );
+    source_control && answer_control && !has_substantive_retrieval_anchor(segment)
+}
+
+fn has_substantive_retrieval_anchor(segment: &str) -> bool {
+    normalized_ascii_tokens(segment)
+        .iter()
+        .any(|token| token.len() >= 2 && !retrieval_meta_ascii_token(token))
+        || substantive_cjk_tokens(segment)
+}
+
+fn retrieval_meta_ascii_token(token: &str) -> bool {
+    matches!(
+        token,
+        "answer"
+            | "respond"
+            | "reply"
+            | "only"
+            | "from"
+            | "based"
+            | "use"
+            | "using"
+            | "knowledge"
+            | "base"
+            | "kb"
+            | "evidence"
+            | "citation"
+            | "citations"
+            | "source"
+            | "sources"
+            | "ref"
+            | "refs"
+            | "reference"
+            | "references"
+            | "cite"
+            | "cited"
+            | "must"
+            | "please"
+            | "document"
+            | "documents"
+            | "manual"
+            | "manuals"
+            | "invent"
+    )
+}
+
+fn substantive_cjk_tokens(segment: &str) -> bool {
+    let mut current = String::new();
+    for ch in segment.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            current.push(ch);
+        } else {
+            if substantive_cjk_run(&current) {
+                return true;
+            }
+            current.clear();
+        }
+    }
+    substantive_cjk_run(&current)
+}
+
+fn substantive_cjk_run(run: &str) -> bool {
+    let cleaned = run
+        .replace("请", "")
+        .replace("只", "")
+        .replace("仅", "")
+        .replace("基于", "")
+        .replace("根据", "")
+        .replace("本地", "")
+        .replace("知识库", "")
+        .replace("知识", "")
+        .replace("证据", "")
+        .replace("引用", "")
+        .replace("来源", "")
+        .replace("文档", "")
+        .replace("资料", "")
+        .replace("内容", "")
+        .replace("回答", "")
+        .replace("回复", "")
+        .replace("作答", "")
+        .replace("必须", "")
+        .replace("给出", "")
+        .replace("不要", "")
+        .replace("编造", "");
+    cleaned.chars().count() >= 2
+}
+
+fn candidate_is_too_small(candidate: &str, original: &str) -> bool {
+    if candidate.trim().is_empty() {
+        return true;
+    }
+    let candidate_has_ascii = normalized_ascii_tokens(candidate)
+        .iter()
+        .any(|token| token.len() >= 2 && !retrieval_meta_ascii_token(token));
+    let candidate_cjk = candidate
+        .chars()
+        .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+        .count();
+    let original_cjk = original
+        .chars()
+        .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+        .count();
+    !candidate_has_ascii && candidate_cjk < 2 && original_cjk >= 2
+}
+
+fn contains_any_str(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
 /// 搜索结果
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchResult {
@@ -2914,6 +3126,46 @@ fn month_range(now_unix: i64, offset_months: i64) -> TimeFilter {
     TimeFilter {
         start_unix: start,
         end_unix: next_start - 1,
+    }
+}
+
+#[cfg(test)]
+mod retrieval_query_tests {
+    use super::*;
+
+    #[test]
+    fn retrieval_semantic_query_strips_trailing_answer_control_sentence() {
+        let query = "如何排查设备连接失败？请只基于知识库证据回答。";
+
+        assert_eq!(
+            retrieval_semantic_query(query),
+            "如何排查设备连接失败？"
+        );
+    }
+
+    #[test]
+    fn retrieval_semantic_query_strips_english_answer_control_sentence() {
+        let query =
+            "How do I troubleshoot device connectivity? Answer only from the knowledge base.";
+
+        assert_eq!(
+            retrieval_semantic_query(query),
+            "How do I troubleshoot device connectivity?"
+        );
+    }
+
+    #[test]
+    fn retrieval_semantic_query_keeps_substantive_evidence_questions() {
+        let query = "如何基于安全知识库证据排查流程问题？";
+
+        assert_eq!(retrieval_semantic_query(query), query);
+    }
+
+    #[test]
+    fn retrieval_semantic_query_does_not_strip_single_meta_topic_question() {
+        let query = "知识库证据不足时应该怎么办？";
+
+        assert_eq!(retrieval_semantic_query(query), query);
     }
 }
 

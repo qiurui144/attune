@@ -193,11 +193,12 @@ pub async fn search(
     // `X-Attune-Eval-Skip-Rewrite: true` to bypass the LLM rewrite call
     // entirely — this isolates retrieval quality from LLM-noise in
     // deterministic bench runs (per spec §11 Risk A).
-    let effective_query = if parsed_eval.skip_rewrite {
+    let rewritten_query = if parsed_eval.skip_rewrite {
         params.q.clone()
     } else {
         maybe_rewrite_query(&state, &params.q).await
     };
+    let effective_query = attune_core::search::retrieval_semantic_query(&rewritten_query);
 
     // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro），不再硬编码行业词。
@@ -333,7 +334,8 @@ pub async fn search_relevant(
     let budget = body.injection_budget.unwrap_or(INJECTION_BUDGET);
 
     // query_rewrite：Chrome 扩展注入路径同样受益于 query 改写
-    let effective_query = maybe_rewrite_query(&state, &body.query).await;
+    let rewritten_query = maybe_rewrite_query(&state, &body.query).await;
+    let effective_query = attune_core::search::retrieval_semantic_query(&rewritten_query);
 
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供；OSS 裸装 → None。
     let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
