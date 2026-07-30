@@ -1,7 +1,7 @@
 use attune_server::rag_orchestrator::{
     assemble_evidence_pack, assemble_evidence_pack_for_query, build_evidence_pack_prompt,
-    build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
-    local_scheduler_source_lookup_query,
+    build_evidence_pack_prompt_for_model, build_local_scheduler_extractive_answer,
+    build_local_scheduler_extractive_summary, local_scheduler_source_lookup_query,
 };
 
 fn search_result(
@@ -92,18 +92,21 @@ fn evidence_pack_combines_api_procedure_and_troubleshooting_from_same_source() {
 
     assert_eq!(pack.primary_source_id, "doc-a");
     assert_eq!(pack.source_title, "Manual A");
-    assert!(pack
-        .nodes
-        .iter()
-        .any(|node| node.node_kind == "ApiReference"));
-    assert!(pack
-        .nodes
-        .iter()
-        .any(|node| node.node_kind == "ProcedureStep"));
-    assert!(pack
-        .nodes
-        .iter()
-        .any(|node| node.node_kind == "Troubleshooting"));
+    assert!(
+        pack.nodes
+            .iter()
+            .any(|node| node.node_kind == "ApiReference")
+    );
+    assert!(
+        pack.nodes
+            .iter()
+            .any(|node| node.node_kind == "ProcedureStep")
+    );
+    assert!(
+        pack.nodes
+            .iter()
+            .any(|node| node.node_kind == "Troubleshooting")
+    );
     assert!(pack.diagnostics.missing_needs.is_empty());
 }
 
@@ -170,15 +173,17 @@ fn evidence_pack_for_query_filters_cross_source_noise_before_small_model_prompt(
     );
 
     assert_eq!(pack.primary_source_id, "manual-target");
-    assert!(pack
-        .nodes
-        .iter()
-        .all(|node| node.source_id == "manual-target"));
+    assert!(
+        pack.nodes
+            .iter()
+            .all(|node| node.source_id == "manual-target")
+    );
     assert_eq!(pack.diagnostics.sources_considered, 2);
-    assert!(pack
-        .diagnostics
-        .satisfied_needs
-        .contains(&"Procedure".to_string()));
+    assert!(
+        pack.diagnostics
+            .satisfied_needs
+            .contains(&"Procedure".to_string())
+    );
     assert!(
         pack.diagnostics
             .satisfied_needs
@@ -210,4 +215,57 @@ fn evidence_pack_prompt_declares_adaptive_small_model_contract() {
     assert!(prompt.contains("Small/weak models"));
     assert!(prompt.contains("copy short evidence-backed facts"));
     assert!(prompt.contains("Do not synthesize across unrelated sources"));
+}
+
+#[test]
+fn evidence_pack_marks_weak_quality_when_requested_needs_are_missing() {
+    let results = vec![search_result(
+        "manual-target",
+        "Industrial Operations Manual",
+        "Paragraph",
+        "This section defines the monitoring dashboard and lists its page title.",
+    )];
+    let plan = attune_core::retrieval_plan::plan_query("设备启动失败时如何排查电源、日志和配置？");
+
+    let pack = assemble_evidence_pack_for_query(
+        "设备启动失败时如何排查电源、日志和配置？",
+        &plan,
+        &results,
+    );
+
+    assert_eq!(pack.diagnostics.quality, "weak");
+    assert!(
+        pack.diagnostics
+            .quality_reasons
+            .iter()
+            .any(|reason| { reason.contains("missing_evidence_needs") })
+    );
+}
+
+#[test]
+fn weak_model_prompt_uses_conservative_quality_discipline() {
+    let results = vec![search_result(
+        "manual-target",
+        "Industrial Operations Manual",
+        "ProcedureStep",
+        "Step 1 Check the power input. Step 2 Read the service log.",
+    )];
+    let plan =
+        attune_core::retrieval_plan::plan_query("How should I troubleshoot startup failure?");
+    let pack = assemble_evidence_pack_for_query(
+        "How should I troubleshoot startup failure?",
+        &plan,
+        &results,
+    );
+
+    let prompt = build_evidence_pack_prompt_for_model(
+        "How should I troubleshoot startup failure?",
+        &pack,
+        &attune_server::rag_orchestrator::RagModelDiscipline::Small,
+    );
+
+    assert!(prompt.contains("Evidence quality:"));
+    assert!(prompt.contains("Model discipline: small"));
+    assert!(prompt.contains("Use short bullet points"));
+    assert!(prompt.contains("Do not infer missing steps"));
 }

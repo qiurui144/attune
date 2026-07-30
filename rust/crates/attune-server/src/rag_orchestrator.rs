@@ -17,6 +17,8 @@ pub struct EvidenceDiagnostics {
     pub satisfied_needs: Vec<String>,
     pub missing_needs: Vec<String>,
     pub sources_considered: usize,
+    pub quality: String,
+    pub quality_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,23 @@ pub struct EvidencePack {
     pub source_title: String,
     pub nodes: Vec<EvidenceNode>,
     pub diagnostics: EvidenceDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RagModelDiscipline {
+    Small,
+    Balanced,
+    Strong,
+}
+
+impl RagModelDiscipline {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RagModelDiscipline::Small => "small",
+            RagModelDiscipline::Balanced => "balanced",
+            RagModelDiscipline::Strong => "strong",
+        }
+    }
 }
 
 pub fn assemble_evidence_pack(plan: &RetrievalPlan, results: &[SearchResult]) -> EvidencePack {
@@ -90,6 +109,14 @@ pub fn assemble_evidence_pack_for_query(
 }
 
 pub fn build_evidence_pack_prompt(question: &str, pack: &EvidencePack) -> String {
+    build_evidence_pack_prompt_for_model(question, pack, &RagModelDiscipline::Small)
+}
+
+pub fn build_evidence_pack_prompt_for_model(
+    question: &str,
+    pack: &EvidencePack,
+    discipline: &RagModelDiscipline,
+) -> String {
     let mut prompt = String::new();
     prompt.push_str("Question\n");
     prompt.push_str(question.trim());
@@ -121,11 +148,21 @@ pub fn build_evidence_pack_prompt(question: &str, pack: &EvidencePack) -> String
         "- missing_needs: {}\n",
         join_or_none(&pack.diagnostics.missing_needs)
     ));
+    prompt.push_str(&format!("- quality: {}\n", pack.diagnostics.quality));
+    prompt.push_str(&format!(
+        "- quality_reasons: {}\n",
+        join_or_none(&pack.diagnostics.quality_reasons)
+    ));
     prompt.push_str(&format!(
         "- sources_considered: {}\n",
         pack.diagnostics.sources_considered
     ));
     prompt.push_str("\nResponse Contract\n");
+    prompt.push_str(&format!(
+        "Evidence quality: {}. Model discipline: {}.\n",
+        pack.diagnostics.quality,
+        discipline.as_str()
+    ));
     prompt.push_str(
         "Answer only from the Evidence Pack.\n\
          If the pack contains ProcedureStep nodes, present an ordered procedure.\n\
@@ -136,7 +173,73 @@ pub fn build_evidence_pack_prompt(question: &str, pack: &EvidencePack) -> String
          Do not synthesize across unrelated sources; preserve the primary source unless the evidence pack explicitly asks for comparison.\n\
          Adaptive model discipline: strong models may synthesize only after citing supporting nodes; Small/weak models should copy short evidence-backed facts, steps, symbols, paths, and values before adding minimal connective wording.\n",
     );
+    match discipline {
+        RagModelDiscipline::Small => prompt.push_str(
+            "Small-model response rules: Use short bullet points. Copy exact evidence facts before explanation. Do not infer missing steps, parameters, causes, or platform details.\n",
+        ),
+        RagModelDiscipline::Balanced => prompt.push_str(
+            "Balanced-model response rules: Briefly synthesize across cited nodes from the primary source, and call out any missing evidence before recommendations.\n",
+        ),
+        RagModelDiscipline::Strong => prompt.push_str(
+            "Strong-model response rules: You may consolidate related cited facts, but every conclusion must remain traceable to listed evidence nodes.\n",
+        ),
+    }
+    if pack.diagnostics.quality != "strong" {
+        prompt.push_str(
+            "Evidence-quality rule: State the evidence gap before giving a limited answer; do not upgrade partial or weak evidence into a confident procedure.\n",
+        );
+    }
     prompt
+}
+
+pub fn rag_model_discipline_from_runtime_profile(
+    profile: Option<&attune_core::edge_cloud::ModelRuntimeProfile>,
+) -> RagModelDiscipline {
+    let Some(profile) = profile else {
+        return RagModelDiscipline::Small;
+    };
+    if let Some(explicit) = discipline_from_quality_profile(&profile.quality_profile) {
+        return explicit;
+    }
+    let context_cap = profile
+        .async_context_cap()
+        .max(profile.sync_context_cap())
+        .max(profile.tested_async_input_tokens)
+        .max(profile.tested_sync_input_tokens);
+    let output_cap = profile
+        .async_output_cap()
+        .max(profile.sync_output_cap())
+        .max(profile.recommended_output_tokens);
+    if context_cap >= 8192 && output_cap >= 768 {
+        RagModelDiscipline::Strong
+    } else if context_cap >= 4096 && output_cap >= 256 {
+        RagModelDiscipline::Balanced
+    } else {
+        RagModelDiscipline::Small
+    }
+}
+
+fn discipline_from_quality_profile(value: &Value) -> Option<RagModelDiscipline> {
+    match value {
+        Value::String(s) => discipline_from_str(s),
+        Value::Object(map) => map
+            .get("model_discipline")
+            .or_else(|| map.get("discipline"))
+            .or_else(|| map.get("tier"))
+            .or_else(|| map.get("reasoning"))
+            .and_then(Value::as_str)
+            .and_then(discipline_from_str),
+        _ => None,
+    }
+}
+
+fn discipline_from_str(value: &str) -> Option<RagModelDiscipline> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "small" | "weak" | "extractive" | "conservative" => Some(RagModelDiscipline::Small),
+        "balanced" | "medium" | "standard" => Some(RagModelDiscipline::Balanced),
+        "strong" | "large" | "reasoning" | "synthesis" => Some(RagModelDiscipline::Strong),
+        _ => None,
+    }
 }
 
 fn join_or_none(values: &[String]) -> String {
@@ -203,12 +306,72 @@ fn evidence_diagnostics(
             missing_needs.push(label.to_string());
         }
     }
+    let (quality, quality_reasons) = evidence_quality(
+        requested_needs.len(),
+        satisfied_needs.len(),
+        missing_needs.len(),
+        nodes,
+        sources_considered,
+    );
     EvidenceDiagnostics {
         requested_needs,
         satisfied_needs,
         missing_needs,
         sources_considered,
+        quality,
+        quality_reasons,
     }
+}
+
+fn evidence_quality(
+    requested_count: usize,
+    satisfied_count: usize,
+    missing_count: usize,
+    nodes: &[EvidenceNode],
+    sources_considered: usize,
+) -> (String, Vec<String>) {
+    let mut reasons = Vec::new();
+    if nodes.is_empty() {
+        return (
+            "weak".to_string(),
+            vec!["no_usable_evidence_nodes".to_string()],
+        );
+    }
+    if missing_count == 0 && requested_count > 0 {
+        reasons.push("all_requested_evidence_needs_satisfied".to_string());
+    }
+    if missing_count > 0 {
+        reasons.push(format!("missing_evidence_needs={missing_count}"));
+    }
+    if sources_considered > 1 {
+        let primary = nodes
+            .first()
+            .map(|node| node.source_id.as_str())
+            .unwrap_or("");
+        let primary_nodes = nodes
+            .iter()
+            .filter(|node| node.source_id.as_str() == primary)
+            .count();
+        if primary_nodes == nodes.len() {
+            reasons.push("single_source_after_noise_filter".to_string());
+        } else {
+            reasons.push("multi_source_evidence".to_string());
+        }
+    }
+    if nodes.len() >= 2 {
+        reasons.push("multiple_evidence_nodes".to_string());
+    }
+    let quality = if requested_count > 0 && missing_count == 0 && nodes.len() >= 1 {
+        "strong"
+    } else if satisfied_count > 0 || (requested_count == 0 && !nodes.is_empty()) {
+        "partial"
+    } else {
+        "weak"
+    };
+    if reasons.is_empty() {
+        reasons.push(format!("usable_evidence_nodes={}", nodes.len()));
+    }
+    (quality.to_string(), reasons)
 }
 
 fn evidence_need_label(need: EvidenceNeed) -> &'static str {

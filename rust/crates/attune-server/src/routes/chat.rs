@@ -13,11 +13,12 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
 use crate::rag_orchestrator::{
-    assemble_evidence_pack_for_query, build_evidence_pack_prompt,
+    assemble_evidence_pack_for_query, build_evidence_pack_prompt_for_model,
     build_local_scheduler_extractive_answer, build_local_scheduler_extractive_summary,
     build_local_scheduler_out_of_manual_boundary, build_local_scheduler_safety_refusal,
     local_scheduler_operational_safety_query, local_scheduler_out_of_manual_boundary_query,
     local_scheduler_source_lookup_query, local_scheduler_summary_query,
+    rag_model_discipline_from_runtime_profile, RagModelDiscipline,
 };
 use crate::state::SharedState;
 
@@ -3051,6 +3052,24 @@ fn filter_scheduler_contexts_to_evidence_pack(
     }
 }
 
+fn scheduler_evidence_pack_diagnostics(
+    pack: &crate::rag_orchestrator::EvidencePack,
+    discipline: RagModelDiscipline,
+) -> Value {
+    serde_json::json!({
+        "available": !pack.nodes.is_empty(),
+        "primary_source_id": pack.primary_source_id,
+        "source_title": pack.source_title,
+        "requested_needs": pack.diagnostics.requested_needs,
+        "satisfied_needs": pack.diagnostics.satisfied_needs,
+        "missing_needs": pack.diagnostics.missing_needs,
+        "quality": pack.diagnostics.quality,
+        "quality_reasons": pack.diagnostics.quality_reasons,
+        "sources_considered": pack.diagnostics.sources_considered,
+        "model_discipline": discipline.as_str(),
+    })
+}
+
 #[cfg(test)]
 fn local_scheduler_source_summary_line(knowledge: &[Value]) -> Option<String> {
     local_scheduler_source_summary_line_with_limit(knowledge, 3)
@@ -5646,23 +5665,25 @@ pub async fn chat(
         let retrieval_plan = attune_core::retrieval_plan::plan_query(&body.message);
         let evidence_pack =
             assemble_evidence_pack_for_query(&body.message, &retrieval_plan, &search_results);
+        let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
+        let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
+        let model_discipline = rag_model_discipline_from_runtime_profile(
+            profiles.task_model(LOCAL_SCHEDULER_KB_ASK_TASK),
+        );
         let evidence_pack_prompt = if evidence_pack.nodes.is_empty() {
             None
         } else {
-            Some(build_evidence_pack_prompt(&body.message, &evidence_pack))
+            Some(build_evidence_pack_prompt_for_model(
+                &body.message,
+                &evidence_pack,
+                &model_discipline,
+            ))
         };
         let contexts_raw =
             build_local_scheduler_kb_contexts_with_budget(&body.message, &knowledge, answer_budget);
         let contexts = filter_scheduler_contexts_to_evidence_pack(&contexts_raw, &evidence_pack);
-        let evidence_pack_diagnostics = serde_json::json!({
-            "available": evidence_pack_prompt.is_some(),
-            "primary_source_id": evidence_pack.primary_source_id,
-            "source_title": evidence_pack.source_title,
-            "requested_needs": evidence_pack.diagnostics.requested_needs,
-            "satisfied_needs": evidence_pack.diagnostics.satisfied_needs,
-            "missing_needs": evidence_pack.diagnostics.missing_needs,
-            "sources_considered": evidence_pack.diagnostics.sources_considered,
-        });
+        let evidence_pack_diagnostics =
+            scheduler_evidence_pack_diagnostics(&evidence_pack, model_discipline);
         let admission_messages =
             build_local_scheduler_admission_messages_with_plan_and_evidence_pack_prompt(
                 &body.message,
@@ -5687,7 +5708,6 @@ pub async fn chat(
             "answer_budget": answer_budget_json.clone(),
             "rag_intent_plan": rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection)),
         });
-        let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
         let scheduler_base_for_poll = scheduler_base.clone();
 
         let scheduler_outcome = tokio::task::spawn_blocking(move || {
@@ -5695,7 +5715,6 @@ pub async fn chat(
                 &scheduler_base,
                 crate::local_scheduler::kb_ask_submit_timeout(),
             );
-            let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
             let adapter = attune_core::edge_cloud::SchedulerKbTaskAdapter::new(&client, &profiles);
             adapter.submit(
                 attune_core::edge_cloud::SchedulerKbTaskSubmitRequest::interactive(
@@ -7741,6 +7760,8 @@ mod tests {
                 satisfied_needs: vec!["Procedure".to_string()],
                 missing_needs: vec![],
                 sources_considered: 2,
+                quality: "strong".to_string(),
+                quality_reasons: vec!["all_requested_evidence_needs_satisfied".to_string()],
             },
         };
 
@@ -7749,6 +7770,39 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0]["source_id"], "target-source");
         assert_eq!(filtered[0]["text"], "check physical link and DNS");
+    }
+
+    #[test]
+    fn scheduler_evidence_pack_diagnostics_include_quality_and_model_discipline() {
+        let pack = crate::rag_orchestrator::EvidencePack {
+            primary_source_id: "target-source".to_string(),
+            source_title: "Industrial Network Manual".to_string(),
+            nodes: vec![crate::rag_orchestrator::EvidenceNode {
+                source_id: "target-source".to_string(),
+                source_title: "Industrial Network Manual".to_string(),
+                node_kind: "ProcedureStep".to_string(),
+                text: "check physical link and DNS".to_string(),
+            }],
+            diagnostics: crate::rag_orchestrator::EvidenceDiagnostics {
+                requested_needs: vec!["Procedure".to_string()],
+                satisfied_needs: vec!["Procedure".to_string()],
+                missing_needs: vec![],
+                sources_considered: 2,
+                quality: "strong".to_string(),
+                quality_reasons: vec!["all_requested_evidence_needs_satisfied".to_string()],
+            },
+        };
+        let diagnostics = scheduler_evidence_pack_diagnostics(
+            &pack,
+            crate::rag_orchestrator::RagModelDiscipline::Small,
+        );
+
+        assert_eq!(diagnostics["quality"], "strong");
+        assert_eq!(diagnostics["model_discipline"], "small");
+        assert_eq!(
+            diagnostics["quality_reasons"][0],
+            "all_requested_evidence_needs_satisfied"
+        );
     }
 
     #[test]
