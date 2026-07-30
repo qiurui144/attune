@@ -2386,7 +2386,7 @@ fn finalize_rag_answer_contract(query: &str, plan: &RagIntentPlan, answer: &str)
 
 fn scheduler_answer_ignored_available_evidence(answer: &str) -> bool {
     let answer_l = answer.to_ascii_lowercase();
-    contains_any_ascii(
+    let access_refusal = contains_any_ascii(
         &answer_l,
         &[
             "unable to access",
@@ -2404,13 +2404,41 @@ fn scheduler_answer_ignored_available_evidence(answer: &str) -> bool {
             "没有访问",
             "不能访问",
         ],
-    )
+    );
+    let evidence_refusal = contains_any_ascii(
+        &answer_l,
+        &[
+            "cannot provide",
+            "unable to provide",
+            "no evidence available",
+            "无法提供",
+            "无法回答",
+            "不能提供",
+        ],
+    ) && contains_any_ascii(
+        &answer_l,
+        &[
+            "lack of evidence",
+            "lacks evidence",
+            "insufficient evidence",
+            "no evidence",
+            "证据不足",
+            "缺少证据",
+            "没有证据",
+        ],
+    );
+    access_refusal || evidence_refusal
 }
 
 fn operational_evidence_terms(query: &str, evidence: &str) -> Vec<&'static str> {
     let haystack = format!("{query}\n{evidence}");
     let mut terms = Vec::new();
     for (label, needles) in [
+        (
+            "物理链路/physical link",
+            &["物理链路", "physical link", "nic status", "link status"][..],
+        ),
+        ("IP", &["ip address", "subnet mask", "gateway", "ip route"][..]),
         (
             "packet capture",
             &["packet capture", "抓包", "pcap", "tcpdump", "数据包捕获"][..],
@@ -2421,6 +2449,7 @@ fn operational_evidence_terms(query: &str, evidence: &str) -> Vec<&'static str> 
             &["路由", "routing", "route table", "default gateway"][..],
         ),
         ("DNS", &["dns", "DNS", "域名"][..]),
+        ("端口/port", &["端口", "port", "service port", "port status"][..]),
         ("防火墙/firewall", &["防火墙", "firewall"][..]),
         ("拓扑/topology", &["拓扑", "topology"][..]),
         (
@@ -8918,6 +8947,38 @@ mod tests {
         assert!(repaired.contains("边界"), "{repaired}");
         assert!(repaired.contains("routing table"), "{repaired}");
         assert!(!repaired.contains("unable to provide"), "{repaired}");
+    }
+
+    #[test]
+    fn repairs_low_parameter_lack_of_evidence_answer_when_citations_exist() {
+        let knowledge = vec![
+            serde_json::json!({
+                "item_id": "network-troubleshooting",
+                "title": "Network troubleshooting",
+                "inject_content": "Troubleshooting starts with physical link and NIC status, then IP address, subnet mask, gateway, route table, DNS resolution, port listening, firewall rules, packet capture, and application timeout evidence.",
+            }),
+            serde_json::json!({
+                "item_id": "support-workflow",
+                "title": "Support workflow",
+                "inject_content": "If evidence is insufficient, support should ask for topology, ip route, DNS result, service port status, firewall policy, tcpdump or packet capture, and relevant application logs.",
+            }),
+        ];
+        let weak_answer =
+            "I cannot provide information due to lack of evidence in the knowledge base.";
+
+        let repaired = repair_scheduler_answer_with_available_evidence(
+            "如何排查连接失败？如果证据不足还要索取哪些材料？",
+            &knowledge,
+            weak_answer,
+        )
+        .expect("lack-of-evidence refusal should be repaired from available citations");
+
+        assert!(repaired.contains("物理链路"), "{repaired}");
+        assert!(repaired.contains("IP"), "{repaired}");
+        assert!(repaired.contains("DNS"), "{repaired}");
+        assert!(repaired.contains("端口"), "{repaired}");
+        assert!(repaired.contains("日志"), "{repaired}");
+        assert!(repaired.contains("拓扑"), "{repaired}");
     }
 
     #[test]
