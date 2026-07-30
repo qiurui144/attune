@@ -1189,7 +1189,7 @@ fn lexical_needles(query: &str) -> Vec<String> {
                 }
             }
         } else if s.len() >= 2 {
-            out.push(s.to_ascii_lowercase());
+            push_ascii_identifier_needles(s, out);
         }
         buf.clear();
     };
@@ -1215,6 +1215,29 @@ fn lexical_needles(query: &str) -> Vec<String> {
     needles.sort();
     needles.dedup();
     needles
+}
+
+fn push_ascii_identifier_needles(raw: &str, out: &mut Vec<String>) {
+    let lowered = raw.to_ascii_lowercase();
+    out.push(lowered.clone());
+
+    let has_separator = lowered
+        .chars()
+        .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#' | ':'));
+    if !has_separator {
+        return;
+    }
+
+    let compact: String = lowered.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if compact.len() >= 2 {
+        out.push(compact);
+    }
+    for part in lowered.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let part = part.trim();
+        if part.len() >= 2 {
+            out.push(part.to_string());
+        }
+    }
 }
 
 fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
@@ -3166,6 +3189,17 @@ mod retrieval_query_tests {
         let query = "知识库证据不足时应该怎么办？";
 
         assert_eq!(retrieval_semantic_query(query), query);
+    }
+
+    #[test]
+    fn lexical_needles_include_compact_identifier_variants() {
+        let needles = lexical_needles("排查 ABC/DEF-12 连接失败");
+
+        assert!(needles.contains(&"abc/def-12".to_string()));
+        assert!(needles.contains(&"abcdef12".to_string()));
+        assert!(needles.contains(&"abc".to_string()));
+        assert!(needles.contains(&"def".to_string()));
+        assert!(needles.contains(&"12".to_string()));
     }
 }
 

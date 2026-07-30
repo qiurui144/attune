@@ -3675,9 +3675,9 @@ fn build_history_aware_retrieval_query(query: &str, history: &[HistoryMessage]) 
     }
     let markers = query_source_markers(query);
     let mut out = if markers.is_empty() {
-        "prior cited source".to_string()
+        query.to_string()
     } else {
-        format!("{} source", markers.join(" "))
+        format!("{query}\n{} source", markers.join(" "))
     };
     out.push_str("\nPrior cited source hints:");
     for hint in hints {
@@ -7624,6 +7624,7 @@ mod tests {
             &history,
         );
 
+        assert!(query.contains("如果这些证据不足"));
         assert!(query.contains("Prior cited source hints"));
         assert!(query.contains("tcpip_troubleshooting"));
         assert!(query.contains("tcpip_support_workflow"));
