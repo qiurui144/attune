@@ -94,7 +94,12 @@ fn line_term_score(line: &str, terms: &[String]) -> usize {
         .count()
 }
 
-fn evidence_for_doc(doc: &SummaryDocument, terms: &[String]) -> String {
+fn evidence_for_doc_with_budget(
+    doc: &SummaryDocument,
+    terms: &[String],
+    max_tokens: Option<usize>,
+    model: &str,
+) -> String {
     let mut best_line = "";
     let mut best_score = 0usize;
     for line in doc
@@ -109,13 +114,61 @@ fn evidence_for_doc(doc: &SummaryDocument, terms: &[String]) -> String {
             best_score = score;
         }
     }
-    if best_score > 0 {
-        return truncate_chars(best_line, 260);
-    }
-    first_nonempty_lines(&doc.content, 1)
+    let evidence = if best_score > 0 {
+        truncate_chars(best_line, 260)
+    } else {
+        first_nonempty_lines(&doc.content, 1)
         .into_iter()
         .next()
         .unwrap_or_else(|| truncate_chars(&doc.title, 120))
+    };
+    match max_tokens {
+        Some(max_tokens) => truncate_to_token_budget(&evidence, max_tokens, model),
+        None => evidence,
+    }
+}
+
+fn truncate_to_token_budget(text: &str, max_tokens: usize, model: &str) -> String {
+    if max_tokens == 0 {
+        return String::new();
+    }
+    let trimmed = text.trim();
+    if attune_core::cost::estimate_tokens(trimmed, model) <= max_tokens {
+        return trimmed.to_string();
+    }
+    let mut current = String::new();
+    let mut last_valid = String::new();
+    for ch in trimmed.chars() {
+        current.push(ch);
+        if attune_core::cost::estimate_tokens(&current, model) > max_tokens {
+            break;
+        }
+        last_valid = current.clone();
+    }
+    last_valid
+}
+
+fn summary_profile_for_intent<'a>(
+    registry: &'a attune_core::plugin_registry::PluginRegistry,
+    intent: &str,
+) -> Option<&'a attune_core::plugin_loader::RagProfileSpec> {
+    registry.plugins().find_map(|plugin| {
+        plugin
+            .manifest
+            .rag_profiles
+            .iter()
+            .find(|profile| profile.intents.iter().any(|profile_intent| profile_intent == intent))
+    })
+}
+
+fn summary_grounding_confidence(scenario: &str, document_count: usize, citation_count: usize) -> f32 {
+    if document_count == 0 || citation_count == 0 {
+        return 0.0;
+    }
+    if normalized_scenario(scenario) == "compare" && document_count < 2 {
+        return 0.55;
+    }
+    0.82
 }
 
 fn load_summary_documents(state: &SharedState, limit: usize) -> AppResult<Vec<SummaryDocument>> {
@@ -146,13 +199,31 @@ fn load_summary_documents(state: &SharedState, limit: usize) -> AppResult<Vec<Su
     Ok(docs)
 }
 
-fn build_summary_workflow_response(
+fn build_summary_workflow_response_with_profile(
     request: &SummaryWorkflowRequest,
     docs: &[SummaryDocument],
+    profile: Option<&attune_core::plugin_loader::RagProfileSpec>,
 ) -> serde_json::Value {
     let scenario = normalized_scenario(&request.scenario);
     let terms = split_terms(&request.detail);
     let top_k = request.top_k.unwrap_or(6).clamp(1, 12);
+    let model = request
+        .model
+        .as_deref()
+        .unwrap_or("attune-summary-workflow");
+    let max_evidence_tokens = profile.and_then(|profile| profile.workflow.evidence.max_evidence_tokens);
+    let include_breadcrumbs = profile
+        .and_then(|profile| profile.workflow.evidence.include_breadcrumbs)
+        .unwrap_or(true);
+    let workflow_mode = profile
+        .and_then(|profile| profile.workflow.mode.as_deref())
+        .unwrap_or("extractive");
+    let min_grounding_confidence = profile
+        .and_then(|profile| profile.workflow.verification.min_grounding_confidence)
+        .unwrap_or(0.60);
+    let max_repair_attempts = profile
+        .and_then(|profile| profile.workflow.verification.max_repair_attempts)
+        .unwrap_or(0);
     let mut ranked = docs.to_vec();
     ranked.sort_by(|a, b| {
         doc_score(b, &terms)
@@ -187,12 +258,16 @@ fn build_summary_workflow_response(
             .take(4)
             .map(|doc| {
                 let lead = if terms.is_empty() {
-                    first_nonempty_lines(&doc.content, 1)
+                    let line = first_nonempty_lines(&doc.content, 1)
                         .into_iter()
                         .next()
-                        .unwrap_or_else(|| doc.title.clone())
+                        .unwrap_or_else(|| doc.title.clone());
+                    match max_evidence_tokens {
+                        Some(max_tokens) => truncate_to_token_budget(&line, max_tokens, model),
+                        None => line,
+                    }
                 } else {
-                    evidence_for_doc(doc, &terms)
+                    evidence_for_doc_with_budget(doc, &terms, max_evidence_tokens, model)
                 };
                 format!("{}: {}", doc.title, lead)
             })
@@ -206,7 +281,8 @@ fn build_summary_workflow_response(
                 "item_id": doc.id,
                 "title": doc.title,
                 "source_type": doc.source_type,
-                "snippet": evidence_for_doc(doc, &terms),
+                "snippet": evidence_for_doc_with_budget(doc, &terms, max_evidence_tokens, model),
+                "breadcrumb": if include_breadcrumbs { vec![doc.title.clone()] } else { Vec::<String>::new() },
             })
         })
         .collect::<Vec<_>>();
@@ -216,7 +292,8 @@ fn build_summary_workflow_response(
         .map(|doc| {
             let mut points = first_nonempty_lines(&doc.content, 3);
             if !terms.is_empty() {
-                let evidence = evidence_for_doc(doc, &terms);
+                let evidence =
+                    evidence_for_doc_with_budget(doc, &terms, max_evidence_tokens, model);
                 if !points.iter().any(|point| point == &evidence) {
                     points.insert(0, evidence);
                 }
@@ -227,7 +304,7 @@ fn build_summary_workflow_response(
                 "title": doc.title,
                 "source_type": doc.source_type,
                 "key_points": points,
-                "evidence": evidence_for_doc(doc, &terms),
+                "evidence": evidence_for_doc_with_budget(doc, &terms, max_evidence_tokens, model),
             })
         })
         .collect::<Vec<_>>();
@@ -360,11 +437,22 @@ fn build_summary_workflow_response(
             }
         }
     ]);
+    let grounding_confidence =
+        summary_grounding_confidence(scenario, ranked.len(), key_evidence.len());
+    let verification_status = if grounding_confidence >= min_grounding_confidence {
+        "pass"
+    } else {
+        "needs-review"
+    };
     let audit = json!({
         "citation_count": key_evidence.len(),
         "document_count": ranked.len(),
         "section_count": sections.as_object().map(|value| value.len()).unwrap_or(0),
         "coverage_status": if ranked.is_empty() { "no-evidence" } else { "grounded-local-documents" },
+        "grounding_confidence": grounding_confidence,
+        "min_grounding_confidence": min_grounding_confidence,
+        "verification_status": verification_status,
+        "max_repair_attempts": max_repair_attempts,
         "missing_sections": [],
     });
 
@@ -374,12 +462,23 @@ fn build_summary_workflow_response(
             "scenario": scenario,
             "document_count": ranked.len(),
             "top_k": top_k,
+            "config": {
+                "mode": workflow_mode,
+                "evidence": {
+                    "max_evidence_tokens": max_evidence_tokens,
+                    "include_breadcrumbs": include_breadcrumbs,
+                },
+                "verification": {
+                    "min_grounding_confidence": min_grounding_confidence,
+                    "max_repair_attempts": max_repair_attempts,
+                },
+            },
             "stages": stages,
             "audit": audit,
         },
         "scenario": scenario,
         "scenario_label": scenario_label(scenario),
-        "model": request.model.as_deref().unwrap_or("attune-summary-workflow"),
+        "model": model,
         "content": content.trim(),
         "summary_sections": sections,
         "document_summaries": document_summaries,
@@ -407,7 +506,11 @@ pub async fn workflow(
         crate::routes::ai_stack::require_model_capability_ready(&state, model, "summary").await?;
     }
     let docs = load_summary_documents(&state, body.top_k.unwrap_or(12).max(12))?;
-    Ok(Json(build_summary_workflow_response(&body, &docs)))
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
+    let profile = summary_profile_for_intent(&plugin_registry, "chat.rag.summary");
+    Ok(Json(build_summary_workflow_response_with_profile(
+        &body, &docs, profile,
+    )))
 }
 
 #[cfg(test)]
@@ -430,7 +533,7 @@ mod tests {
                 .to_string(),
         }];
 
-        let payload = build_summary_workflow_response(&request, &docs);
+        let payload = build_summary_workflow_response_with_profile(&request, &docs, None);
         assert_eq!(payload["scenario"], "risk");
         assert_eq!(payload["model"], "candidate-model");
         assert!(payload["summary_sections"]["core_conclusions"].is_array());
@@ -465,7 +568,7 @@ mod tests {
             content: "Marker: TOKEN.\nTCP/IP originated from ARPANET.\nAirplane mechanical design requires fatigue review.".to_string(),
         }];
 
-        let payload = build_summary_workflow_response(&request, &docs);
+        let payload = build_summary_workflow_response_with_profile(&request, &docs, None);
         let text = payload["content"].as_str().unwrap();
         assert!(text.contains("TCP/IP"));
         assert!(!text.contains("Marker: TOKEN"));
@@ -479,7 +582,7 @@ mod tests {
             model: None,
             top_k: Some(4),
         };
-        let payload = build_summary_workflow_response(&request, &[]);
+        let payload = build_summary_workflow_response_with_profile(&request, &[], None);
         let risks = payload["summary_sections"]["risks_or_gaps"]
             .as_array()
             .unwrap();
@@ -502,12 +605,63 @@ mod tests {
             source_type: "pdf".to_string(),
             content: "DMA channel allocation uses the RTOS HAL interface.".to_string(),
         }];
-        let payload = build_summary_workflow_response(&request, &docs);
+        let payload = build_summary_workflow_response_with_profile(&request, &docs, None);
         let stages = payload["summary_workflow"]["stages"].as_array().unwrap();
         let names = stages
             .iter()
             .filter_map(|stage| stage["name"].as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["select", "map", "synthesize", "audit"]);
+    }
+
+    #[test]
+    fn workflow_honors_profile_evidence_budget_and_verification_threshold() {
+        let request = SummaryWorkflowRequest {
+            scenario: "compare".to_string(),
+            detail: "接口差异".to_string(),
+            model: None,
+            top_k: Some(2),
+        };
+        let docs = vec![SummaryDocument {
+            id: "doc-1".to_string(),
+            title: "接口说明".to_string(),
+            source_type: "pdf".to_string(),
+            content: "接口差异涉及调用条件、参数约束、返回值语义和错误处理流程，需要结合原文逐条确认。"
+                .to_string(),
+        }];
+        let profile = attune_core::plugin_loader::RagProfileSpec {
+            id: "summary-profile".to_string(),
+            intents: vec!["chat.rag.summary".to_string()],
+            workflow: attune_core::plugin_loader::RagWorkflowSpec {
+                evidence: attune_core::plugin_loader::RagWorkflowEvidenceSpec {
+                    max_evidence_tokens: Some(6),
+                    include_breadcrumbs: Some(true),
+                    chunk_kind_priority: vec![],
+                },
+                verification: attune_core::plugin_loader::RagWorkflowVerificationSpec {
+                    min_grounding_confidence: Some(0.90),
+                    max_repair_attempts: Some(1),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = build_summary_workflow_response_with_profile(&request, &docs, Some(&profile));
+        let snippet = payload["citations"][0]["snippet"].as_str().unwrap();
+
+        assert!(attune_core::cost::estimate_tokens(snippet, "attune-summary-workflow") <= 6);
+        assert_eq!(
+            payload["summary_workflow"]["config"]["evidence"]["max_evidence_tokens"],
+            6
+        );
+        assert_eq!(
+            payload["summary_workflow"]["audit"]["verification_status"],
+            "needs-review"
+        );
+        let min_grounding = payload["summary_workflow"]["audit"]["min_grounding_confidence"]
+            .as_f64()
+            .unwrap();
+        assert!((min_grounding - 0.90).abs() < 0.001);
     }
 }

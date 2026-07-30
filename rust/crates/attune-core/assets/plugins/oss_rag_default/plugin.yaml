@@ -19,7 +19,7 @@ rag_profiles:
       clarification:
         enabled: true
         require_when_multiple_scopes: true
-        scope_terms: [rtos, linux, android, baremetal, u-boot]
+        scope_terms: []
       evidence:
         max_evidence_tokens: 1600
         include_breadcrumbs: true
@@ -52,7 +52,7 @@ rag_profiles:
       clarification:
         enabled: true
         require_when_multiple_scopes: true
-        scope_terms: [rtos, linux, android, baremetal, u-boot]
+        scope_terms: []
       evidence:
         max_evidence_tokens: 1800
         include_breadcrumbs: true
@@ -85,7 +85,7 @@ rag_profiles:
       clarification:
         enabled: true
         require_when_multiple_scopes: true
-        scope_terms: [rtos, linux, android, baremetal, u-boot]
+        scope_terms: []
       evidence:
         max_evidence_tokens: 2200
         include_breadcrumbs: true

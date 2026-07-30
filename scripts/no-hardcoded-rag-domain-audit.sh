@@ -13,6 +13,7 @@ import subprocess
 roots = [
     pathlib.Path("rust/crates/attune-server/src"),
     pathlib.Path("rust/crates/attune-core/src"),
+    pathlib.Path("rust/crates/attune-core/assets/plugins/oss_rag_default"),
     pathlib.Path("kb-web-demo"),
 ]
 pattern = re.compile(
