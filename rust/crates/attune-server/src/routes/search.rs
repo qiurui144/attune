@@ -8,16 +8,23 @@ use serde::Deserialize;
 use crate::eval as eval_surface;
 use crate::state::SharedState;
 
+const SCORE_CUTOFF: f32 = 0.001;
+
+fn app_settings_json(state: &SharedState) -> serde_json::Value {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    vault
+        .store()
+        .get_meta("app_settings")
+        .ok()
+        .flatten()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
 /// 从 app_settings 读取 search.query_rewrite.enabled 开关。
 /// 未配置时返回 false（保守默认：LLM 不可用时不应在后台静默等待）。
 fn query_rewrite_enabled(state: &SharedState) -> bool {
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(Some(data)) = vault.store().get_meta("app_settings") else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else {
-        return false;
-    };
+    let json = app_settings_json(state);
     json.get("search")
         .and_then(|s| s.get("query_rewrite"))
         .and_then(|qr| qr.get("enabled"))
@@ -38,14 +45,8 @@ fn local_scheduler_native_kb_enabled(state: &SharedState) -> bool {
 }
 
 fn rerank_enabled(state: &SharedState) -> bool {
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let settings = vault
-        .store()
-        .get_meta("app_settings")
-        .ok()
-        .flatten()
-        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok());
-    crate::retrieval_policy::rerank_enabled_from_settings(settings.as_ref())
+    let settings = app_settings_json(state);
+    crate::retrieval_policy::rerank_enabled_from_settings(Some(&settings))
 }
 
 /// 若开关开启且 LLM 可用，改写 query；失败或关闭时降级返回原始 query。
@@ -104,6 +105,70 @@ fn hash_search_cache_key(
 ) -> (u64, String) {
     let material = format!("v2\0{original_query}\0{effective_query}\0{search_params:?}");
     (hash_query(&material), material)
+}
+
+fn apply_score_cutoff(results: Vec<SearchResult>) -> (Vec<SearchResult>, usize) {
+    let total_before_cutoff = results.len();
+    let cutoff_filtered: Vec<_> = results
+        .into_iter()
+        .filter(|r| r.score >= SCORE_CUTOFF)
+        .collect();
+    let total_after_cutoff = cutoff_filtered.len();
+    if cutoff_filtered.is_empty() && total_before_cutoff > 0 {
+        (Vec::new(), total_before_cutoff)
+    } else {
+        (cutoff_filtered, total_before_cutoff - total_after_cutoff)
+    }
+}
+
+fn should_run_search_recovery(
+    result_count: usize,
+    cutoff_filtered: usize,
+    requested_top_k: usize,
+) -> bool {
+    result_count == 0 || (cutoff_filtered > 0 && result_count < requested_top_k.min(3))
+}
+
+fn recovery_search_queries(
+    original_query: &str,
+    effective_query: &str,
+    settings: &serde_json::Value,
+) -> Vec<String> {
+    let intent = crate::rag_guardrails::classify_rag_intent(original_query);
+    let mut queries = crate::rag_guardrails::expanded_retrieval_queries(original_query, intent)
+        .into_iter()
+        .map(|query| attune_core::search::retrieval_semantic_query(&query))
+        .map(|query| attune_core::skill_evolution::expand_query(&query, settings))
+        .filter(|query| !query.trim().is_empty())
+        .collect::<Vec<_>>();
+    queries.retain(|query| query != effective_query);
+    queries.dedup();
+    queries
+}
+
+fn merge_search_results(
+    existing: &mut Vec<SearchResult>,
+    additional: Vec<SearchResult>,
+    limit: usize,
+) {
+    use std::collections::HashSet;
+
+    let mut seen = existing
+        .iter()
+        .map(|result| format!("{}:{:?}", result.item_id, result.chunk_idx))
+        .collect::<HashSet<_>>();
+    for result in additional {
+        let key = format!("{}:{:?}", result.item_id, result.chunk_idx);
+        if seen.insert(key) {
+            existing.push(result);
+        }
+    }
+    existing.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    existing.truncate(limit.max(1));
 }
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -216,7 +281,10 @@ pub async fn search(
     } else {
         maybe_rewrite_query(&state, &params.q).await
     };
+    let app_settings = app_settings_json(&state);
     let effective_query = attune_core::search::retrieval_semantic_query(&rewritten_query);
+    let effective_query =
+        attune_core::skill_evolution::expand_query(&effective_query, &app_settings);
 
     // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro），不再硬编码行业词。
@@ -277,10 +345,15 @@ pub async fn search(
         })?
     };
 
-    let results =
-        search_with_state_blocking(state.clone(), dek, effective_query, search_params, true)
-            .await
-            .map_err(|e| err_500(&e))?;
+    let raw_results = search_with_state_blocking(
+        state.clone(),
+        dek.clone(),
+        effective_query.clone(),
+        search_params.clone(),
+        true,
+    )
+    .await
+    .map_err(|e| err_500(&e))?;
 
     // OSS-S17 fix: score 阈值 cutoff。当 corpus 被低质量内容污染时，BM25+vector+RRF 退化为
     // fallback default score（实测 0.000638-0.000828）让真实相关内容无法浮出。R19-R3 复现：
@@ -291,20 +364,45 @@ pub async fn search(
     // corpus 含 42K garbage 时合法文书 RRF 后 score 也可能低于 0.001
     // (BM25 给真实命中 ~0.5，但 RRF 与 vector 结果合并后 normalize 大幅降低)。
     // cutoff 取 0.001 — 仍能过滤纯 fallback noise 但允许低-mid score 真实结果通过。
-    const SCORE_CUTOFF: f32 = 0.001;
-    let cutoff_filtered: Vec<_> = results
-        .iter()
-        .filter(|r| r.score >= SCORE_CUTOFF)
-        .cloned()
-        .collect();
-    let total_before_cutoff = results.len();
-    let total_after_cutoff = cutoff_filtered.len();
-    let results = if cutoff_filtered.is_empty() && !results.is_empty() {
-        // 全部低于阈值 → 视为 no-match
-        Vec::new()
-    } else {
-        cutoff_filtered
-    };
+    let (mut results, mut cutoff_filtered) = apply_score_cutoff(raw_results);
+    let mut retrieval_passes = vec!["first_pass"];
+    let mut retrieval_queries = vec![effective_query.clone()];
+    if should_run_search_recovery(results.len(), cutoff_filtered, params.top_k) {
+        for recovery_query in recovery_search_queries(&params.q, &effective_query, &app_settings)
+            .into_iter()
+            .take(3)
+        {
+            let mut recovery_params = search_params.clone();
+            recovery_params.top_k = recovery_params.top_k.max(params.top_k).min(100);
+            recovery_params.initial_k = recovery_params.initial_k.max(40);
+            recovery_params.intermediate_k = recovery_params
+                .intermediate_k
+                .max(recovery_params.top_k * 2)
+                .min(200);
+            if let Some(min_score) = recovery_params.min_score {
+                recovery_params.min_score = Some((min_score - 0.10).max(0.45));
+            }
+            let recovery_raw = search_with_state_blocking(
+                state.clone(),
+                dek.clone(),
+                recovery_query.clone(),
+                recovery_params.clone(),
+                true,
+            )
+            .await
+            .map_err(|e| err_500(&e))?;
+            let (recovery_results, recovery_cutoff_filtered) = apply_score_cutoff(recovery_raw);
+            cutoff_filtered += recovery_cutoff_filtered;
+            retrieval_passes.push("recovery_pass");
+            retrieval_queries.push(recovery_query);
+            if !recovery_results.is_empty() {
+                merge_search_results(&mut results, recovery_results, recovery_params.top_k);
+            }
+            if results.len() >= params.top_k.min(3) {
+                break;
+            }
+        }
+    }
 
     {
         let mut cache = state
@@ -328,7 +426,9 @@ pub async fn search(
         "query": params.q,
         "results": results,
         "total": results.len(),
-        "cutoff_filtered": total_before_cutoff - total_after_cutoff,
+        "cutoff_filtered": cutoff_filtered,
+        "retrieval_passes": retrieval_passes,
+        "retrieval_queries": retrieval_queries,
         "retrieval_plan": crate::retrieval_policy::retrieval_plan_trace(retrieval_plan.as_ref()),
         // T2 (v1.0.6 KB-bench): eval block null unless X-Attune-Eval-Mode: 1 header set
         "eval": eval_block,
@@ -451,6 +551,30 @@ mod tests {
         );
         assert_ne!(base, different_effective);
         assert_ne!(base_material, different_material);
+    }
+
+    #[test]
+    fn search_recovery_runs_for_empty_or_cutoff_low_recall() {
+        assert!(should_run_search_recovery(0, 0, 8));
+        assert!(should_run_search_recovery(1, 4, 8));
+        assert!(!should_run_search_recovery(3, 4, 8));
+        assert!(!should_run_search_recovery(2, 0, 8));
+    }
+
+    #[test]
+    fn recovery_search_queries_expand_diagnostic_questions_without_duplicates() {
+        let settings = serde_json::json!({});
+        let queries = recovery_search_queries(
+            "设备连接失败怎么排查？",
+            "设备连接失败怎么排查？",
+            &settings,
+        );
+
+        assert!(!queries.is_empty());
+        assert!(queries.iter().any(|query| query.contains("troubleshoot")));
+        assert!(!queries
+            .iter()
+            .any(|query| query == "设备连接失败怎么排查？"));
     }
 
     /// OSS-S14 regression: top_k 必须有上限，否则 top_k=10000 触发 search 卡死
