@@ -95,6 +95,7 @@ tmp/
 reports/runs/
 # AI scaffolding (untracked — local only)
 docs/superpowers/
+docs/reports/
 reports/
 .remember/
 .serena/
