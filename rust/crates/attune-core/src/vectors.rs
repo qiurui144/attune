@@ -111,7 +111,11 @@ impl VectorIndex {
             (None, None) => "unknown",
         }
         .to_string();
-        let compatible = status == "match" || !enforce || self.is_empty();
+        // Legacy indexes created before embedding fingerprints are still
+        // usable: unknown provenance is not the same as a proven mismatch.
+        // Once both sides publish fingerprints, a mismatch is the only stale
+        // state that blocks vector retrieval.
+        let compatible = status != "mismatch" || !enforce || self.is_empty();
         let stale_vectors = if compatible { 0 } else { self.len() };
         VectorEmbeddingCompatibility {
             usable: compatible,
@@ -626,6 +630,33 @@ mod tests {
         assert_eq!(
             compatibility.current_fingerprint.as_deref(),
             Some("provider=b;model=embed-b;dim=4")
+        );
+    }
+
+    #[test]
+    fn vector_index_keeps_legacy_unknown_fingerprint_usable() {
+        let mut idx = VectorIndex::new(4).expect("vector index");
+        idx.add(
+            &[1.0, 0.0, 0.0, 0.0],
+            VectorMeta {
+                item_id: "legacy".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+
+        let compatibility =
+            idx.embedding_compatibility(Some("provider=current;model=embed;dim=4"), true);
+
+        assert!(compatibility.usable);
+        assert_eq!(compatibility.status, "unknown");
+        assert_eq!(compatibility.stale_vectors, 0);
+        assert_eq!(compatibility.index_fingerprint, None);
+        assert_eq!(
+            compatibility.current_fingerprint.as_deref(),
+            Some("provider=current;model=embed;dim=4")
         );
     }
 
