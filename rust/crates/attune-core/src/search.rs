@@ -1528,60 +1528,19 @@ pub fn search_with_context_diagnostics(
     log::info!("search stages: rrf_fused={}", fused.len());
 
     // 4. 获取并解密 items + F2 (W3 batch A) 拉 breadcrumb sidecar
-    let mut results: Vec<SearchResult> = Vec::new();
-    for (hit_key, score) in &fused {
-        let (item_id, chunk_idx) = parse_hit_key(hit_key);
-        if let Ok(Some(item)) = ctx.store.get_item(ctx.dek, item_id) {
-            // breadcrumb 现已加密落盘，需传 dek 解密
-            let chunk_span =
-                chunk_idx.and_then(|idx| ctx.store.get_chunk_span(&item.id, idx).ok().flatten());
-            let chunk_content = chunk_span.and_then(|(start, end, _level, _section_idx)| {
-                item.content
-                    .get(start..end)
-                    .map(|s| (s.to_string(), Some(start), Some(end)))
-            });
-            let (content, span_start, span_end) = chunk_content
-                .or_else(|| lexical_excerpt_for_item(query, &item.content))
-                .unwrap_or_else(|| {
-                    let start = None;
-                    let end = None;
-                    (item.content.clone(), start, end)
-                });
-            let (breadcrumb, off_start, off_end) = chunk_idx
-                .and_then(|idx| {
-                    ctx.store
-                        .get_chunk_breadcrumb(ctx.dek, &item.id, idx)
-                        .ok()
-                        .flatten()
-                })
-                .or_else(|| {
-                    ctx.store
-                        .get_first_chunk_breadcrumb(ctx.dek, &item.id)
-                        .ok()
-                        .flatten()
-                })
-                .map(|(p, s, e)| (p, Some(s), Some(e)))
-                .unwrap_or_default();
-            // v0.6 Phase B F-Pro：拉 corpus_domain；item 不存在 / 列缺时回退 'general'
-            let corpus_domain = ctx
-                .store
-                .get_item_corpus_domain(&item.id)
-                .unwrap_or_else(|_| "general".to_string());
-            results.push(SearchResult {
-                item_id: item.id,
-                chunk_idx,
-                score: *score,
-                title: item.title,
-                content,
-                source_type: item.source_type,
-                source_path: item.url,
-                inject_content: None,
-                breadcrumb,
-                chunk_offset_start: span_start.or(off_start),
-                chunk_offset_end: span_end.or(off_end),
-                corpus_domain,
-            });
-        }
+    let mut results = decrypt_fused_results(ctx, query, &fused);
+    if results.is_empty() && !ft_results.is_empty() && !vec_results.is_empty() {
+        log::warn!(
+            "search stages: fused candidates resolved to no live items; retrying fulltext-only fallback"
+        );
+        let ft_only_fused = rrf_fuse(
+            &[],
+            &ft_results,
+            DEFAULT_VECTOR_WEIGHT,
+            DEFAULT_FULLTEXT_WEIGHT,
+            params.intermediate_k,
+        );
+        results = decrypt_fused_results(ctx, query, &ft_only_fused);
     }
     log::info!("search stages: items_decrypted={}", results.len());
 
@@ -1690,6 +1649,69 @@ pub fn search_with_context_diagnostics(
             reranker: reranker_diag,
         },
     })
+}
+
+fn decrypt_fused_results(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    fused: &[(String, f32)],
+) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    for (hit_key, score) in fused {
+        let (item_id, chunk_idx) = parse_hit_key(hit_key);
+        if let Ok(Some(item)) = ctx.store.get_item(ctx.dek, item_id) {
+            // breadcrumb 现已加密落盘，需传 dek 解密
+            let chunk_span =
+                chunk_idx.and_then(|idx| ctx.store.get_chunk_span(&item.id, idx).ok().flatten());
+            let chunk_content = chunk_span.and_then(|(start, end, _level, _section_idx)| {
+                item.content
+                    .get(start..end)
+                    .map(|s| (s.to_string(), Some(start), Some(end)))
+            });
+            let (content, span_start, span_end) = chunk_content
+                .or_else(|| lexical_excerpt_for_item(query, &item.content))
+                .unwrap_or_else(|| {
+                    let start = None;
+                    let end = None;
+                    (item.content.clone(), start, end)
+                });
+            let (breadcrumb, off_start, off_end) = chunk_idx
+                .and_then(|idx| {
+                    ctx.store
+                        .get_chunk_breadcrumb(ctx.dek, &item.id, idx)
+                        .ok()
+                        .flatten()
+                })
+                .or_else(|| {
+                    ctx.store
+                        .get_first_chunk_breadcrumb(ctx.dek, &item.id)
+                        .ok()
+                        .flatten()
+                })
+                .map(|(p, s, e)| (p, Some(s), Some(e)))
+                .unwrap_or_default();
+            // v0.6 Phase B F-Pro：拉 corpus_domain；item 不存在 / 列缺时回退 'general'
+            let corpus_domain = ctx
+                .store
+                .get_item_corpus_domain(&item.id)
+                .unwrap_or_else(|_| "general".to_string());
+            results.push(SearchResult {
+                item_id: item.id,
+                chunk_idx,
+                score: *score,
+                title: item.title,
+                content,
+                source_type: item.source_type,
+                source_path: item.url,
+                inject_content: None,
+                breadcrumb,
+                chunk_offset_start: span_start.or(off_start),
+                chunk_offset_end: span_end.or(off_end),
+                corpus_domain,
+            });
+        }
+    }
+    results
 }
 
 #[cfg(test)]
@@ -2555,6 +2577,79 @@ mod tests {
             outcome.diagnostics.vector_skipped_reason.as_deref(),
             Some("embedding_fingerprint_mismatch")
         );
+    }
+
+    #[test]
+    fn search_falls_back_to_fulltext_when_vector_hits_are_stale() {
+        use crate::embed::MockEmbeddingProvider;
+        use crate::index::FulltextIndex;
+        use crate::store::Store;
+        use crate::vectors::{VectorIndex, VectorMeta};
+        use std::sync::Arc;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let ft = FulltextIndex::open_memory().unwrap();
+        let item_id = store
+            .insert_item(
+                &dek,
+                "live troubleshooting guide",
+                "alpha troubleshooting route dns firewall packet capture",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
+        ft.add_document(
+            &item_id,
+            "live troubleshooting guide",
+            "alpha troubleshooting route dns firewall packet capture",
+            "note",
+        )
+        .unwrap();
+
+        let mut vectors = VectorIndex::new(4).expect("vector index");
+        for idx in 0..32 {
+            vectors
+                .add(
+                    &[1.0, 0.0, 0.0, 0.0],
+                    VectorMeta {
+                        item_id: format!("deleted-vector-only-{idx}"),
+                        chunk_idx: 0,
+                        level: 2,
+                        section_idx: 0,
+                    },
+                )
+                .unwrap();
+        }
+
+        let provider = Arc::new(MockEmbeddingProvider::new(4));
+        let ctx = SearchContext {
+            fulltext: Some(&ft),
+            vectors: Some(&vectors),
+            embedding: Some(provider),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let outcome = search_with_context_diagnostics(
+            &ctx,
+            "alpha troubleshooting route",
+            &SearchParams::with_defaults(5),
+        )
+        .expect("search outcome");
+
+        assert_eq!(
+            outcome
+                .results
+                .first()
+                .map(|result| result.item_id.as_str()),
+            Some(item_id.as_str())
+        );
+        assert!(outcome.diagnostics.vector_results > 0);
+        assert!(outcome.diagnostics.bm25_results > 0);
     }
 
     #[test]
