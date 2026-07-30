@@ -110,6 +110,11 @@ raise SystemExit("could not detect attune-server version")
 PY
 }
 
+detect_cargo_target_dir() {
+  cargo metadata --manifest-path "$ROOT/rust/Cargo.toml" --no-deps --format-version 1 \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'
+}
+
 if [ -z "$VERSION" ]; then
   VERSION="$(detect_version)"
 fi
@@ -122,7 +127,8 @@ else
   REPORT="$REPORTS_DIR/build-riscv64-server-deb-$TS.md"
 fi
 
-BIN="$ROOT/rust/target/$TARGET/release/attune-server-headless"
+TARGET_DIR="$(detect_cargo_target_dir)"
+BIN="$TARGET_DIR/$TARGET/release/attune-server-headless"
 OSS_RAG_PACK_SRC="$ROOT/rust/crates/attune-core/assets/plugins/oss_rag_default"
 STAGE="$OUT_DIR/pkgroot-attune-server-$VERSION-riscv64"
 DEB="$OUT_DIR/attune-server_${VERSION}_riscv64.deb"
@@ -159,6 +165,7 @@ write_report_header() {
     echo "- Commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- Version: $VERSION"
     echo "- Target: $TARGET"
+    echo "- Cargo target dir: $TARGET_DIR"
     echo "- Toolchain: $TOOLCHAIN"
     echo "- Features: $FEATURES"
     echo "- No default features: true"

@@ -20,6 +20,8 @@ require_file_contains "$ROOT/.cargo/config.toml" 'target-dir = "/data/cargo-targ
 require_file_contains "$ROOT/rust/.cargo/config.toml" 'target-dir = "/data/cargo-target/attune"'
 require_file_contains "$ROOT/scripts/rust-cache-status.sh" '/data/cargo-target/attune'
 require_file_contains "$ROOT/scripts/rust-cache-clean.sh" '/data/cargo-target/attune'
+require_file_contains "$ROOT/scripts/release/build-riscv64-server-deb.sh" 'cargo metadata'
+require_file_contains "$ROOT/scripts/release/build-riscv64-server-deb.sh" 'target_directory'
 require_file_contains "$ROOT/CLAUDE.md" 'workspace target 分仓隔离到 `/data/cargo-target/attune`'
 require_file_contains "$ROOT/CLAUDE.md" '仓库根目录 `.cargo/config.toml` 与 `rust/.cargo/config.toml` 必须同时固定'
 "$ROOT/scripts/rust-cache-status.sh" >/tmp/attune-rust-cache-status-test.txt
@@ -36,6 +38,12 @@ fi
 
 if grep -R --include='*.sh' -n 'CARGO_TARGET_DIR=.*/tmp/attune' "$ROOT/scripts" >/tmp/attune-rust-cache-policy-grep.txt; then
   echo "repo scripts must not introduce ad-hoc Attune CARGO_TARGET_DIR paths:" >&2
+  cat /tmp/attune-rust-cache-policy-grep.txt >&2
+  exit 1
+fi
+
+if grep -R --include='*.sh' -n 'rust/target/[$]TARGET/release/attune-server-headless' "$ROOT/scripts" >/tmp/attune-rust-cache-policy-grep.txt; then
+  echo "release scripts must not hardcode rust/target for cross-built binaries:" >&2
   cat /tmp/attune-rust-cache-policy-grep.txt >&2
   exit 1
 fi
