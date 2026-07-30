@@ -136,7 +136,8 @@ fi
 grep -q "main_rvv_threshold_met: 0" "$TMP/rvv-audit-fail.txt"
 
 FAKE_TARGET="riscv64-test-contract"
-FAKE_BIN="$ROOT/rust/target/$FAKE_TARGET/release/attune-server-headless"
+FAKE_TARGET_DIR="$(cd "$ROOT/rust" && cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+FAKE_BIN="$FAKE_TARGET_DIR/$FAKE_TARGET/release/attune-server-headless"
 FAKE_PKG="$TMP/pkg"
 mkdir -p "$(dirname "$FAKE_BIN")"
 printf '#!/usr/bin/env sh\nexit 0\n' > "$FAKE_BIN"
