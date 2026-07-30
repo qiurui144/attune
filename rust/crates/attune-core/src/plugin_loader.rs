@@ -271,7 +271,10 @@ grounding:
 
         assert_eq!(profile.workflow.mode.as_deref(), Some("reliable"));
         assert_eq!(profile.workflow.planner.max_sub_queries, Some(4));
-        assert_eq!(profile.workflow.clarification.scope_terms, vec!["rtos", "linux"]);
+        assert_eq!(
+            profile.workflow.clarification.scope_terms,
+            vec!["rtos", "linux"]
+        );
         assert_eq!(profile.workflow.evidence.max_evidence_tokens, Some(1400));
         assert_eq!(
             profile.workflow.evidence.chunk_kind_priority,

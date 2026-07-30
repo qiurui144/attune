@@ -79,6 +79,67 @@ pub struct RagWorkflowTrace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagQualityProfile {
+    pub query: RagQueryQualityTrace,
+    pub evidence: RagEvidenceQualityTrace,
+    pub embedding: RagEmbeddingQualityTrace,
+    pub reranker: RagRerankerQualityTrace,
+    pub answer: RagAnswerQualityTrace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagQueryQualityTrace {
+    pub original_query: String,
+    pub retrieval_query: String,
+    pub expanded_queries: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagEvidenceQualityTrace {
+    pub requested_needs: Vec<String>,
+    pub satisfied_needs: Vec<String>,
+    pub missing_needs: Vec<String>,
+    pub quality: String,
+    pub source_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagEmbeddingQualityTrace {
+    pub status: String,
+    pub usable: bool,
+    pub stale_vectors: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagRerankerQualityTrace {
+    pub requested: bool,
+    pub available: bool,
+    pub used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    pub candidate_count: usize,
+    pub score_count: usize,
+    pub actionable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RagAnswerQualityTrace {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_discipline: Option<String>,
+    pub repair_attempted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_reason: Option<String>,
+    pub final_citation_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RagClarification {
     pub reason: &'static str,
     pub scopes: Vec<String>,
@@ -349,6 +410,27 @@ pub fn rag_metadata_with_trace(
     })
 }
 
+pub fn rag_metadata_with_quality_profile(
+    coverage: &EvidenceCoverage,
+    answer_mode: &'static str,
+    degraded_reason: Option<&'static str>,
+    knowledge_count: usize,
+    trace: &RagRetrievalTrace,
+    quality: &RagQualityProfile,
+) -> Value {
+    let mut meta = rag_metadata_with_trace(
+        coverage,
+        answer_mode,
+        degraded_reason,
+        knowledge_count,
+        trace,
+    );
+    if let Some(obj) = meta.as_object_mut() {
+        obj.insert("quality_profile".to_string(), serde_json::json!(quality));
+    }
+    meta
+}
+
 #[allow(dead_code)] // Unit-tested workflow metadata helper; route code may attach richer traces directly.
 pub fn rag_metadata_with_workflow(
     coverage: &EvidenceCoverage,
@@ -391,7 +473,10 @@ pub fn workflow_clarification_for_query(
         if query_l.contains(&term_l) {
             return None;
         }
-        if knowledge.iter().any(|item| knowledge_matches_scope(item, &term_l)) {
+        if knowledge
+            .iter()
+            .any(|item| knowledge_matches_scope(item, &term_l))
+        {
             scopes.push(term_l);
         }
     }
@@ -662,7 +747,7 @@ mod tests {
     #[test]
     fn classifies_manual_source_location_as_lookup() {
         assert_eq!(
-            classify_rag_intent("说明如何定位 A320 QRH 中的异常处置资料，并引用来源。"),
+            classify_rag_intent("说明如何定位 ZX900 快速参考手册中的异常处置资料，并引用来源。"),
             RagIntent::Lookup
         );
     }
@@ -857,6 +942,85 @@ mod tests {
     }
 
     #[test]
+    fn metadata_reports_unified_rag_quality_profile() {
+        let coverage = EvidenceCoverage {
+            intent: RagIntent::Diagnostic,
+            score: 0.8,
+            status: "sufficient",
+            found_evidence: true,
+            missing: vec![],
+        };
+        let trace = RagRetrievalTrace {
+            profile_id: "default_kb_diagnostic".to_string(),
+            strategy: "hybrid_rrf".to_string(),
+            passes: vec!["first_pass", "recovery_pass"],
+            queries: vec!["怎么排查连接失败".to_string()],
+            final_top_k: 5,
+            vector_results: Some(0),
+            bm25_results: Some(3),
+            citations_required: 1,
+        };
+        let quality = RagQualityProfile {
+            query: RagQueryQualityTrace {
+                original_query: "怎么排查连接失败".to_string(),
+                retrieval_query: "怎么排查连接失败".to_string(),
+                expanded_queries: vec!["怎么排查连接失败 troubleshoot".to_string()],
+            },
+            evidence: RagEvidenceQualityTrace {
+                requested_needs: vec!["Troubleshooting".to_string()],
+                satisfied_needs: vec!["Troubleshooting".to_string()],
+                missing_needs: vec![],
+                quality: "strong".to_string(),
+                source_count: 1,
+                primary_source: Some("manual-a".to_string()),
+            },
+            embedding: RagEmbeddingQualityTrace {
+                status: "mismatch".to_string(),
+                usable: false,
+                stale_vectors: 12,
+                current_fingerprint: Some("provider=x;model=current;dim=4".to_string()),
+                index_fingerprint: Some("provider=x;model=old;dim=4".to_string()),
+            },
+            reranker: RagRerankerQualityTrace {
+                requested: true,
+                available: true,
+                used: false,
+                skipped_reason: Some("low_signal_scores".to_string()),
+                candidate_count: 5,
+                score_count: 5,
+                actionable: false,
+            },
+            answer: RagAnswerQualityTrace {
+                mode: "llm-chat".to_string(),
+                model_discipline: Some("small".to_string()),
+                repair_attempted: true,
+                repair_reason: Some("cited_evidence_but_under_answered".to_string()),
+                final_citation_count: 2,
+            },
+        };
+
+        let meta =
+            rag_metadata_with_quality_profile(&coverage, "llm-chat", None, 2, &trace, &quality);
+
+        assert_eq!(meta["quality_profile"]["embedding"]["status"], "mismatch");
+        assert_eq!(meta["quality_profile"]["embedding"]["stale_vectors"], 12);
+        assert_eq!(
+            meta["quality_profile"]["reranker"]["skipped_reason"],
+            "low_signal_scores"
+        );
+        assert_eq!(
+            meta["quality_profile"]["answer"]["repair_reason"],
+            "cited_evidence_but_under_answered"
+        );
+        assert_eq!(
+            meta["quality_profile"]["evidence"]["satisfied_needs"][0],
+            "Troubleshooting"
+        );
+        assert_eq!(meta["retrieval"]["vector_results"], 0);
+        assert_eq!(meta["retrieval"]["bm25_results"], 3);
+    }
+
+    #[test]
     fn metadata_reports_refusal_mode_and_coverage() {
         let coverage = EvidenceCoverage {
             intent: RagIntent::Diagnostic,
@@ -921,7 +1085,7 @@ mod tests {
             workflow: attune_core::plugin_loader::RagWorkflowSpec {
                 clarification: attune_core::plugin_loader::RagWorkflowClarificationSpec {
                     enabled: Some(true),
-                    scope_terms: vec!["rtos".to_string(), "linux".to_string()],
+                    scope_terms: vec!["platform-a".to_string(), "platform-b".to_string()],
                     require_when_multiple_scopes: Some(true),
                 },
                 ..Default::default()
@@ -930,25 +1094,28 @@ mod tests {
         };
         let knowledge = vec![
             serde_json::json!({
-                "title": "RTOS DMAC guide",
-                "source_scope": "rtos",
-                "content": "hal_dma_chan_request requests an RTOS DMA channel."
+                "title": "Platform-A control guide",
+                "source_scope": "platform-a",
+                "content": "ctrl_channel_open requests a Platform-A control channel."
             }),
             serde_json::json!({
-                "title": "Linux DMAC guide",
-                "source_scope": "linux",
-                "content": "dma_request_chan requests a Linux DMA channel."
+                "title": "Platform-B control guide",
+                "source_scope": "platform-b",
+                "content": "ctrl_request_handle requests a Platform-B control channel."
             }),
         ];
 
-        let clarification =
-            workflow_clarification_for_query("dmac 申请 dma 通道的函数接口是什么", &knowledge, &profile)
-                .expect("multiple configured scopes should require clarification");
+        let clarification = workflow_clarification_for_query(
+            "控制模块申请通道的函数接口是什么",
+            &knowledge,
+            &profile,
+        )
+        .expect("multiple configured scopes should require clarification");
 
         assert_eq!(clarification.reason, "multiple_source_scopes");
-        assert_eq!(clarification.scopes, vec!["rtos", "linux"]);
-        assert!(clarification.message.contains("rtos"));
-        assert!(clarification.message.contains("linux"));
+        assert_eq!(clarification.scopes, vec!["platform-a", "platform-b"]);
+        assert!(clarification.message.contains("platform-a"));
+        assert!(clarification.message.contains("platform-b"));
     }
 
     #[test]
@@ -958,7 +1125,7 @@ mod tests {
             workflow: attune_core::plugin_loader::RagWorkflowSpec {
                 clarification: attune_core::plugin_loader::RagWorkflowClarificationSpec {
                     enabled: Some(true),
-                    scope_terms: vec!["rtos".to_string(), "linux".to_string()],
+                    scope_terms: vec!["platform-a".to_string(), "platform-b".to_string()],
                     require_when_multiple_scopes: Some(true),
                 },
                 ..Default::default()
@@ -966,12 +1133,12 @@ mod tests {
             ..Default::default()
         };
         let knowledge = vec![
-            serde_json::json!({"source_scope": "rtos", "content": "RTOS DMA interface"}),
-            serde_json::json!({"source_scope": "linux", "content": "Linux DMA interface"}),
+            serde_json::json!({"source_scope": "platform-a", "content": "Platform-A control interface"}),
+            serde_json::json!({"source_scope": "platform-b", "content": "Platform-B control interface"}),
         ];
 
         assert!(workflow_clarification_for_query(
-            "rtos 中 dmac 申请 dma 通道的函数接口是什么",
+            "platform-a 中控制模块申请通道的函数接口是什么",
             &knowledge,
             &profile,
         )
@@ -998,7 +1165,13 @@ mod tests {
             repair_attempted: false,
         };
 
-        let meta = rag_metadata_with_workflow(&coverage, "clarification", Some("ambiguous_source_scope"), 2, &workflow);
+        let meta = rag_metadata_with_workflow(
+            &coverage,
+            "clarification",
+            Some("ambiguous_source_scope"),
+            2,
+            &workflow,
+        );
 
         assert_eq!(meta["rag_workflow"]["mode"], "reliable");
         assert_eq!(meta["rag_workflow"]["clarification_required"], true);

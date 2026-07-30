@@ -70,6 +70,30 @@ pub fn current_embedding_signature(p: &dyn EmbeddingProvider) -> EmbeddingSignat
     }
 }
 
+pub fn current_embedding_fingerprint(p: &dyn EmbeddingProvider) -> String {
+    let sig = current_embedding_signature(p);
+    format!(
+        "provider={};model={};dim={};metric=cosine;normalization=provider_default;version=1",
+        embedding_provider_kind(&sig.model),
+        sig.model,
+        sig.dim
+    )
+}
+
+fn embedding_provider_kind(model: &str) -> &'static str {
+    if model.starts_with("local-scheduler:") {
+        "local_scheduler"
+    } else if model.starts_with("openai-compatible:") {
+        "openai_compatible"
+    } else if model.starts_with("ollama:") {
+        "ollama"
+    } else if model.starts_with("embed-dim") {
+        "mock_or_dimension_keyed"
+    } else {
+        "generic"
+    }
+}
+
 /// Ollama HTTP embedding client
 pub struct OllamaProvider {
     client: reqwest::Client,
@@ -1094,6 +1118,19 @@ mod tests {
                 dim: 1024
             }
         );
+    }
+
+    #[test]
+    fn fingerprint_includes_generic_runtime_properties() {
+        let p = MockEmbeddingProvider::new(4);
+        let fp = current_embedding_fingerprint(&p);
+
+        assert!(fp.contains("provider=mock_or_dimension_keyed"));
+        assert!(fp.contains("model=embed-dim4"));
+        assert!(fp.contains("dim=4"));
+        assert!(fp.contains("metric=cosine"));
+        assert!(!fp.contains("bge"));
+        assert!(!fp.contains("qwen"));
     }
 
     #[test]

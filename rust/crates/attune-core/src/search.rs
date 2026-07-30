@@ -7,7 +7,7 @@ use crate::embed::EmbeddingProvider;
 use crate::index::FulltextIndex;
 use crate::infer::RerankProvider;
 use crate::store::Store;
-use crate::vectors::VectorIndex;
+use crate::vectors::{VectorEmbeddingCompatibility, VectorIndex};
 
 /// RRF 参数
 pub const RRF_K: f32 = 60.0;
@@ -208,111 +208,37 @@ fn token_matches_with_prefix(query_token: &str, source_token: &str) -> bool {
 }
 
 fn source_phrase_boost(query: &str, source: &str) -> f32 {
-    let mut boost = 0.0f32;
     let q = query.to_ascii_lowercase();
+    let source_tokens = normalized_ascii_tokens(source);
+    let meaningful_query_tokens = normalized_ascii_tokens(&q)
+        .into_iter()
+        .filter(|token| token.len() >= 3)
+        .collect::<Vec<_>>();
+    let phrase_hits = meaningful_query_tokens
+        .iter()
+        .filter(|token| {
+            source_tokens
+                .iter()
+                .any(|source_token| source_token == *token)
+        })
+        .count();
+    let mut boost = (phrase_hits as f32 * 0.05).min(0.30);
 
-    let has = |needle: &str| source.contains(needle);
-    let q_has = |needle: &str| q.contains(needle);
-
-    boost += aircraft_hint_boost(&q, source);
-    boost += source_exclusion_penalty(&q, source);
-
-    if (q_has("qrh") || q_has("quick reference")) && (has("qrh") || has("quick reference")) {
-        boost += 0.22;
-    }
-    if (q_has("abnormal") || q_has("emergency") || q_has("checklist"))
-        && (has("qrh") || has("quick reference"))
-    {
-        boost += 0.10;
-    }
-    if q_has("fctm") && has("fctm") {
-        boost += 0.18;
-    }
-    if (q_has("fcom") || q_has("flight crew operating")) && has("fcom") {
-        boost += 0.10;
-    }
-    if (q_has("sop") || q_has("standard operating"))
-        && (has("/sop") || has("\\sop") || has("-sop") || has("standard operating"))
-    {
-        boost += 0.24;
-    }
-    if q_has("takeoff") && (has("takeoff") || has("take-off")) {
-        boost += 0.16;
-    }
-    if (q_has("separated")
-        || q_has("seperate")
-        || q_has("seperated")
-        || q_has("distinct from fcom")
-        || q_has("not fcom")
-        || q_has("not the full 320fcom"))
-        && has("fcom")
-    {
-        boost -= 0.10;
-    }
-    if (q_has("system") || q_has("systems") || q_has("separated") || q_has("seperated"))
-        && (has("/systems")
-            || has("systems (")
-            || has("-hydraulic")
-            || has("-electrical")
-            || has("-fuel")
-            || has("-navigation")
-            || has("-powerplant")
-            || has("-landing_gear")
-            || has("-flight_controls"))
-    {
-        boost += 0.12;
-    }
-    for code in ["320fcom1", "320fcom3", "qrh320"] {
-        if q_has(code) && has(code) {
-            boost += 0.16;
-        }
-    }
-    if q_has("hydraulic") && has("hydraulic") {
-        boost += 0.14;
-    }
-    if (q_has("landing gear") || q_has("ata 32"))
-        && (has("landing gear") || has("32-landing") || has("ata 32"))
-    {
-        boost += 0.12;
-    }
-    if (q_has("flight controls") || q_has("flight control") || q_has("ata 27"))
-        && (has("flight controls")
-            || has("flight control")
-            || has("flights-controls")
-            || has("flight_controls")
-            || has("ata 27"))
-    {
-        boost += 0.16;
-    }
-    if q_has("electrical") && has("electrical") {
-        boost += 0.14;
-    }
-    if q_has("fuel") && has("fuel") {
-        boost += 0.14;
-    }
-    if q_has("navigation") && has("navigation") {
-        boost += 0.16;
-    }
-    if q_has("powerplant") && has("powerplant") {
-        boost += 0.16;
-    }
-    if (q_has("abbreviation") || q_has("abbreviations"))
-        && (has("abbreviation") || has("abbreviations"))
-    {
-        boost += 0.38;
-    }
-    if q_has("pdf") && has(".pdf") {
+    if contains_any_str(&q, &["pdf", "source file", "source document"]) && source.contains(".pdf") {
         boost += 0.04;
     }
-    if q_has("markdown") && (has(".md") || has("markdown")) && !q_has("pdf source") {
+    if contains_any_str(&q, &["markdown", "source file", "source document"])
+        && (source.contains(".md") || source.contains("markdown"))
+    {
         boost += 0.04;
     }
+    boost -= generic_exclusion_penalty(&q, source);
 
     boost
 }
 
-fn source_exclusion_penalty(query: &str, source: &str) -> f32 {
-    const EXCLUSION_MARKERS: &[&str] = &[
+fn generic_exclusion_penalty(query: &str, source: &str) -> f32 {
+    const MARKERS: &[&str] = &[
         "不要引入",
         "不要包含",
         "不包括",
@@ -322,117 +248,33 @@ fn source_exclusion_penalty(query: &str, source: &str) -> f32 {
         "excluding",
         "not ",
     ];
-    let has_exclusion = EXCLUSION_MARKERS
+    let excluded = MARKERS
         .iter()
-        .any(|marker| query.contains(marker));
-    if !has_exclusion {
+        .filter_map(|marker| query.find(marker).map(|idx| &query[idx + marker.len()..]))
+        .flat_map(normalized_ascii_tokens)
+        .filter(|token| token.len() >= 3)
+        .collect::<HashSet<_>>();
+    if excluded.is_empty() {
         return 0.0;
     }
-
-    const EXCLUSION_ALIASES: &[(&str, &[&str])] = &[
-        ("a220", &["a220", "cs300", "bd500"]),
-        (
-            "a320",
-            &["a320", "a318/a319/a320", "320fcom", "qrh320", "320-"],
-        ),
-        ("a330", &["a330", "330fcom", "330-"]),
-        ("a340", &["a340", "340fcom", "340-"]),
-        ("a350", &["a350", "350-"]),
-        ("a380", &["a380", "380fcom", "380-"]),
-        (
-            "boeing",
-            &[
-                "boeing", "b737", "b747", "b757", "b767", "b777", "b787", "737-", "747-", "757-",
-                "767-", "777-", "787-",
-            ],
-        ),
-    ];
-
-    let mut penalty = 0.0;
-    for (trigger, aliases) in EXCLUSION_ALIASES {
-        if query_excludes_source_hint(query, trigger, EXCLUSION_MARKERS)
-            && aliases.iter().any(|alias| source.contains(alias))
-        {
-            penalty -= 0.45;
-        }
-    }
-    penalty
-}
-
-fn query_excludes_source_hint(query: &str, trigger: &str, markers: &[&str]) -> bool {
-    markers.iter().any(|marker| {
-        query
-            .find(marker)
-            .map(|idx| query[idx + marker.len()..].contains(trigger))
-            .unwrap_or(false)
-    })
-}
-
-fn aircraft_hint_boost(query: &str, source: &str) -> f32 {
-    const AIRCRAFT_ALIASES: &[(&str, &[&str])] = &[
-        ("a220", &["a220", "cs300", "bd500"]),
-        (
-            "a320",
-            &["a320", "a318/a319/a320", "320fcom", "qrh320", "320-"],
-        ),
-        ("a330", &["a330", "330fcom", "330-"]),
-        ("a340", &["a340", "340fcom", "340-"]),
-        ("a350", &["a350", "350-"]),
-        ("a380", &["a380", "380fcom", "380-"]),
-        (
-            "b737",
-            &["b737", "737max", "737 max", "737-8", "737-tbc", "737-"],
-        ),
-        ("b747", &["b747", "747-8", "747-400", "747-", "747 "]),
-        ("b757", &["b757", "757-", "757 "]),
-        ("b767", &["b767", "767-", "767 "]),
-        ("b777", &["b777", "777-", "777 "]),
-        ("b787", &["b787", "787-", "787 "]),
-        ("mig29", &["mig-29", "mig29", "mikoyan"]),
-    ];
-
-    let query_tags: Vec<&str> = AIRCRAFT_ALIASES
+    let source_tokens = normalized_ascii_tokens(source);
+    let hits = excluded
         .iter()
-        .filter(|(_, aliases)| aliases.iter().any(|alias| query.contains(alias)))
-        .map(|(tag, _)| *tag)
-        .collect();
-    if query_tags.is_empty() {
-        return 0.0;
-    }
-
-    let source_tags: Vec<&str> = AIRCRAFT_ALIASES
-        .iter()
-        .filter(|(_, aliases)| aliases.iter().any(|alias| source.contains(alias)))
-        .map(|(tag, _)| *tag)
-        .collect();
-    let matches = query_tags
-        .iter()
-        .filter(|tag| source_tags.iter().any(|source_tag| source_tag == *tag))
+        .filter(|token| {
+            source_tokens
+                .iter()
+                .any(|source_token| source_token == *token)
+        })
         .count();
-
-    let mut boost = (matches as f32 * 0.16).min(0.32);
-    if matches == 0 && !source_tags.is_empty() {
-        boost -= 0.16;
-    }
-    if query.contains("boeing") && source.contains("airbus") {
-        boost -= 0.06;
-    }
-    if query.contains("airbus") && source.contains("boeing") {
-        boost -= 0.06;
-    }
-    if (query.contains("mig") || query.contains("mikoyan")) && !source.contains("mig") {
-        boost -= 0.08;
-    }
-    boost
+    (hits as f32 * 0.18).min(0.36)
 }
 
 /// Apply a cheap SRAS-style source selector reward.
 ///
 /// Long manuals produce many chunks, which can make large-but-wrong PDFs dominate
 /// vector/RRF scores. This deterministic pass rewards candidates whose title,
-/// source path, or breadcrumb matches explicit source hints in the query
-/// (manual family, ATA number, aircraft code, filename fragments). It is kept
-/// small and local: no LLM call, no corpus-specific schema requirement.
+/// source path, or breadcrumb matches explicit source hints in the query.
+/// It is kept small and local: no LLM call, no corpus-specific schema requirement.
 pub fn apply_source_hint_boost(query: &str, results: &mut [SearchResult]) {
     if results.is_empty() {
         return;
@@ -453,46 +295,63 @@ pub fn apply_source_hint_boost(query: &str, results: &mut [SearchResult]) {
                     .any(|source_tok| token_matches_with_prefix(tok, source_tok))
             })
             .count();
-        let token_boost = (overlap as f32 * 0.018).min(0.12);
+        let token_boost = (overlap as f32 * 0.05).min(0.30);
         r.score += token_boost + source_phrase_boost(query, &source);
     }
 }
 
-fn platform_hints(query: &str) -> HashSet<&'static str> {
-    let tokens = normalized_ascii_tokens(query);
-    let mut hints = HashSet::new();
-    if tokens.contains("rtos") || tokens.contains("freertos") {
-        hints.insert("rtos");
+fn explicit_scope_tokens(text: &str) -> HashSet<String> {
+    const COMPONENT_STOPWORDS: &[&str] = &[
+        "api",
+        "dev",
+        "developer",
+        "doc",
+        "guide",
+        "manual",
+        "platform",
+        "reference",
+        "source",
+    ];
+    let mut tokens = HashSet::new();
+    let stopwords = COMPONENT_STOPWORDS.iter().copied().collect::<HashSet<_>>();
+    for raw in
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')))
+    {
+        let raw = raw.trim_matches(|c| matches!(c, '-' | '_' | '/' | '.'));
+        if raw.len() < 2 {
+            continue;
+        }
+        let lower = raw.to_ascii_lowercase();
+        let has_separator = raw.chars().any(|c| matches!(c, '-' | '_' | '/' | '.'));
+        let has_digit = raw.chars().any(|c| c.is_ascii_digit());
+        let is_acronym = raw.chars().any(|c| c.is_ascii_alphabetic())
+            && raw
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .all(|c| c.is_ascii_uppercase())
+            && raw.len() <= 12;
+
+        if has_digit || has_separator || is_acronym {
+            tokens.insert(lower.clone());
+        }
+
+        if has_separator {
+            for part in lower.split(|c| matches!(c, '-' | '_' | '/' | '.')) {
+                if part.len() >= 2 && !stopwords.contains(part) {
+                    tokens.insert(part.to_string());
+                }
+            }
+        }
     }
-    if tokens.contains("linux") || tokens.contains("tina") {
-        hints.insert("linux");
-    }
-    if tokens.contains("android") {
-        hints.insert("android");
-    }
-    if tokens.contains("windows") || tokens.contains("win") {
-        hints.insert("windows");
-    }
-    hints
+    tokens
 }
 
-fn source_platforms(result: &SearchResult) -> HashSet<&'static str> {
-    let source = source_hint_text(result);
-    let tokens = normalized_ascii_tokens(&source);
-    let mut platforms = HashSet::new();
-    if tokens.contains("rtos") || tokens.contains("freertos") {
-        platforms.insert("rtos");
-    }
-    if tokens.contains("linux") || tokens.contains("tina") {
-        platforms.insert("linux");
-    }
-    if tokens.contains("android") {
-        platforms.insert("android");
-    }
-    if tokens.contains("windows") || tokens.contains("win") {
-        platforms.insert("windows");
-    }
-    platforms
+fn platform_hints(query: &str) -> HashSet<String> {
+    explicit_scope_tokens(query)
+}
+
+fn source_platforms(result: &SearchResult) -> HashSet<String> {
+    explicit_scope_tokens(&source_hint_text(result))
 }
 
 pub fn apply_platform_hint_adjustment(query: &str, results: &mut [SearchResult]) {
@@ -641,15 +500,7 @@ fn retrieval_meta_instruction_segment(segment: &str) -> bool {
     let folded = segment.to_ascii_lowercase();
     let source_control = contains_any_str(
         segment,
-        &[
-            "知识库",
-            "本地知识",
-            "引用",
-            "来源",
-            "证据",
-            "文档",
-            "资料",
-        ],
+        &["知识库", "本地知识", "引用", "来源", "证据", "文档", "资料"],
     ) || contains_any_str(
         &folded,
         &[
@@ -933,6 +784,50 @@ pub struct SearchContext<'a> {
     pub reranker: Option<Arc<dyn RerankProvider>>,
     pub store: &'a Store,
     pub dek: &'a crate::crypto::Key32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchOutcome {
+    pub results: Vec<SearchResult>,
+    pub diagnostics: SearchDiagnostics,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchDiagnostics {
+    pub bm25_results: usize,
+    pub vector_results: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_skipped_reason: Option<String>,
+    pub embedding: VectorEmbeddingCompatibility,
+    pub reranker: RerankerSearchDiagnostics,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RerankerSearchDiagnostics {
+    pub requested: bool,
+    pub available: bool,
+    pub used: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    pub candidate_count: usize,
+    pub score_count: usize,
+    pub actionable: bool,
+    pub changed_top_result: bool,
+}
+
+impl Default for RerankerSearchDiagnostics {
+    fn default() -> Self {
+        Self {
+            requested: false,
+            available: false,
+            used: false,
+            skipped_reason: None,
+            candidate_count: 0,
+            score_count: 0,
+            actionable: false,
+            changed_top_result: false,
+        }
+    }
 }
 
 const CHUNK_KEY_SEP: &str = "\u{1f}";
@@ -1228,7 +1123,10 @@ fn push_ascii_identifier_needles(raw: &str, out: &mut Vec<String>) {
         return;
     }
 
-    let compact: String = lowered.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let compact: String = lowered
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     if compact.len() >= 2 {
         out.push(compact);
     }
@@ -1349,9 +1247,9 @@ fn lexical_excerpt_for_item(
 ///
 /// Vector search returns chunk-level hits. Without this normalization, a long
 /// PDF with thousands of chunks can accumulate many RRF contributions for the
-/// same item and suppress a short but exact source such as a QRH or subsystem
-/// manual. Input is expected to be rank-sorted; the first occurrence is the
-/// best representative for that item.
+/// same item and suppress a short but exact source such as a quick reference or
+/// subsystem manual. Input is expected to be rank-sorted; the first occurrence
+/// is the best representative for that item.
 pub fn dedup_ranked_results(results: Vec<(String, f32)>) -> Vec<(String, f32)> {
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(results.len());
@@ -1444,6 +1342,37 @@ pub fn search_with_context(
     query: &str,
     params: &SearchParams,
 ) -> crate::error::Result<Vec<SearchResult>> {
+    search_with_context_diagnostics(ctx, query, params).map(|outcome| outcome.results)
+}
+
+pub fn search_with_context_diagnostics(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    params: &SearchParams,
+) -> crate::error::Result<SearchOutcome> {
+    let current_embedding_fingerprint = ctx
+        .embedding
+        .as_ref()
+        .map(|embedding| crate::embed::current_embedding_fingerprint(embedding.as_ref()));
+    let embedding = ctx
+        .vectors
+        .map(|vectors| {
+            vectors.embedding_compatibility(current_embedding_fingerprint.as_deref(), true)
+        })
+        .unwrap_or_else(|| VectorEmbeddingCompatibility {
+            usable: false,
+            status: if ctx.embedding.is_some() {
+                "no_vector_index".to_string()
+            } else {
+                "unavailable".to_string()
+            },
+            enforce: true,
+            index_fingerprint: None,
+            current_fingerprint: current_embedding_fingerprint.clone(),
+            stale_vectors: 0,
+        });
+    let mut vector_skipped_reason = None;
+
     // 1. Source metadata + fulltext recall.
     //
     // For source-shaped interactive queries, metadata titles/paths are usually
@@ -1516,12 +1445,31 @@ pub fn search_with_context(
     // 低于阈值的进 RRF 前丢弃，避免噪音污染融合排序。
     let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) = if params.skip_vector {
         log::info!("search stages: vector skipped by SearchParams");
+        vector_skipped_reason = Some("search_params_skip_vector".to_string());
         (vec![], None)
     } else if lexical_fast_path {
         log::info!(
             "search stages: vector skipped by lexical fast path query='{}' fts={}",
             query.chars().take(50).collect::<String>(),
             ft_results.len()
+        );
+        vector_skipped_reason = Some("lexical_fast_path".to_string());
+        (vec![], None)
+    } else if !embedding.usable {
+        log::warn!(
+            "search stages: vector skipped by embedding compatibility status={}",
+            embedding.status
+        );
+        vector_skipped_reason = Some(
+            match embedding.status.as_str() {
+                "mismatch" => "embedding_fingerprint_mismatch",
+                "unknown" => "embedding_fingerprint_unknown",
+                "current_unknown" => "embedding_current_fingerprint_unknown",
+                "no_vector_index" => "no_vector_index",
+                "unavailable" => "embedding_unavailable",
+                _ => "embedding_not_usable",
+            }
+            .to_string(),
         );
         (vec![], None)
     } else {
@@ -1550,9 +1498,15 @@ pub fn search_with_context(
                     };
                     (dedup_ranked_results(filtered), Some(qv))
                 }
-                _ => (vec![], None),
+                _ => {
+                    vector_skipped_reason = Some("embedding_query_failed".to_string());
+                    (vec![], None)
+                }
             },
-            _ => (vec![], None),
+            _ => {
+                vector_skipped_reason = Some("embedding_or_vector_index_missing".to_string());
+                (vec![], None)
+            }
         }
     };
 
@@ -1640,27 +1594,50 @@ pub fn search_with_context(
     // 语言降权（反 cross-lingual 污染）：任何 rerank 方式之后，都按
     // query/doc 语言匹配对 score 做降权，防止大篇幅异语言文档排到前面。
     let query_lang = detect_lang(query);
+    let mut reranker_diag = RerankerSearchDiagnostics {
+        requested: !params.skip_rerank,
+        available: ctx.reranker.is_some(),
+        candidate_count: results.len(),
+        ..Default::default()
+    };
+    reranker_diag.requested = !params.skip_rerank;
+    reranker_diag.available = ctx.reranker.is_some();
 
     if params.skip_rerank {
         log::info!("search stages: reranker skipped by SearchParams");
+        reranker_diag.skipped_reason = Some("search_params_skip_rerank".to_string());
     } else if let Some(reranker) = &ctx.reranker {
         if results.len() >= RERANK_MIN_CANDIDATES {
+            let before_top = results.first().map(|r| r.item_id.clone());
             let docs: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
             match reranker.score(query, &docs) {
                 Ok(scores) => {
+                    reranker_diag.score_count = scores.len();
                     if reranker_scores_are_actionable(&scores) {
                         for (r, s) in results.iter_mut().zip(scores.iter()) {
                             r.score = *s;
                         }
+                        results.sort_by(|a, b| {
+                            b.score
+                                .partial_cmp(&a.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        reranker_diag.used = true;
+                        reranker_diag.actionable = true;
+                        reranker_diag.changed_top_result =
+                            before_top != results.first().map(|r| r.item_id.clone());
                     } else {
+                        reranker_diag.skipped_reason = Some("low_signal_scores".to_string());
                         log::warn!("reranker returned no actionable scores, keeping RRF order");
                     }
                 }
                 Err(e) => {
+                    reranker_diag.skipped_reason = Some("reranker_error".to_string());
                     log::warn!("reranker failed, keeping RRF order: {e}");
                 }
             }
         } else {
+            reranker_diag.skipped_reason = Some("insufficient_candidates".to_string());
             log::info!(
                 "search stages: reranker skipped (candidates={} < {})",
                 results.len(),
@@ -1668,9 +1645,12 @@ pub fn search_with_context(
             );
         }
     } else if results.len() <= RERANK_TOP_K_THRESHOLD {
+        reranker_diag.skipped_reason = Some("reranker_unavailable".to_string());
         if let Some(qvec) = &query_vec {
             if let Some(vecs) = ctx.vectors {
                 rerank(qvec, &mut results, vecs);
+                reranker_diag.used = true;
+                reranker_diag.skipped_reason = Some("vector_similarity_fallback".to_string());
             }
         }
     }
@@ -1700,7 +1680,16 @@ pub fn search_with_context(
     let final_k = params.top_k.max(1);
     results.truncate(final_k);
     log::info!("search stages: returned={}", results.len());
-    Ok(results)
+    Ok(SearchOutcome {
+        results,
+        diagnostics: SearchDiagnostics {
+            bm25_results: ft_results.len(),
+            vector_results: vec_results.len(),
+            vector_skipped_reason,
+            embedding,
+            reranker: reranker_diag,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -1924,17 +1913,17 @@ mod tests {
 
     #[test]
     fn merge_ranked_results_prefers_metadata_and_dedups() {
-        let primary = vec![("qrh".to_string(), 0.8), ("fcom".to_string(), 0.7)];
-        let secondary = vec![("fcom".to_string(), 0.4), ("sop".to_string(), 0.3)];
+        let primary = vec![("guide".to_string(), 0.8), ("manual".to_string(), 0.7)];
+        let secondary = vec![("manual".to_string(), 0.4), ("runbook".to_string(), 0.3)];
 
         let merged = merge_ranked_results(primary, secondary, 3);
 
         assert_eq!(
             merged,
             vec![
-                ("qrh".to_string(), 0.8),
-                ("fcom".to_string(), 0.7),
-                ("sop".to_string(), 0.3)
+                ("guide".to_string(), 0.8),
+                ("manual".to_string(), 0.7),
+                ("runbook".to_string(), 0.3)
             ]
         );
     }
@@ -1944,13 +1933,16 @@ mod tests {
         let ranked = vec![
             ("big-pdf".to_string(), 0.91),
             ("big-pdf".to_string(), 0.90),
-            ("qrh".to_string(), 0.84),
+            ("quick-guide".to_string(), 0.84),
             ("big-pdf".to_string(), 0.83),
         ];
         let deduped = dedup_ranked_results(ranked);
         assert_eq!(
             deduped,
-            vec![("big-pdf".to_string(), 0.91), ("qrh".to_string(), 0.84)]
+            vec![
+                ("big-pdf".to_string(), 0.91),
+                ("quick-guide".to_string(), 0.84)
+            ]
         );
     }
 
@@ -1958,227 +1950,211 @@ mod tests {
     fn source_hint_boost_promotes_explicit_manual_source() {
         let mut results = vec![
             SearchResult {
-                item_id: "fcom".into(),
+                item_id: "bulk-manual".into(),
                 score: 0.50,
-                title: "320FCOM3 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                title: "controller family reference manual".into(),
+                source_path: Some("file:///docs/controller/reference-manual.pdf".into()),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "qrh".into(),
+                item_id: "quick-guide".into(),
                 score: 0.43,
-                title: "QRH320 - QUICK REFERENCE".into(),
-                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                title: "controller quick reference guide".into(),
+                source_path: Some("file:///docs/controller/quick-reference-guide.pdf".into()),
                 ..Default::default()
             },
         ];
 
-        apply_source_hint_boost(
-            "A320 QRH quick reference handbook abnormal emergency checklist",
-            &mut results,
-        );
+        apply_source_hint_boost("controller quick reference guide source", &mut results);
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        assert_eq!(results[0].item_id, "qrh");
+        assert_eq!(results[0].item_id, "quick-guide");
     }
 
     #[test]
-    fn source_hint_boost_promotes_aircraft_specific_qrh() {
+    fn source_hint_boost_promotes_product_specific_quick_reference() {
         let mut results = vec![
             SearchResult {
-                item_id: "a220-qhr".into(),
+                item_id: "product-beta-guide".into(),
                 score: 0.54,
-                title: "a220-300-cs300-bd500-1a11-quick-reference-handbook".into(),
-                source_path: Some("file:///Airbus/A220/QRH/a220-300-cs300-bd500-1a11-quick-reference-handbook.pdf".into()),
-                ..Default::default()
-            },
-            SearchResult {
-                item_id: "a320-qhr".into(),
-                score: 0.42,
-                title: "QRH320 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
-                ..Default::default()
-            },
-        ];
-
-        apply_source_hint_boost(
-            "A320 QRH quick reference handbook abnormal emergency checklist",
-            &mut results,
-        );
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-
-        assert_eq!(results[0].item_id, "a320-qhr");
-    }
-
-    #[test]
-    fn source_hint_boost_promotes_aircraft_specific_fcom() {
-        let mut results = vec![
-            SearchResult {
-                item_id: "a320-fcom".into(),
-                score: 0.52,
-                title: "320FCOM3 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
-                ..Default::default()
-            },
-            SearchResult {
-                item_id: "b737max-fcom".into(),
-                score: 0.46,
-                title: "B737 MAX Flight Crew Operations Manual".into(),
-                source_path: Some("file:///Boeing/737MAX/737MAX-FCOM.pdf".into()),
-                ..Default::default()
-            },
-        ];
-
-        apply_source_hint_boost(
-            "Boeing 737 MAX FCOM flight crew operating manual source",
-            &mut results,
-        );
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-
-        assert_eq!(results[0].item_id, "b737max-fcom");
-    }
-
-    #[test]
-    fn source_hint_boost_promotes_boeing_numeric_model_from_path() {
-        let mut results = vec![
-            SearchResult {
-                item_id: "a320-fcom".into(),
-                score: 0.54,
-                title: "320FCOM1 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/FCOM/320FCOM1.pdf".into()),
-                ..Default::default()
-            },
-            SearchResult {
-                item_id: "b787-fcom".into(),
-                score: 0.42,
-                title: "787-tbc_om_tbc_c_100215_v1v2_b2p-c".into(),
+                title: "product-beta quick reference handbook".into(),
                 source_path: Some(
-                    "file:///Boeing/B787/FCOM/787-tbc_om_tbc_c_100215_v1v2_b2p-c.pdf".into(),
+                    "file:///products/product-beta/quick-reference-handbook.pdf".into(),
+                ),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "product-alpha-guide".into(),
+                score: 0.42,
+                title: "product-alpha quick reference guide".into(),
+                source_path: Some(
+                    "file:///products/product-alpha/quick-reference-guide.pdf".into(),
                 ),
                 ..Default::default()
             },
         ];
 
-        apply_source_hint_boost(
-            "Boeing 787 FCOM flight crew operations manual",
-            &mut results,
-        );
+        apply_source_hint_boost("product-alpha quick reference guide", &mut results);
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        assert_eq!(results[0].item_id, "b787-fcom");
+        assert_eq!(results[0].item_id, "product-alpha-guide");
     }
 
     #[test]
-    fn source_hint_boost_promotes_separated_system_manual_over_bulk_fcom() {
+    fn source_hint_boost_promotes_requested_product_family() {
         let mut results = vec![
             SearchResult {
-                item_id: "a320-fcom".into(),
+                item_id: "product-alpha-manual".into(),
+                score: 0.52,
+                title: "product-alpha operating manual".into(),
+                source_path: Some("file:///products/product-alpha/operating-manual.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "product-beta-manual".into(),
+                score: 0.46,
+                title: "product-beta operating manual".into(),
+                source_path: Some("file:///products/product-beta/operating-manual.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost("product-beta operating manual source", &mut results);
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "product-beta-manual");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_numeric_identifier_from_path() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "controller-100".into(),
+                score: 0.54,
+                title: "controller 100 operating manual".into(),
+                source_path: Some("file:///controllers/100/operating-manual.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "controller-200".into(),
+                score: 0.42,
+                title: "controller 200 field operating manual".into(),
+                source_path: Some("file:///controllers/200/field-operating-manual.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost("controller 200 field operating manual", &mut results);
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "controller-200");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_specific_section_manual_over_bulk_manual() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "bulk-manual".into(),
                 score: 0.56,
-                title: "320FCOM3 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                title: "controller complete operating manual".into(),
+                source_path: Some("file:///controllers/complete-operating-manual.pdf".into()),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "a320-flight-controls".into(),
+                item_id: "network-section".into(),
                 score: 0.43,
-                title: "A320 Flight Controls".into(),
-                source_path: Some("file:///Airbus/A320/Systems/A320-Flight_Controls.pdf".into()),
-                breadcrumb: vec!["systems".into(), "flight controls".into()],
+                title: "controller network diagnostics".into(),
+                source_path: Some("file:///controllers/sections/network-diagnostics.pdf".into()),
+                breadcrumb: vec!["sections".into(), "network diagnostics".into()],
                 ..Default::default()
             },
         ];
 
         apply_source_hint_boost(
-            "A320 flight controls system separated manual distinct from FCOM",
+            "controller network diagnostics section manual",
             &mut results,
         );
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        assert_eq!(results[0].item_id, "a320-flight-controls");
+        assert_eq!(results[0].item_id, "network-section");
     }
 
     #[test]
-    fn source_hint_boost_promotes_sop_takeoff_sources() {
+    fn source_hint_boost_promotes_procedure_sources() {
         let mut results = vec![
             SearchResult {
-                item_id: "a320-qhr".into(),
+                item_id: "quick-guide".into(),
                 score: 0.50,
-                title: "QRH320 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                title: "controller quick reference".into(),
+                source_path: Some("file:///controllers/quick-reference.pdf".into()),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "a320-sop-takeoff".into(),
+                item_id: "startup-procedure".into(),
                 score: 0.36,
-                title: "4_A320-Takeoff".into(),
-                source_path: Some("file:///Airbus/A320/SOP/4_A320-Takeoff.pdf".into()),
+                title: "controller startup procedure".into(),
+                source_path: Some("file:///controllers/procedures/startup-procedure.pdf".into()),
                 ..Default::default()
             },
         ];
 
-        apply_source_hint_boost(
-            "A320 SOP takeoff standard operating procedure",
-            &mut results,
-        );
+        apply_source_hint_boost("controller startup procedure", &mut results);
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        assert_eq!(results[0].item_id, "a320-sop-takeoff");
+        assert_eq!(results[0].item_id, "startup-procedure");
     }
 
     #[test]
-    fn source_hint_boost_penalizes_explicitly_excluded_sources() {
+    fn source_hint_boost_keeps_requested_source_ahead_of_excluded_noise() {
         let mut results = vec![
             SearchResult {
-                item_id: "boeing-qhr".into(),
+                item_id: "noise-guide".into(),
                 score: 0.58,
-                title: "747-8_QRH - Quick Action".into(),
-                source_path: Some("file:///Boeing/747/QRH/747-8_QRH.pdf".into()),
+                title: "legacy quick guide".into(),
+                source_path: Some("file:///legacy/quick-guide.pdf".into()),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "a320-qhr".into(),
+                item_id: "target-guide".into(),
                 score: 0.40,
-                title: "QRH320 - Flight Crew Operating Manual".into(),
-                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                title: "target quick guide".into(),
+                source_path: Some("file:///target/quick-guide.pdf".into()),
                 ..Default::default()
             },
         ];
 
         apply_source_hint_boost(
-            "继续，只基于上一轮引用的 A320 QRH 来源；不要引入 A330、A340 或 Boeing。",
+            "只基于 target quick guide 来源；不要引入 legacy。",
             &mut results,
         );
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        assert_eq!(results[0].item_id, "a320-qhr");
+        assert_eq!(results[0].item_id, "target-guide");
     }
 
     #[test]
     fn source_hint_boost_promotes_abbreviation_sources() {
         let mut results = vec![
             SearchResult {
-                item_id: "generic-qhr".into(),
+                item_id: "generic-guide".into(),
                 score: 0.49,
-                title: "QRH320 - QUICK REFERENCE".into(),
-                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                title: "controller quick reference".into(),
+                source_path: Some("file:///controllers/quick-reference.pdf".into()),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "abbreviations".into(),
+                item_id: "symbol-glossary".into(),
                 score: 0.38,
-                title: "Airplane Manual Abbreviations".into(),
-                source_path: Some("file:///Reference/Abbreviations Manuals.md".into()),
+                title: "controller symbol abbreviations glossary".into(),
+                source_path: Some("file:///reference/symbol-abbreviations-glossary.md".into()),
                 ..Default::default()
             },
         ];
 
-        apply_source_hint_boost(
-            "airplane manual abbreviations ATA FCOM QRH AMM",
-            &mut results,
-        );
+        apply_source_hint_boost("controller symbol abbreviations glossary", &mut results);
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        assert_eq!(results[0].item_id, "abbreviations");
+        assert_eq!(results[0].item_id, "symbol-glossary");
     }
 
     /// Regression: top_k>20 previously panicked at `intermediate_k = (top_k*2).clamp(top_k, 40)`
@@ -2516,6 +2492,130 @@ mod tests {
     }
 
     #[test]
+    fn search_outcome_reports_embedding_mismatch_and_skips_vector_hits() {
+        use crate::embed::{current_embedding_fingerprint, MockEmbeddingProvider};
+        use crate::store::Store;
+        use crate::vectors::{VectorIndex, VectorMeta};
+        use std::sync::Arc;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        store
+            .insert_item(
+                &dek,
+                "vector only item",
+                "body without the requested synthetic token",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let provider = Arc::new(MockEmbeddingProvider::new(4));
+        let active_fingerprint = current_embedding_fingerprint(provider.as_ref());
+        let mut vectors = VectorIndex::new_with_fingerprint(4, "provider=mock;model=old;dim=4")
+            .expect("vector index");
+        vectors
+            .add(
+                &[1.0, 0.0, 0.0, 0.0],
+                VectorMeta {
+                    item_id: "vector only item".into(),
+                    chunk_idx: 0,
+                    level: 2,
+                    section_idx: 0,
+                },
+            )
+            .unwrap();
+
+        assert_ne!(
+            vectors.embedding_fingerprint(),
+            Some(active_fingerprint.as_str())
+        );
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: Some(&vectors),
+            embedding: Some(provider),
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let outcome =
+            search_with_context_diagnostics(&ctx, "zzzznotintext", &SearchParams::with_defaults(5))
+                .expect("search outcome");
+
+        assert!(outcome.results.is_empty());
+        assert_eq!(outcome.diagnostics.embedding.status, "mismatch");
+        assert!(!outcome.diagnostics.embedding.usable);
+        assert_eq!(outcome.diagnostics.embedding.stale_vectors, 1);
+        assert_eq!(outcome.diagnostics.vector_results, 0);
+        assert_eq!(
+            outcome.diagnostics.vector_skipped_reason.as_deref(),
+            Some("embedding_fingerprint_mismatch")
+        );
+    }
+
+    #[test]
+    fn search_outcome_reports_low_signal_reranker_fallback() {
+        use crate::index::FulltextIndex;
+        use crate::infer::MockRerankProvider;
+        use crate::store::Store;
+        use std::sync::Arc;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let ft = FulltextIndex::open_memory().unwrap();
+        for idx in 0..5 {
+            let title = format!("generic doc {idx}");
+            let content = format!("alpha shared retrieval marker {idx}");
+            let item_id = store
+                .insert_item(&dek, &title, &content, None, "note", None, None)
+                .unwrap();
+            ft.add_document(&item_id, &title, &content, "note").unwrap();
+        }
+
+        let base_ctx = SearchContext {
+            fulltext: Some(&ft),
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+        let params = SearchParams {
+            skip_vector: true,
+            ..SearchParams::with_defaults(5)
+        };
+        let base = search_with_context_diagnostics(&base_ctx, "alpha", &params)
+            .expect("base search outcome");
+        let base_top = base.results.first().map(|result| result.item_id.clone());
+
+        let rerank_ctx = SearchContext {
+            reranker: Some(Arc::new(MockRerankProvider::new(vec![0.0]))),
+            ..base_ctx
+        };
+        let outcome = search_with_context_diagnostics(&rerank_ctx, "alpha", &params)
+            .expect("rerank search outcome");
+
+        assert_eq!(
+            outcome.results.first().map(|result| result.item_id.clone()),
+            base_top
+        );
+        assert!(outcome.diagnostics.reranker.requested);
+        assert!(outcome.diagnostics.reranker.available);
+        assert!(!outcome.diagnostics.reranker.used);
+        assert_eq!(outcome.diagnostics.reranker.candidate_count, 5);
+        assert_eq!(outcome.diagnostics.reranker.score_count, 5);
+        assert!(!outcome.diagnostics.reranker.actionable);
+        assert_eq!(
+            outcome.diagnostics.reranker.skipped_reason.as_deref(),
+            Some("low_signal_scores")
+        );
+    }
+
+    #[test]
     fn search_with_context_exact_substring_fallback_for_code_like_queries() {
         use crate::store::Store;
 
@@ -2556,10 +2656,18 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
         let cover = "cover page and table of contents\n".repeat(120);
-        let evidence = "The RTOS DMA flow calls hal_dma_chan_request before hal_dma_start and releases resources afterwards.";
-        let content = format!("{cover}\n## DMA API\n\n{evidence}\n");
+        let evidence = "The Platform-A control flow calls ctrl_channel_open before ctrl_transfer_start and releases resources afterwards.";
+        let content = format!("{cover}\n## Control API\n\n{evidence}\n");
         let item_id = store
-            .insert_item(&dek, "rtos dmac manual", &content, None, "file", None, None)
+            .insert_item(
+                &dek,
+                "platform control manual",
+                &content,
+                None,
+                "file",
+                None,
+                None,
+            )
             .unwrap();
 
         let ctx = SearchContext {
@@ -2572,11 +2680,11 @@ mod tests {
         };
 
         let params = SearchParams::with_defaults(5);
-        let results = search_with_context(&ctx, "hal_dma_chan_request", &params).unwrap();
+        let results = search_with_context(&ctx, "ctrl_channel_open", &params).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item_id, item_id);
-        assert!(results[0].content.contains("hal_dma_chan_request"));
-        assert!(results[0].content.contains("hal_dma_start"));
+        assert!(results[0].content.contains("ctrl_channel_open"));
+        assert!(results[0].content.contains("ctrl_transfer_start"));
         assert!(
             !results[0].content.starts_with("cover page"),
             "lexical fallback should not inject the beginning of a long document"
@@ -2585,25 +2693,29 @@ mod tests {
     }
 
     #[test]
-    fn query_coverage_boost_prefers_specific_identifier_over_chip_only_hit() {
+    fn query_coverage_boost_prefers_specific_identifier_over_product_only_hit() {
         let mut results = vec![
             SearchResult {
-                item_id: "chip-faq".to_string(),
+                item_id: "product-faq".to_string(),
                 score: 0.30,
-                title: "V821 FAQ".to_string(),
-                content: "V821 RTOS console and board configuration notes".to_string(),
+                title: "ZX900 FAQ".to_string(),
+                content: "ZX900 Platform-A console and board configuration notes".to_string(),
                 ..Default::default()
             },
             SearchResult {
                 item_id: "api-manual".to_string(),
                 score: 0.10,
-                title: "RTOS DMAC developer guide".to_string(),
-                content: "DMA flow uses hal_dma_chan_request and then hal_dma_start.".to_string(),
+                title: "Platform-A control developer guide".to_string(),
+                content: "Control flow uses ctrl_channel_open and then ctrl_transfer_start."
+                    .to_string(),
                 ..Default::default()
             },
         ];
 
-        apply_query_coverage_boost("V821 RTOS hal_dma_chan_request hal_dma_start", &mut results);
+        apply_query_coverage_boost(
+            "ZX900 Platform-A ctrl_channel_open ctrl_transfer_start",
+            &mut results,
+        );
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
         assert_eq!(results[0].item_id, "api-manual");
     }
@@ -2614,27 +2726,27 @@ mod tests {
             SearchResult {
                 item_id: "platform-memory".to_string(),
                 score: 0.40,
-                title: "V821 RTOS memory guide".to_string(),
-                content: "V821 RTOS reserved memory and kernel boot configuration.".to_string(),
+                title: "ZX900 Platform-A memory guide".to_string(),
+                content: "ZX900 Platform-A reserved memory and boot configuration.".to_string(),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "dma-flow".to_string(),
+                item_id: "control-flow".to_string(),
                 score: 0.20,
-                title: "RTOS DMAC developer guide".to_string(),
+                title: "Platform-A control developer guide".to_string(),
                 content:
-                    "API 说明：hal_dma_chan_request 申请 DMA 通道。hal_dma_start 启动 DMA 传输。"
+                    "API 说明：ctrl_channel_open 申请控制通道。ctrl_transfer_start 启动一次传输。"
                         .to_string(),
                 ..Default::default()
             },
         ];
 
         apply_query_coverage_boost(
-            "V821 RTOS 里申请 DMA 通道并启动一次传输，大概按什么流程做？",
+            "ZX900 Platform-A 里申请控制通道并启动一次传输，大概按什么流程做？",
             &mut results,
         );
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-        assert_eq!(results[0].item_id, "dma-flow");
+        assert_eq!(results[0].item_id, "control-flow");
     }
 
     #[test]
@@ -2646,19 +2758,19 @@ mod tests {
         store
             .insert_item(
                 &dek,
-                "V821 RTOS memory guide",
-                "V821 RTOS reserved memory and kernel boot configuration. DMA is mentioned in a boot optimization note.",
+                "ZX900 Platform-A memory guide",
+                "ZX900 Platform-A reserved memory and boot configuration. Control transfer is mentioned in a boot optimization note.",
                 None,
                 "file",
                 None,
                 None,
             )
             .unwrap();
-        let dma_id = store
+        let control_id = store
             .insert_item(
                 &dek,
-                "RTOS DMAC developer guide",
-                "模块接口说明：hal_dma_chan_request 用于申请 DMA 通道；配置描述符后，调用 hal_dma_start 启动 DMA 传输。",
+                "Platform-A control developer guide",
+                "模块接口说明：ctrl_channel_open 用于申请控制通道；配置描述符后，调用 ctrl_transfer_start 启动一次传输。",
                 None,
                 "file",
                 None,
@@ -2678,13 +2790,13 @@ mod tests {
         let params = SearchParams::with_defaults(5);
         let results = search_with_context(
             &ctx,
-            "V821 RTOS 里申请 DMA 通道并启动一次传输，大概按什么流程做？",
+            "ZX900 Platform-A 里申请控制通道并启动一次传输，大概按什么流程做？",
             &params,
         )
         .unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].item_id, dma_id);
-        assert!(results[0].content.contains("hal_dma_chan_request"));
+        assert_eq!(results[0].item_id, control_id);
+        assert!(results[0].content.contains("ctrl_channel_open"));
     }
 
     #[test]
@@ -2698,9 +2810,9 @@ mod tests {
                 &dek,
                 "Long mixed platform manual",
                 &[
-                    "V821 应用手册提到 RTOS 与 Linux 协同启动。",
+                    "ZX900 应用手册提到 Platform-A 与 Platform-B 协同启动。",
                     &"无关内容。".repeat(300),
-                    "某章节说 DMA 可用于视频缓存。",
+                    "某章节说控制传输可用于视频缓存。",
                     &"背景介绍。".repeat(300),
                     "另一个章节讨论通道资源和一次传输统计，但没有给出接口。",
                 ]
@@ -2711,11 +2823,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let dma_id = store
+        let control_id = store
             .insert_item(
                 &dek,
-                "RTOS DMAC developer guide",
-                "模块接口说明：hal_dma_chan_request 用于申请 DMA 通道；配置描述符后，调用 hal_dma_start 启动 DMA 传输。",
+                "Platform-A control developer guide",
+                "模块接口说明：ctrl_channel_open 用于申请控制通道；配置描述符后，调用 ctrl_transfer_start 启动一次传输。",
                 None,
                 "file",
                 None,
@@ -2735,36 +2847,36 @@ mod tests {
         let params = SearchParams::with_defaults(5);
         let results = search_with_context(
             &ctx,
-            "V821 RTOS 申请 DMA 通道然后启动一次传输，流程怎么走？",
+            "ZX900 Platform-A 申请控制通道然后启动一次传输，流程怎么走？",
             &params,
         )
         .unwrap();
         assert!(!results.is_empty());
-        assert_eq!(results[0].item_id, dma_id);
+        assert_eq!(results[0].item_id, control_id);
     }
 
     #[test]
-    fn platform_hint_adjustment_prefers_explicit_rtos_source_over_linux_source() {
+    fn platform_hint_adjustment_prefers_explicit_platform_source() {
         let mut results = vec![
             SearchResult {
-                item_id: "linux-dmac".to_string(),
+                item_id: "platform-b-control".to_string(),
                 score: 0.50,
-                title: "Linux_DMAC_开发指南 - Linux DMAC".to_string(),
-                content: "dma_request_channel 申请 DMA 通道".to_string(),
+                title: "Platform-B 控制开发指南".to_string(),
+                content: "ctrl_request_handle 申请控制通道".to_string(),
                 ..Default::default()
             },
             SearchResult {
-                item_id: "rtos-dmac".to_string(),
+                item_id: "platform-a-control".to_string(),
                 score: 0.40,
-                title: "RTOS_DMAC_开发指南 - RTOS DMAC".to_string(),
-                content: "hal_dma_chan_request 申请 DMA 通道".to_string(),
+                title: "Platform-A 控制开发指南".to_string(),
+                content: "ctrl_channel_open 申请控制通道".to_string(),
                 ..Default::default()
             },
         ];
-        apply_source_hint_boost("RTOS 申请 DMA 通道", &mut results);
-        apply_platform_hint_adjustment("RTOS 申请 DMA 通道", &mut results);
+        apply_source_hint_boost("Platform-A 申请控制通道", &mut results);
+        apply_platform_hint_adjustment("Platform-A 申请控制通道", &mut results);
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-        assert_eq!(results[0].item_id, "rtos-dmac");
+        assert_eq!(results[0].item_id, "platform-a-control");
     }
 
     #[test]
@@ -2811,6 +2923,9 @@ mod tests {
         let embedding = Arc::new(CountingEmbeddingProvider {
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
+        vectors.set_embedding_fingerprint(Some(crate::embed::current_embedding_fingerprint(
+            embedding.as_ref(),
+        )));
         let ctx = SearchContext {
             fulltext: None,
             vectors: Some(&vectors),
@@ -3160,10 +3275,7 @@ mod retrieval_query_tests {
     fn retrieval_semantic_query_strips_trailing_answer_control_sentence() {
         let query = "如何排查设备连接失败？请只基于知识库证据回答。";
 
-        assert_eq!(
-            retrieval_semantic_query(query),
-            "如何排查设备连接失败？"
-        );
+        assert_eq!(retrieval_semantic_query(query), "如何排查设备连接失败？");
     }
 
     #[test]

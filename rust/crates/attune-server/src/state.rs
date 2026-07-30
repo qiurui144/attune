@@ -1115,11 +1115,16 @@ impl AppState {
             ),
         ) as Arc<dyn attune_core::infer::RerankProvider>;
 
+        let vector_fingerprint =
+            attune_core::embed::current_embedding_fingerprint(provider.as_ref());
         let vectors = if dims == 0 {
             None
         } else {
             match VectorIndex::new(dims) {
-                Ok(index) => Some(index),
+                Ok(mut index) => {
+                    index.set_embedding_fingerprint(Some(vector_fingerprint.clone()));
+                    Some(index)
+                }
                 Err(error) => {
                     tracing::warn!(
                         "Embedding hot-reload: document vector index reset skipped: {error}"
@@ -1264,6 +1269,9 @@ impl AppState {
                 .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
         };
         let vector_dims = embedding_index_dims_from_settings(&settings_json);
+        let current_vector_fingerprint = self
+            .embedding()
+            .map(|embedding| attune_core::embed::current_embedding_fingerprint(embedding.as_ref()));
 
         // Vector index (dims follow the configured embedding provider; bge-m3=1024,
         // local scheduler embedding-int8=512).
@@ -1288,7 +1296,7 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner())
             .dek_db()
             .ok();
-        let vectors = match dek_opt {
+        let mut vectors = match dek_opt {
             Some(dek) if vectors_path.exists() => {
                 match VectorIndex::load_encrypted(&dek, &vectors_path, vector_dims) {
                     Ok(vi) => {
@@ -1308,6 +1316,13 @@ impl AppState {
             }
             _ => VectorIndex::new(vector_dims).ok(),
         };
+        if let (Some(index), Some(fingerprint)) =
+            (vectors.as_mut(), current_vector_fingerprint.as_ref())
+        {
+            if index.embedding_fingerprint().is_none() && index.is_empty() {
+                index.set_embedding_fingerprint(Some(fingerprint.clone()));
+            }
+        }
         if !self.install_runtime_if_current(runtime_generation, || {
             if let Ok(mut guard) = self.vectors.lock() {
                 *guard = vectors;

@@ -92,21 +92,18 @@ fn evidence_pack_combines_api_procedure_and_troubleshooting_from_same_source() {
 
     assert_eq!(pack.primary_source_id, "doc-a");
     assert_eq!(pack.source_title, "Manual A");
-    assert!(
-        pack.nodes
-            .iter()
-            .any(|node| node.node_kind == "ApiReference")
-    );
-    assert!(
-        pack.nodes
-            .iter()
-            .any(|node| node.node_kind == "ProcedureStep")
-    );
-    assert!(
-        pack.nodes
-            .iter()
-            .any(|node| node.node_kind == "Troubleshooting")
-    );
+    assert!(pack
+        .nodes
+        .iter()
+        .any(|node| node.node_kind == "ApiReference"));
+    assert!(pack
+        .nodes
+        .iter()
+        .any(|node| node.node_kind == "ProcedureStep"));
+    assert!(pack
+        .nodes
+        .iter()
+        .any(|node| node.node_kind == "Troubleshooting"));
     assert!(pack.diagnostics.missing_needs.is_empty());
 }
 
@@ -173,17 +170,15 @@ fn evidence_pack_for_query_filters_cross_source_noise_before_small_model_prompt(
     );
 
     assert_eq!(pack.primary_source_id, "manual-target");
-    assert!(
-        pack.nodes
-            .iter()
-            .all(|node| node.source_id == "manual-target")
-    );
+    assert!(pack
+        .nodes
+        .iter()
+        .all(|node| node.source_id == "manual-target"));
     assert_eq!(pack.diagnostics.sources_considered, 2);
-    assert!(
-        pack.diagnostics
-            .satisfied_needs
-            .contains(&"Procedure".to_string())
-    );
+    assert!(pack
+        .diagnostics
+        .satisfied_needs
+        .contains(&"Procedure".to_string()));
     assert!(
         pack.diagnostics
             .satisfied_needs
@@ -234,12 +229,11 @@ fn evidence_pack_marks_weak_quality_when_requested_needs_are_missing() {
     );
 
     assert_eq!(pack.diagnostics.quality, "weak");
-    assert!(
-        pack.diagnostics
-            .quality_reasons
-            .iter()
-            .any(|reason| { reason.contains("missing_evidence_needs") })
-    );
+    assert!(pack
+        .diagnostics
+        .quality_reasons
+        .iter()
+        .any(|reason| { reason.contains("missing_evidence_needs") }));
 }
 
 #[test]

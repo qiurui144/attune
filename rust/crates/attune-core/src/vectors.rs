@@ -24,6 +24,17 @@ pub struct VectorIndex {
     meta: HashMap<u64, VectorMeta>,
     next_key: u64,
     dims: usize,
+    embedding_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VectorEmbeddingCompatibility {
+    pub usable: bool,
+    pub status: String,
+    pub enforce: bool,
+    pub index_fingerprint: Option<String>,
+    pub current_fingerprint: Option<String>,
+    pub stale_vectors: usize,
 }
 
 impl VectorIndex {
@@ -56,7 +67,60 @@ impl VectorIndex {
             meta: HashMap::new(),
             next_key: 0,
             dims,
+            embedding_fingerprint: None,
         })
+    }
+
+    pub fn new_with_fingerprint(dims: usize, fingerprint: impl Into<String>) -> Result<Self> {
+        let mut index = Self::new(dims)?;
+        index.set_embedding_fingerprint(Some(fingerprint));
+        Ok(index)
+    }
+
+    pub fn set_embedding_fingerprint(&mut self, fingerprint: Option<impl Into<String>>) {
+        self.embedding_fingerprint = fingerprint.and_then(|value| {
+            let value = value.into();
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+    }
+
+    pub fn embedding_fingerprint(&self) -> Option<&str> {
+        self.embedding_fingerprint.as_deref()
+    }
+
+    pub fn embedding_compatibility(
+        &self,
+        current_fingerprint: Option<&str>,
+        enforce: bool,
+    ) -> VectorEmbeddingCompatibility {
+        let current_fingerprint = current_fingerprint.and_then(non_empty_string);
+        let index_fingerprint = self
+            .embedding_fingerprint
+            .as_deref()
+            .and_then(non_empty_string);
+        let status = match (index_fingerprint.as_deref(), current_fingerprint.as_deref()) {
+            (Some(index), Some(current)) if index == current => "match",
+            (Some(_), Some(_)) => "mismatch",
+            (None, Some(_)) => "unknown",
+            (Some(_), None) => "current_unknown",
+            (None, None) => "unknown",
+        }
+        .to_string();
+        let compatible = status == "match" || !enforce || self.is_empty();
+        let stale_vectors = if compatible { 0 } else { self.len() };
+        VectorEmbeddingCompatibility {
+            usable: compatible,
+            status,
+            enforce,
+            index_fingerprint,
+            current_fingerprint,
+            stale_vectors,
+        }
     }
 
     /// 添加向量
@@ -213,6 +277,12 @@ impl VectorIndex {
         // 保存 next_key
         let key_path = path.with_extension("nextkey");
         std::fs::write(&key_path, self.next_key.to_le_bytes())?;
+        let fingerprint_path = path.with_extension("fingerprint");
+        if let Some(fingerprint) = &self.embedding_fingerprint {
+            std::fs::write(&fingerprint_path, fingerprint)?;
+        } else if fingerprint_path.exists() {
+            std::fs::remove_file(&fingerprint_path)?;
+        }
         Ok(())
     }
 
@@ -252,12 +322,16 @@ impl VectorIndex {
         } else {
             meta.len() as u64
         };
+        let embedding_fingerprint = std::fs::read_to_string(path.with_extension("fingerprint"))
+            .ok()
+            .and_then(|value| non_empty_string(&value));
 
         Ok(Self {
             index,
             meta,
             next_key,
             dims,
+            embedding_fingerprint,
         })
     }
 
@@ -281,6 +355,8 @@ impl VectorIndex {
         let meta_bytes = std::fs::read(&meta_path).unwrap_or_default();
         let key_path = tmp_path.with_extension("nextkey");
         let key_bytes = std::fs::read(&key_path).unwrap_or_default();
+        let fingerprint_path = tmp_path.with_extension("fingerprint");
+        let fingerprint_bytes = std::fs::read(&fingerprint_path).unwrap_or_default();
 
         let mut packed = Vec::new();
         packed.extend_from_slice(&(main_bytes.len() as u64).to_le_bytes());
@@ -289,6 +365,8 @@ impl VectorIndex {
         packed.extend_from_slice(&meta_bytes);
         packed.extend_from_slice(&(key_bytes.len() as u64).to_le_bytes());
         packed.extend_from_slice(&key_bytes);
+        packed.extend_from_slice(&(fingerprint_bytes.len() as u64).to_le_bytes());
+        packed.extend_from_slice(&fingerprint_bytes);
 
         crate::crypto::save_encrypted_file(key, target, &packed)?;
         Ok(())
@@ -340,6 +418,22 @@ impl VectorIndex {
             return Err(VaultError::Crypto("vectors file truncated".into()));
         }
         let key_bytes = &bytes[offset..offset + key_len];
+        offset += key_len;
+
+        let fingerprint_bytes = if bytes.len() >= offset + 8 {
+            let fingerprint_len = u64::from_le_bytes(
+                bytes[offset..offset + 8]
+                    .try_into()
+                    .expect("8-byte slice (range fixed)"),
+            ) as usize;
+            offset += 8;
+            if bytes.len() < offset + fingerprint_len {
+                return Err(VaultError::Crypto("vectors file truncated".into()));
+            }
+            &bytes[offset..offset + fingerprint_len]
+        } else {
+            &[]
+        };
 
         let tmp = tempfile::TempDir::new()?;
         let tmp_main = tmp.path().join("vectors.tmp");
@@ -350,8 +444,20 @@ impl VectorIndex {
         if !key_bytes.is_empty() {
             std::fs::write(tmp_main.with_extension("nextkey"), key_bytes)?;
         }
+        if !fingerprint_bytes.is_empty() {
+            std::fs::write(tmp_main.with_extension("fingerprint"), fingerprint_bytes)?;
+        }
 
         Self::load(&tmp_main, dims)
+    }
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -490,6 +596,37 @@ mod tests {
 
         let loaded = VectorIndex::load_encrypted(&key, &path, 4).unwrap();
         assert_eq!(loaded.len(), 1);
+    }
+
+    #[test]
+    fn vector_index_reports_embedding_fingerprint_mismatch_as_stale() {
+        let mut idx = VectorIndex::new_with_fingerprint(4, "provider=a;model=embed-a;dim=4")
+            .expect("vector index");
+        idx.add(
+            &[1.0, 0.0, 0.0, 0.0],
+            VectorMeta {
+                item_id: "a".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+
+        let compatibility =
+            idx.embedding_compatibility(Some("provider=b;model=embed-b;dim=4"), true);
+
+        assert!(!compatibility.usable);
+        assert_eq!(compatibility.status, "mismatch");
+        assert_eq!(compatibility.stale_vectors, 1);
+        assert_eq!(
+            compatibility.index_fingerprint.as_deref(),
+            Some("provider=a;model=embed-a;dim=4")
+        );
+        assert_eq!(
+            compatibility.current_fingerprint.as_deref(),
+            Some("provider=b;model=embed-b;dim=4")
+        );
     }
 
     #[test]

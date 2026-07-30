@@ -224,6 +224,11 @@ pub fn embed_and_index_batch(
     }
     let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
     let (embeddings, _usage) = embedding.embed(&texts)?;
+    if vectors.embedding_fingerprint().is_none() && vectors.is_empty() {
+        vectors.set_embedding_fingerprint(Some(crate::embed::current_embedding_fingerprint(
+            embedding,
+        )));
+    }
     index_embedding_results(store, vectors, fulltext, tasks, &embeddings)
 }
 

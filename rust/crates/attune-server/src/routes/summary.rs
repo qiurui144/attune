@@ -118,9 +118,9 @@ fn evidence_for_doc_with_budget(
         truncate_chars(best_line, 260)
     } else {
         first_nonempty_lines(&doc.content, 1)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| truncate_chars(&doc.title, 120))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| truncate_chars(&doc.title, 120))
     };
     match max_tokens {
         Some(max_tokens) => truncate_to_token_budget(&evidence, max_tokens, model),
@@ -153,15 +153,20 @@ fn summary_profile_for_intent<'a>(
     intent: &str,
 ) -> Option<&'a attune_core::plugin_loader::RagProfileSpec> {
     registry.plugins().find_map(|plugin| {
-        plugin
-            .manifest
-            .rag_profiles
-            .iter()
-            .find(|profile| profile.intents.iter().any(|profile_intent| profile_intent == intent))
+        plugin.manifest.rag_profiles.iter().find(|profile| {
+            profile
+                .intents
+                .iter()
+                .any(|profile_intent| profile_intent == intent)
+        })
     })
 }
 
-fn summary_grounding_confidence(scenario: &str, document_count: usize, citation_count: usize) -> f32 {
+fn summary_grounding_confidence(
+    scenario: &str,
+    document_count: usize,
+    citation_count: usize,
+) -> f32 {
     if document_count == 0 || citation_count == 0 {
         return 0.0;
     }
@@ -211,7 +216,8 @@ fn build_summary_workflow_response_with_profile(
         .model
         .as_deref()
         .unwrap_or("attune-summary-workflow");
-    let max_evidence_tokens = profile.and_then(|profile| profile.workflow.evidence.max_evidence_tokens);
+    let max_evidence_tokens =
+        profile.and_then(|profile| profile.workflow.evidence.max_evidence_tokens);
     let include_breadcrumbs = profile
         .and_then(|profile| profile.workflow.evidence.include_breadcrumbs)
         .unwrap_or(true);
@@ -626,8 +632,9 @@ mod tests {
             id: "doc-1".to_string(),
             title: "接口说明".to_string(),
             source_type: "pdf".to_string(),
-            content: "接口差异涉及调用条件、参数约束、返回值语义和错误处理流程，需要结合原文逐条确认。"
-                .to_string(),
+            content:
+                "接口差异涉及调用条件、参数约束、返回值语义和错误处理流程，需要结合原文逐条确认。"
+                    .to_string(),
         }];
         let profile = attune_core::plugin_loader::RagProfileSpec {
             id: "summary-profile".to_string(),

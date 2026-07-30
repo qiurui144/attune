@@ -34,18 +34,26 @@ pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_js
     // Drop vault lock before accessing other mutexes
     drop(vault);
 
-    let has_embedding = state
-        .embedding
-        .lock()
-        .ok()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
-    let has_vectors = state
-        .vectors
-        .lock()
-        .ok()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
+    let embedding = state.embedding.lock().ok().and_then(|g| g.clone());
+    let has_embedding = embedding.is_some();
+    let embedding_fingerprint = embedding
+        .as_ref()
+        .map(|provider| attune_core::embed::current_embedding_fingerprint(provider.as_ref()));
+    let vectors = state.vectors.lock().ok().and_then(|g| {
+        g.as_ref().map(|vectors| {
+            (
+                vectors.len(),
+                vectors.embedding_compatibility(embedding_fingerprint.as_deref(), true),
+            )
+        })
+    });
+    let has_vectors = vectors.is_some();
+    let vector_embedding = vectors.as_ref().map(|(len, compatibility)| {
+        serde_json::json!({
+            "vectors": len,
+            "compatibility": compatibility,
+        })
+    });
     let has_fulltext = state
         .fulltext
         .lock()
@@ -58,7 +66,9 @@ pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_js
         "items": items,
         "pending_embeddings": pending,
         "embedding_available": has_embedding,
+        "embedding_fingerprint": embedding_fingerprint,
         "vector_index": has_vectors,
+        "vector_embedding": vector_embedding,
         "fulltext_index": has_fulltext,
         "version": status_version(),
     })))

@@ -122,6 +122,24 @@ pub(crate) async fn search_with_state_blocking(
     search_params: SearchParams,
     best_effort_fulltext_when_vector_skipped: bool,
 ) -> Result<Vec<SearchResult>, String> {
+    search_with_state_outcome_blocking(
+        state,
+        dek,
+        query,
+        search_params,
+        best_effort_fulltext_when_vector_skipped,
+    )
+    .await
+    .map(|outcome| outcome.results)
+}
+
+pub(crate) async fn search_with_state_outcome_blocking(
+    state: SharedState,
+    dek: Key32,
+    query: String,
+    search_params: SearchParams,
+    best_effort_fulltext_when_vector_skipped: bool,
+) -> Result<attune_core::search::SearchOutcome, String> {
     tokio::task::spawn_blocking(move || {
         let reranker = state
             .reranker
@@ -153,7 +171,7 @@ pub(crate) async fn search_with_state_blocking(
             store: vault_guard.store(),
             dek: &dek,
         };
-        attune_core::search::search_with_context(&ctx, &query, &search_params)
+        attune_core::search::search_with_context_diagnostics(&ctx, &query, &search_params)
             .map_err(|e| e.to_string())
     })
     .await
@@ -367,17 +385,24 @@ pub async fn search_relevant(
         })?
     };
 
-    let mut results: Vec<SearchResult> =
-        search_with_state_blocking(state.clone(), dek, effective_query, search_params, false)
-            .await
-            .map_err(|e| err_500(&e))?;
+    let mut outcome = search_with_state_outcome_blocking(
+        state.clone(),
+        dek,
+        effective_query,
+        search_params,
+        false,
+    )
+    .await
+    .map_err(|e| err_500(&e))?;
 
     // Apply injection budget
-    allocate_budget(&mut results, budget);
+    allocate_budget(&mut outcome.results, budget);
+    let total = outcome.results.len();
 
     Ok(Json(serde_json::json!({
-        "results": results,
-        "total": results.len(),
+        "results": outcome.results,
+        "total": total,
+        "diagnostics": outcome.diagnostics,
         "retrieval_plan": crate::retrieval_policy::retrieval_plan_trace(retrieval_plan.as_ref()),
     })))
 }
@@ -412,16 +437,16 @@ mod tests {
     fn hash_search_cache_key_includes_effective_query_and_params() {
         let mut default_params = SearchParams::with_defaults(10);
         let (base, base_material) =
-            hash_search_cache_key("dma 怎么申请", "dma 怎么申请", &default_params);
+            hash_search_cache_key("控制通道怎么申请", "控制通道怎么申请", &default_params);
 
         default_params.top_k = 20;
         let (different_top_k, _) =
-            hash_search_cache_key("dma 怎么申请", "dma 怎么申请", &default_params);
+            hash_search_cache_key("控制通道怎么申请", "控制通道怎么申请", &default_params);
         assert_ne!(base, different_top_k);
 
         let (different_effective, different_material) = hash_search_cache_key(
-            "dma 怎么申请",
-            "hal_dma_chan_request",
+            "控制通道怎么申请",
+            "ctrl_channel_open",
             &SearchParams::with_defaults(10),
         );
         assert_ne!(base, different_effective);

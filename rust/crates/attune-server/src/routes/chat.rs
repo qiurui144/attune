@@ -2438,7 +2438,10 @@ fn operational_evidence_terms(query: &str, evidence: &str) -> Vec<&'static str> 
             "物理链路/physical link",
             &["物理链路", "physical link", "nic status", "link status"][..],
         ),
-        ("IP", &["ip address", "subnet mask", "gateway", "ip route"][..]),
+        (
+            "IP",
+            &["ip address", "subnet mask", "gateway", "ip route"][..],
+        ),
         (
             "packet capture",
             &["packet capture", "抓包", "pcap", "tcpdump", "数据包捕获"][..],
@@ -2449,7 +2452,10 @@ fn operational_evidence_terms(query: &str, evidence: &str) -> Vec<&'static str> 
             &["路由", "routing", "route table", "default gateway"][..],
         ),
         ("DNS", &["dns", "DNS", "域名"][..]),
-        ("端口/port", &["端口", "port", "service port", "port status"][..]),
+        (
+            "端口/port",
+            &["端口", "port", "service port", "port status"][..],
+        ),
         ("防火墙/firewall", &["防火墙", "firewall"][..]),
         ("拓扑/topology", &["拓扑", "topology"][..]),
         (
@@ -3171,11 +3177,12 @@ fn plugin_rag_profile<'a>(
     intent: &str,
 ) -> Option<&'a attune_core::plugin_loader::RagProfileSpec> {
     registry.plugins().find_map(|plugin| {
-        plugin
-            .manifest
-            .rag_profiles
-            .iter()
-            .find(|profile| profile.intents.iter().any(|profile_intent| profile_intent == intent))
+        plugin.manifest.rag_profiles.iter().find(|profile| {
+            profile
+                .intents
+                .iter()
+                .any(|profile_intent| profile_intent == intent)
+        })
     })
 }
 
@@ -3216,6 +3223,92 @@ fn search_results_to_knowledge_values(
             })
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rag_metadata_with_quality_profile_for_chat(
+    coverage: &crate::rag_guardrails::EvidenceCoverage,
+    answer_mode: &'static str,
+    degraded_reason: Option<&'static str>,
+    knowledge_count: usize,
+    trace: &crate::rag_guardrails::RagRetrievalTrace,
+    diagnostics: &attune_core::search::SearchDiagnostics,
+    original_query: &str,
+    retrieval_query: &str,
+    knowledge: &[Value],
+    model_discipline: Option<&str>,
+    repair_attempted: bool,
+    repair_reason: Option<&str>,
+) -> Value {
+    let requested_need = match coverage.intent {
+        crate::rag_guardrails::RagIntent::Diagnostic => "Troubleshooting",
+        crate::rag_guardrails::RagIntent::Summary => "Summary",
+        crate::rag_guardrails::RagIntent::Comparison => "Comparison",
+        crate::rag_guardrails::RagIntent::Lookup => "DirectEvidence",
+    }
+    .to_string();
+    let missing_needs = coverage
+        .missing
+        .iter()
+        .map(|need| (*need).to_string())
+        .collect::<Vec<_>>();
+    let satisfied_needs = if coverage.sufficient() {
+        vec![requested_need.clone()]
+    } else {
+        Vec::new()
+    };
+    let primary_source = knowledge
+        .first()
+        .and_then(|item| item.get("item_id").and_then(Value::as_str))
+        .map(|id| id.to_string());
+
+    let quality = crate::rag_guardrails::RagQualityProfile {
+        query: crate::rag_guardrails::RagQueryQualityTrace {
+            original_query: original_query.to_string(),
+            retrieval_query: retrieval_query.to_string(),
+            expanded_queries: trace.queries.clone(),
+        },
+        evidence: crate::rag_guardrails::RagEvidenceQualityTrace {
+            requested_needs: vec![requested_need],
+            satisfied_needs,
+            missing_needs,
+            quality: coverage.status.to_string(),
+            source_count: knowledge_count,
+            primary_source,
+        },
+        embedding: crate::rag_guardrails::RagEmbeddingQualityTrace {
+            status: diagnostics.embedding.status.clone(),
+            usable: diagnostics.embedding.usable,
+            stale_vectors: diagnostics.embedding.stale_vectors,
+            current_fingerprint: diagnostics.embedding.current_fingerprint.clone(),
+            index_fingerprint: diagnostics.embedding.index_fingerprint.clone(),
+        },
+        reranker: crate::rag_guardrails::RagRerankerQualityTrace {
+            requested: diagnostics.reranker.requested,
+            available: diagnostics.reranker.available,
+            used: diagnostics.reranker.used,
+            skipped_reason: diagnostics.reranker.skipped_reason.clone(),
+            candidate_count: diagnostics.reranker.candidate_count,
+            score_count: diagnostics.reranker.score_count,
+            actionable: diagnostics.reranker.actionable,
+        },
+        answer: crate::rag_guardrails::RagAnswerQualityTrace {
+            mode: answer_mode.to_string(),
+            model_discipline: model_discipline.map(|value| value.to_string()),
+            repair_attempted,
+            repair_reason: repair_reason.map(|value| value.to_string()),
+            final_citation_count: knowledge_count,
+        },
+    };
+
+    crate::rag_guardrails::rag_metadata_with_quality_profile(
+        coverage,
+        answer_mode,
+        degraded_reason,
+        knowledge_count,
+        trace,
+        &quality,
+    )
 }
 
 fn retrieval_result_key(r: &attune_core::search::SearchResult) -> String {
@@ -3578,14 +3671,10 @@ fn source_hint_line(line: &str) -> Option<String> {
             "source",
             "manual",
             "reference",
-            "qrh",
-            "fcom",
-            "fctm",
-            "amm",
-            "sop",
-            "mel",
+            "handbook",
+            "document",
+            "guide",
             "pdf",
-            "flight crew",
         ],
     ) {
         return None;
@@ -3620,14 +3709,9 @@ fn plain_answer_source_hint_line(line: &str, markers: &[&str]) -> Option<String>
             "manual",
             "reference",
             "handbook",
-            "qrh",
-            "fcom",
-            "fctm",
-            "amm",
-            "sop",
-            "mel",
+            "document",
+            "guide",
             "pdf",
-            "flight crew",
         ],
     ) {
         return None;
@@ -4401,7 +4485,7 @@ pub async fn chat(
     let mut rag_final_top_k = search_params.top_k;
     let mut rag_retrieval_passes: Vec<&'static str> = vec!["first_pass"];
     let mut rag_retrieval_queries: Vec<String> = vec![expanded_query.clone()];
-    let search_results = crate::routes::search::search_with_state_blocking(
+    let search_outcome = crate::routes::search::search_with_state_outcome_blocking(
         state.clone(),
         dek.clone(),
         expanded_query,
@@ -4410,9 +4494,10 @@ pub async fn chat(
     )
     .await
     .map_err(AppError::Internal)?;
+    let rag_search_diagnostics = search_outcome.diagnostics.clone();
 
     // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
-    let mut search_results = search_results;
+    let mut search_results = search_outcome.results;
     if search_results.is_empty() && local_scheduler_summary_query(&body.message) {
         let state_recent = state.clone();
         let dek_recent = dek.clone();
@@ -4884,8 +4969,8 @@ pub async fn chat(
         passes: rag_retrieval_passes.clone(),
         queries: rag_retrieval_queries.clone(),
         final_top_k: rag_final_top_k,
-        vector_results: None,
-        bm25_results: None,
+        vector_results: Some(rag_search_diagnostics.vector_results),
+        bm25_results: Some(rag_search_diagnostics.bm25_results),
         citations_required: rag_policy.min_citations,
     };
     if !web_search_used {
@@ -4912,7 +4997,8 @@ pub async fn chat(
                         .unwrap_or(0)
                 })
                 .sum::<usize>();
-            let tokens_out = cost::estimate_tokens(&clarification.message, LOCAL_EXTRACTIVE_MODEL_ID);
+            let tokens_out =
+                cost::estimate_tokens(&clarification.message, LOCAL_EXTRACTIVE_MODEL_ID);
             let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
             let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
             let cost_block = eval_surface::build_cost_block(
@@ -4981,12 +5067,19 @@ pub async fn chat(
             });
             response_json["rag_intent_plan"] =
                 rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
-            let mut metadata = crate::rag_guardrails::rag_metadata_with_trace(
+            let mut metadata = rag_metadata_with_quality_profile_for_chat(
                 &rag_coverage,
                 "clarification-required",
                 Some("ambiguous_source_scope"),
                 knowledge.len(),
                 &rag_trace,
+                &rag_search_diagnostics,
+                &body.message,
+                &retrieval_query,
+                &knowledge,
+                None,
+                false,
+                None,
             );
             if let Some(obj) = metadata.as_object_mut() {
                 obj.insert("rag_workflow".to_string(), serde_json::json!(workflow));
@@ -5059,12 +5152,19 @@ pub async fn chat(
                 rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
             merge_json_object(
                 &mut response_json,
-                crate::rag_guardrails::rag_metadata_with_trace(
+                rag_metadata_with_quality_profile_for_chat(
                     &rag_coverage,
                     "clarification-required",
                     Some("ambiguous_source_scope"),
                     knowledge.len(),
                     &rag_trace,
+                    &rag_search_diagnostics,
+                    &body.message,
+                    &retrieval_query,
+                    &knowledge,
+                    None,
+                    false,
+                    None,
                 ),
             );
             return Ok(Json(response_json));
@@ -5443,12 +5543,19 @@ pub async fn chat(
             rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
         merge_json_object(
             &mut response_json,
-            crate::rag_guardrails::rag_metadata_with_trace(
+            rag_metadata_with_quality_profile_for_chat(
                 &rag_coverage,
                 "refusal-insufficient-evidence",
                 Some("insufficient_evidence"),
                 knowledge.len(),
                 &rag_trace,
+                &rag_search_diagnostics,
+                &body.message,
+                &retrieval_query,
+                &knowledge,
+                Some(RagModelDiscipline::Small.as_str()),
+                false,
+                None,
             ),
         );
         return Ok(Json(response_json));
@@ -5557,12 +5664,19 @@ pub async fn chat(
                 rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
             merge_json_object(
                 &mut response_json,
-                crate::rag_guardrails::rag_metadata_with_trace(
+                rag_metadata_with_quality_profile_for_chat(
                     &rag_coverage,
                     answer_mode_for_local_task(local_task),
                     None,
                     knowledge_for_answer.len(),
                     &rag_trace,
+                    &rag_search_diagnostics,
+                    &body.message,
+                    &retrieval_query,
+                    &knowledge_for_answer,
+                    Some(RagModelDiscipline::Small.as_str()),
+                    true,
+                    Some(local_reason),
                 ),
             );
             return Ok(Json(response_json));
@@ -5673,12 +5787,19 @@ pub async fn chat(
                 rag_intent_plan_json(&rag_intent_plan, Some(&rag_intent_selection));
             merge_json_object(
                 &mut response_json,
-                crate::rag_guardrails::rag_metadata_with_trace(
+                rag_metadata_with_quality_profile_for_chat(
                     &rag_coverage,
                     answer_mode_for_local_task(local_task),
                     None,
                     knowledge.len(),
                     &rag_trace,
+                    &rag_search_diagnostics,
+                    &body.message,
+                    &retrieval_query,
+                    &knowledge,
+                    Some(RagModelDiscipline::Small.as_str()),
+                    true,
+                    Some(local_reason),
                 ),
             );
             return Ok(Json(response_json));
@@ -5941,12 +6062,19 @@ pub async fn chat(
                 };
                 merge_json_object(
                     &mut response_json,
-                    crate::rag_guardrails::rag_metadata_with_trace(
+                    rag_metadata_with_quality_profile_for_chat(
                         &rag_coverage,
                         answer_mode,
                         None,
                         knowledge.len(),
                         &rag_trace,
+                        &rag_search_diagnostics,
+                        &body.message,
+                        &retrieval_query,
+                        &knowledge,
+                        Some(model_discipline.as_str()),
+                        false,
+                        None,
                     ),
                 );
                 return Ok(Json(response_json));
@@ -6445,12 +6573,19 @@ pub async fn chat(
 
     merge_json_object(
         &mut response_json,
-        crate::rag_guardrails::rag_metadata_with_trace(
+        rag_metadata_with_quality_profile_for_chat(
             &rag_coverage,
             answer_mode_for_model(&llm_model_name),
             None,
             knowledge.len(),
             &rag_trace,
+            &rag_search_diagnostics,
+            &body.message,
+            &retrieval_query,
+            &knowledge,
+            None,
+            false,
+            None,
         ),
     );
 
