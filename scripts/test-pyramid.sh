@@ -9,23 +9,23 @@
 #   3. Smoke         — scripts/smoke-test.sh  (~30s, 必跑)
 #   4. Corpus        — scripts/run-benchmark-corpus.sh  (~5min, 可选 --with-corpus)
 #   5. Quality       — cargo test --release rag_quality_benchmark  (~10s, 必跑)
-#   6. E2E (browser) — repo tests/e2e (~5min, 可选 --with-e2e)
+#   6. E2E (K3 physical device) — repo tests/e2e, 可选 --with-e2e
 #   6a. RAG Eval Smoke — manifest schema + pr_rag_smoke dry-run (~5s, 可选 --with-eval-smoke)
 #   6b. Long-text E2E — airplane manuals vector DB + chat gate, 可选 --with-longtext-e2e
 #
 # 默认: 跑 1+2+3+5（必跑层），合计 ~3-4 min。
 # 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层；
 #       --with-eval-smoke 加 RAG eval manifest/dry-run 门禁；
-#       --with-longtext-e2e 加长文本向量库/对话门禁；
-#       --headed-e2e 用可见 Chrome 跑 E2E/UI 子门禁。
+#       --with-longtext-e2e 加 K3 上的长文本向量库/对话门禁；
+#       --headed-e2e 用可见 Chrome 跑 K3 E2E/UI 子门禁。
 #
 # 用法:
 #   bash scripts/test-pyramid.sh                # 必跑 4 层
 #   bash scripts/test-pyramid.sh --with-corpus  # + 真语料检索
-#   bash scripts/test-pyramid.sh --with-e2e     # + 浏览器 e2e
-#   bash scripts/test-pyramid.sh --headed-e2e   # + 有头浏览器 e2e
+#   bash scripts/test-pyramid.sh --with-e2e     # + K3 实机 e2e
+#   bash scripts/test-pyramid.sh --headed-e2e   # + K3 有头浏览器 e2e
 #   bash scripts/test-pyramid.sh --with-eval-smoke  # + RAG eval schema/dry-run
-#   bash scripts/test-pyramid.sh --with-longtext-e2e  # + 飞机手册长文本 KB E2E
+#   bash scripts/test-pyramid.sh --with-longtext-e2e  # + K3 长文本 KB E2E
 #   bash scripts/test-pyramid.sh --all          # 标准全跑，不含长文本大语料
 #
 # 输出:
@@ -162,22 +162,22 @@ else
     warn "Layer 6a: RAG Eval Smoke (skipped, 加 --with-eval-smoke 启用)"
 fi
 
-# ── 6. E2E Browser Tests ──────────────────────────────────────
+# ── 6. K3 Physical-Device E2E ─────────────────────────────────
 if [ "$WITH_E2E" = "true" ]; then
     E2E_CMD="bash $PROJECT_DIR/tests/e2e/run_all.sh"
     if [ "$WITH_LONGTEXT_E2E" = "true" ]; then
-        E2E_CMD="ATTUNE_E2E_LONGTEXT=1 bash $PROJECT_DIR/tests/e2e/run_all.sh"
+        E2E_CMD="ATTUNE_K3_LONGTEXT_E2E=1 bash $PROJECT_DIR/tests/e2e/run_all.sh"
     fi
     if [ "$HEADED_E2E" = "true" ]; then
         E2E_CMD="ATTUNE_HEADLESS=0 $E2E_CMD"
     fi
-    run_layer "e2e" "Layer 6: E2E (server binary + httpx + browser)" \
+    run_layer "e2e" "Layer 6: E2E (K3 physical device + deb + web demo)" \
     "$E2E_CMD"
 else
     RESULTS[e2e]="⏭️ SKIP"
     TIMINGS[e2e]="-"
     COUNTS[e2e]="-"
-    warn "Layer 6: E2E (skipped, 加 --with-e2e 启用)"
+    warn "Layer 6: K3 physical-device E2E (skipped, 加 --with-e2e 启用)"
 fi
 
 # ── 写报告表 ──────────────────────────────────────────────────

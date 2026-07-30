@@ -113,6 +113,23 @@ def test_k3_api_contract_covers_dynamic_models_and_summary_workflow():
     assert "Summary Workflow Gate" in release_script
 
 
+def test_project_e2e_entrypoint_is_k3_physical_device_only():
+    runner = (ROOT / "tests" / "e2e" / "run_all.sh").read_text(encoding="utf-8")
+    release_script = (ROOT / "scripts" / "release" / "test-k3-nas-web-demo.sh").read_text(encoding="utf-8")
+    pyramid = (ROOT / "scripts" / "test-pyramid.sh").read_text(encoding="utf-8")
+    assert "scripts/release/test-k3-nas-web-demo.sh" in runner
+    assert "ATTUNE_K3_HOST" in runner
+    assert "is_loopback_or_local" in runner
+    assert "cargo build" not in runner
+    assert "--no-auth --port" not in runner
+    assert "XDG_DATA_HOME" not in runner
+    assert "localhost:18905" not in runner
+    assert "live K3 E2E requires a physical-device host" in release_script
+    assert "live K3 E2E requires a physical-device base URL" in release_script
+    assert "ATTUNE_K3_LONGTEXT_E2E=1" in pyramid
+    assert "ATTUNE_E2E_LONGTEXT=1" not in pyramid
+
+
 def test_attune_exposes_voice_receive_api_without_server_audio_packaging():
     server = (ROOT / "rust" / "crates" / "attune-server" / "src" / "lib.rs").read_text(encoding="utf-8")
     probe = (ROOT / "scripts" / "release" / "probe-nas-web-api-contract.py").read_text(encoding="utf-8")

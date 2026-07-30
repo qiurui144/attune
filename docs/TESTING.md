@@ -142,24 +142,27 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 - [ ] 用了本机模型缓存 / `HF_HUB_OFFLINE` 假装有模型？→ **干净环境真下载**（正式用户无缓存）
 - [ ] mock 了 LLM / cloud / 任何真服务？→ L4/L5 一律真服务
 - [ ] 在 dev 机（有旧 vault.db / 旧缓存）跑而非干净机？→ **优先 AMD 干净机（192.168.100.201）**，dev 机的残留会掩盖 fresh-install bug（2026-06-12 v1.2.0 schema crash 即此被掩盖）
+- [ ] runner-facing URL 是 `127.*` / `localhost`？→ 不成立。项目级 E2E 只允许 K3 实体机 URL；loopback 只能作为 K3 机内 scheduler 地址。
 
 **强制**：L4/L5 报告头必须声明"本次环境保真自检 6 项全过"+ 列实际 artifact SHA / 机器 / 模型源；缺则验收不成立（§5.2.0b 一票否决）。横向 = 全局 §6.4.1。
 
-### 1.6 Web UI E2E 三种运行形态（无头 / 有头 / 真包验收）
+### 1.6 Web UI E2E 运行形态（K3 实机）
 
-Attune 的 Web 测试不能只看 API。所有涉及用户体验的改动必须明确落到以下三条线之一：
+Attune 的项目级 E2E 不能只看 API，也不能在开发机启动本地 server。所有涉及用户体验的
+改动必须通过 K3 实体机链路验证：真 deb 安装、真 scheduler、真 vault/vector/Tantivy、
+真 web-demo 或真浏览器页面。
 
 | 形态 | 目的 | 浏览器 | 服务端 | 何时跑 | 通过标准 |
 |------|------|--------|--------|--------|----------|
-| **Headless 自动化** | CI/本机快速回归，稳定复现 DOM 行为 | Playwright Chrome `headless=true` | `attune-server-headless` 隔离数据目录 | PR / pre-merge | 脚本 exit 0，截图非空，关键可见文本/状态 chip/citation 命中 |
-| **Headed 有头测试** | 人工观察真实 UX：焦点、滚动、后台任务、长回答等待、错误提示 | Playwright Chrome `ATTUNE_HEADLESS=0` 或人工打开 URL | 真实本地/远端 server | UI/长文本/scheduler 改动后必须至少跑一次 | 人眼确认页面不卡顿、状态可解释、长任务不中断输入；脚本断言也必须通过 |
-| **Release artifact 验收** | 用户安装路径保真，不允许 dev 近路 | 系统 Chrome + 真安装包启动的服务 | deb/MSI/AppImage 真安装 | release candidate | 环境保真自检 6 项全过；报告包含 artifact SHA、机器、模型/云端来源 |
+| **Headless K3 自动化** | CI/回归，稳定复现 DOM 行为 | Playwright Chrome `headless=true` 访问 K3 URL | K3 上的真 deb 服务 | PR / pre-merge | 脚本 exit 0，截图非空，关键可见文本/状态 chip/citation 命中 |
+| **Headed K3 有头测试** | 人工观察真实 UX：焦点、滚动、后台任务、长回答等待、错误提示 | Playwright Chrome `ATTUNE_HEADLESS=0` 或人工打开 K3 URL | K3 上的真 deb 服务 | UI/长文本/scheduler 改动后必须至少跑一次 | 人眼确认页面不卡顿、状态可解释、长任务不中断输入；脚本断言也必须通过 |
+| **Release artifact 验收** | 用户安装路径保真，不允许 dev 近路 | 系统 Chrome + 真安装包启动的服务 | K3 deb 真安装 | release candidate | 环境保真自检 7 项全过；报告包含 artifact SHA、机器、模型/云端来源 |
 
 有头测试最小命令：
 
 ```bash
 ATTUNE_HEADLESS=0 \
-ATTUNE_BASE_URL=http://localhost:18905 \
+ATTUNE_BASE_URL=http://192.168.100.233:18900 \
 ATTUNE_PLAYWRIGHT_CHANNEL=chrome \
 python3 tests/e2e/playwright/v10_ga_ui_e2e.py
 ```
@@ -168,13 +171,12 @@ python3 tests/e2e/playwright/v10_ga_ui_e2e.py
 
 ```bash
 ATTUNE_HEADLESS=0 \
-ATTUNE_E2E_LONGTEXT=1 \
-ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
-ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
+ATTUNE_K3_LONGTEXT_E2E=1 \
+ATTUNE_K3_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
 bash tests/e2e/run_all.sh
 ```
 
-K3 平台例外：K3 测试不在前端主机启动 server。正确拓扑是 K3 上运行
+K3 平台不是例外，而是唯一项目级 E2E 形态：K3 测试不在前端主机启动 server。正确拓扑是 K3 上运行
 Attune server + scheduler + vault/vector/Tantivy/corpus，前端主机只打开浏览器或
 Playwright 连接 K3 URL。任何 `/api/v1/index/bind` 路径都必须是 K3 文件系统路径。
 可执行入口见 [`tests/e2e/README.md`](../tests/e2e/README.md) 的“K3 平台有头测试拓扑”。

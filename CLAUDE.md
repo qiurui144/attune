@@ -831,13 +831,21 @@ ssh root@192.168.100.233 "dpkg -i /root/attune-server_${VER}_riscv64.deb && syst
 ### E2E Verification
 
 ```bash
-cd tests/e2e && export ATTUNE_BASE_URL=http://192.168.100.233:18905
-for s in memory_moat_e2e.py memory_moat_signals_e2e.py memory_moat_stress_e2e.py \
-         memory_moat_fault_e2e.py memory_moat_annotation_e2e.py memory_moat_v07routes_e2e.py \
-         memory_moat_search_quality_e2e.py memory_moat_stress_loop_e2e.py; do
-  python3 "$s" && echo "PASS $s" || echo "FAIL $s"
-done
+ATTUNE_K3_HOST=192.168.100.233 \
+ATTUNE_K3_BASE_URL=http://192.168.100.233:18900 \
+ATTUNE_K3_SCHEDULER_URL=http://192.168.100.233:8090 \
+ATTUNE_K3_SERVER_SCHEDULER_BASE=http://127.0.0.1:8090 \
+ATTUNE_K3_E2E_PASSWORD="$K3_TEST_VAULT_PASSWORD" \
+bash tests/e2e/run_all.sh \
+  --deb dist/release/riscv64-server-deb/attune-server_${VER}_riscv64.deb \
+  --web-demo-deb dist/release/riscv64-server-deb/attune-web-demo_${VER}_all.deb
 ```
+
+Project E2E is K3 physical-device validation only. Do not start a local
+`attune-server-headless`, do not use `127.0.0.1`/`localhost` as the runner-facing
+E2E target, and do not report local integration/debug runs as E2E evidence.
+Loopback is allowed only for services as seen from K3 itself, for example
+`ATTUNE_K3_SERVER_SCHEDULER_BASE=http://127.0.0.1:8090`.
 
 ### One-key Release (recommended)
 

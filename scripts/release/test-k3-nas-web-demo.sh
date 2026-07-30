@@ -51,6 +51,17 @@ SKIP_UI=0
 SKIP_RVV_PERFORMANCE=0
 DRY_RUN=0
 
+is_loopback_or_local_target() {
+  local value="${1:-}"
+  case "$value" in
+    ""|localhost|localhost:*|127.*|127.*:*) return 0 ;;
+    http://localhost|http://localhost:*|https://localhost|https://localhost:*) return 0 ;;
+    http://127.*|http://127.*:*|https://127.*|https://127.*:*) return 0 ;;
+    http://\[::1\]*|https://\[::1\]*|\[::1\]|\[::1\]:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --deb)
@@ -176,6 +187,32 @@ done
 
 if [ -z "$BASE_URL" ] && [ -n "$HOST" ]; then
   BASE_URL="http://$HOST:18900"
+fi
+if [ "$DRY_RUN" != "1" ]; then
+  if [ -z "$HOST" ]; then
+    echo "live K3 E2E requires --host or ATTUNE_K3_HOST" >&2
+    exit 2
+  fi
+  if is_loopback_or_local_target "$HOST"; then
+    echo "live K3 E2E requires a physical-device host, got: $HOST" >&2
+    exit 2
+  fi
+  if [ -z "$BASE_URL" ]; then
+    echo "live K3 E2E requires --base-url or ATTUNE_K3_BASE_URL" >&2
+    exit 2
+  fi
+  if is_loopback_or_local_target "$BASE_URL"; then
+    echo "live K3 E2E requires a physical-device base URL, got: $BASE_URL" >&2
+    exit 2
+  fi
+  if [ -n "$WEB_DEMO_BASE_URL" ] && is_loopback_or_local_target "$WEB_DEMO_BASE_URL"; then
+    echo "live K3 E2E requires a physical-device web-demo URL, got: $WEB_DEMO_BASE_URL" >&2
+    exit 2
+  fi
+  if [ -n "$WEB_DEMO_API_URL" ] && is_loopback_or_local_target "$WEB_DEMO_API_URL"; then
+    echo "live K3 E2E requires a physical-device web-demo API URL, got: $WEB_DEMO_API_URL" >&2
+    exit 2
+  fi
 fi
 if [ -z "$REMOTE_TMP" ]; then
   if [ "$SSH_USER" = "root" ]; then
@@ -462,6 +499,32 @@ run_rag_eval_suite_gate() {
   append_report "- Output: $EVAL_OUT"
   run python3 "$ROOT/scripts/eval/validate-manifests.py" --root "$ROOT" --suite "$EVAL_SUITE"
   run python3 "$ROOT/scripts/eval/run-suite.py" --root "$ROOT" --suite "$EVAL_SUITE" --base-url "$BASE_URL" --token "$TOKEN" --out "$EVAL_OUT"
+  run python3 - "$EVAL_OUT" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    report = json.load(f)
+summary = report.get("summary") or {}
+failures = report.get("failures") or []
+if summary.get("pass") is not True or failures:
+    print(
+        "RAG eval suite failed: "
+        f"summary.pass={summary.get('pass')!r} "
+        f"summary.failures={summary.get('failures')!r} "
+        f"failures={len(failures)}",
+        file=sys.stderr,
+    )
+    for failure in failures[:5]:
+        print(json.dumps(failure, ensure_ascii=False), file=sys.stderr)
+    raise SystemExit(1)
+print(
+    "RAG eval suite passed: "
+    f"cases={summary.get('cases')} failures={summary.get('failures')} "
+    f"terminal_error_rate={summary.get('terminal_error_rate')}"
+)
+PY
   append_report "- Result: pass"
 }
 

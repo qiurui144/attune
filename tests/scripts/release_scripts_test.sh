@@ -260,6 +260,8 @@ grep -q "Web demo deb" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_WEB_DEMO_BASE_URL" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "ATTUNE_K3_WEB_DEMO_PROFILE" "$TMP/reports/k3-nas-web-demo-dry-run.md"
 grep -q "kb_web_demo_eval_frontend_e2e.py" "$TMP/reports/k3-nas-web-demo-dry-run.md"
+grep -q "summary.pass" "$ROOT/scripts/release/test-k3-nas-web-demo.sh"
+grep -q "RAG eval suite failed" "$ROOT/scripts/release/test-k3-nas-web-demo.sh"
 
 python3 "$ROOT/scripts/release/probe-nas-web-api-contract.py" \
   --dry-run \

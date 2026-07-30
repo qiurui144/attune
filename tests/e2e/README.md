@@ -1,22 +1,29 @@
-# Memory Moat E2E 测试套件
+# Attune K3 实机 E2E 测试套件
 
-打**真实 attune-server-headless 进程**的端到端测试 — 非内存 Store 单元测试。
-验证 v0.7 Memory Moat（文档编辑嵌入 + 自学习闭环）在真实 HTTP 链路下的行为。
+项目级 E2E 只认 **K3 实体机**：Attune server、scheduler、vault.db、向量库、
+Tantivy、导入语料和 web-demo 服务都必须运行或存放在 K3/NAS 目标机上。其它主机只能作为
+浏览器/Playwright driver 或 CI runner 访问 K3 URL，不能启动本机
+`attune-server-headless` 后把 `127.0.0.1`/`localhost` 当作 E2E 结果。
 
 ## 一键运行
 
 ```bash
+ATTUNE_K3_HOST=192.168.100.233 \
+ATTUNE_K3_BASE_URL=http://192.168.100.233:18900 \
+ATTUNE_K3_SCHEDULER_URL=http://192.168.100.233:8090 \
+ATTUNE_K3_SERVER_SCHEDULER_BASE=http://127.0.0.1:8090 \
+ATTUNE_K3_E2E_PASSWORD="$K3_TEST_VAULT_PASSWORD" \
 bash tests/e2e/run_all.sh
 ```
 
-runner 自动：编译 server → 起隔离 server（独立 XDG dir，port 18905）→
-setup+unlock vault → 配 cloud/scheduler LLM（若显式配置）→ 顺序跑全部脚本 → 汇总 → 清理。
-退出码 0 = 全绿。
+`tests/e2e/run_all.sh` 是 K3 wrapper，会转调
+`scripts/release/test-k3-nas-web-demo.sh`。live 模式下缺少 `ATTUNE_K3_HOST` 或
+目标为 `127.*`/`localhost` 会直接失败。退出码 0 = K3 实机门禁通过。
 
 长文本知识库门禁需要显式开启：
 
 ```bash
-ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
+ATTUNE_K3_LONGTEXT_E2E=1 ATTUNE_K3_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
   bash tests/e2e/run_all.sh
 ```
 
@@ -35,23 +42,14 @@ airplane 来源。Web UI 门禁
 最终 prompt admission 默认还会受 `ATTUNE_CONTEXT_ADMISSION_MAX_INPUT_TOKENS=65536`
 约束；即使云端模型宣称 1M token 窗口，长文本门禁也要求先检索/筛选/压缩出小证据包。
 
-edge scheduler 试点可这样跑；RISC-V/X100 只是首个落地平台，Windows/Linux x86 高性能平台应复用同一入口：
-
-```bash
-ATTUNE_E2E_LONGTEXT=1 \
-ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
-ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
-  bash tests/e2e/run_all.sh
-```
-
-`ATTUNE_E2E_LOCAL_SCHEDULER` 会派生本地 scheduler chat 路由和 embedding endpoint，
-并默认使用 `llm-summary`、`embedding-int8`、512 维、`/kb/tasks/kb.query.embed`。
+scheduler URL 分两层配置：`ATTUNE_K3_SCHEDULER_URL` 是 CI runner 可访问的地址；
+`ATTUNE_K3_SERVER_SCHEDULER_BASE` 是 Attune server 在 K3 上访问 scheduler 的地址，通常是
+`http://127.0.0.1:8090`。这个 loopback 只表示 **K3 机内** scheduler，不是 runner
+本机 E2E。
 配置 scheduler 时，runner 会先执行 `scripts/probe-edge-scheduler-contract.py`；
-默认严格要求 schema_versions、prompt cache 元数据和 `scheduler_refusal_v1`。临时兼容旧
-scheduler 可设 `ATTUNE_E2E_SCHEDULER_STRICT=0`。
+默认严格要求 schema_versions、prompt cache 元数据和 `scheduler_refusal_v1`。
 当前 scheduler 生产接口不是
-尚未落地的 `/v1/embeddings` thin route；需要改 task 时可设
-`ATTUNE_E2E_EMBEDDING_TASK=kb.ingest.embed_batch`。本地 scheduler 长文本门禁默认把
+尚未落地的 `/v1/embeddings` thin route。K3 scheduler 长文本门禁默认把
 Attune embedding queue batch 和 scheduler-native embedding task batch 设为 512；
 两者都可升到 2048，且 scheduler-native provider 会在 scheduler 报 physical
 batch limit 时二分重试。长文本门禁默认开启 scheduler OCR 能力发现；普通 e2e 仍默认关闭
@@ -82,17 +80,10 @@ transport 失败、408/429/502/503/504，或 scheduler 重启后 `/jobs/{id}` 40
 24dpi。后台失败页和连续失败阈值默认等于本次 page limit，只有 background/async
 专用环境变量会收紧它们。
 
-云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
+## 底层脚本清单
 
-```bash
-ATTUNE_E2E_LLM_ENDPOINT=https://example.com/v1 \
-ATTUNE_E2E_LLM_MODEL=your-model \
-ATTUNE_E2E_LLM_API_KEY="$API_KEY" \
-ATTUNE_E2E_LONGTEXT=1 \
-  bash tests/e2e/run_all.sh
-```
-
-## 脚本清单（基础 9 脚本 / 90 断言，另有可选长文本 gate）
+下列 Python 脚本保留为 K3 gate 的组成部分或开发调试资源，但项目级 E2E 入口只有
+`tests/e2e/run_all.sh`，并且必须指向 K3 实体机。
 
 | 脚本 | 断言 | 覆盖 |
 |------|-----|------|
@@ -114,7 +105,7 @@ ATTUNE_E2E_LONGTEXT=1 \
 ```bash
 python3 scripts/eval-airplane-manual-longtext-multiturn.py \
   --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
-  --base-url http://localhost:18905 \
+  --base-url http://192.168.100.233:18900 \
   --profile edge_scheduler_comprehensive \
   --fail-on-targets
 ```
@@ -128,7 +119,7 @@ search/chat 单轮时可设 `ATTUNE_LONGTEXT_MULTITURN=0`。
 ATTUNE_LONGTEXT_REPEAT_CHAT=3 \
 ATTUNE_LONGTEXT_CORPORA=airplane,mechanical_design \
 python3 scripts/eval-longtext-corpora-suite.py \
-  --base-url http://localhost:18905 \
+  --base-url http://192.168.100.233:18900 \
   --profile edge_scheduler_comprehensive \
   --fail-on-targets
 ```
@@ -153,9 +144,9 @@ scheduler 返回的 prompt-cache/cache metadata。若 scheduler 已提供 prompt
 `ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS`（默认 40），避免过短输出造成
 截断式误判。
 
-解锁后，server 会在后台预热本地 scheduler / scheduler-native 检索链路：
+解锁后，server 会在后台预热 K3 机内 scheduler / scheduler-native 检索链路：
 metadata source scan、典型 source lookup query 和 top-k item 解密会先跑一轮，
-用于压低重启后首问冷启动延迟。默认只在本地 scheduler 或 scheduler-native
+用于压低重启后首问冷启动延迟。默认只在 K3 机内 scheduler 或 scheduler-native
 provider 配置下启用；可用 `ATTUNE_RETRIEVAL_WARMUP=0` 关闭，或用
 `ATTUNE_RETRIEVAL_WARMUP_QUERIES="source manual reference;来源 手册 引用"`
 覆盖预热 query。
@@ -165,7 +156,7 @@ provider 配置下启用；可用 `ATTUNE_RETRIEVAL_WARMUP=0` 关闭，或用
 ```bash
 python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
   --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
-  --base-url http://localhost:18905 \
+  --base-url http://192.168.100.233:18900 \
   --profile edge_scheduler_comprehensive
 ```
 
@@ -177,7 +168,7 @@ ATTUNE_LONGTEXT_UI_DRIVER=node \
 ATTUNE_PLAYWRIGHT_EXECUTABLE=/usr/bin/chromium \
 node tests/e2e/playwright/airplane_manual_longtext_ui_e2e.js \
   --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
-  --base-url http://localhost:18905 \
+  --base-url http://192.168.100.233:18900 \
   --profile edge_scheduler_comprehensive
 ```
 
@@ -221,11 +212,11 @@ python3 tests/e2e/playwright/kb_web_demo_eval_frontend_e2e.py \
 - 长文本有头测试仍要先完成 API 建库，或直接让 `airplane_manual_longtext_e2e.py`
   全流程触发 Web UI 子门禁。
 
-当前仓库推荐的本地有头 smoke：
+当前仓库推荐的 K3 有头 smoke：
 
 ```bash
 ATTUNE_HEADLESS=0 \
-ATTUNE_BASE_URL=http://localhost:18905 \
+ATTUNE_BASE_URL=http://192.168.100.233:18900 \
 ATTUNE_PLAYWRIGHT_CHANNEL=chrome \
 python3 tests/e2e/playwright/v10_ga_ui_e2e.py
 ```
@@ -237,7 +228,7 @@ ATTUNE_HEADLESS=0 \
 ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS=250 \
 python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
   --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
-  --base-url http://localhost:18905 \
+  --base-url http://192.168.100.233:18900 \
   --profile edge_scheduler_comprehensive
 ```
 
@@ -245,9 +236,8 @@ python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
 
 ```bash
 ATTUNE_HEADLESS=0 \
-ATTUNE_E2E_LONGTEXT=1 \
-ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
-ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
+ATTUNE_K3_LONGTEXT_E2E=1 \
+ATTUNE_K3_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
 bash tests/e2e/run_all.sh
 ```
 
@@ -291,31 +281,21 @@ python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
 
 ## 前置依赖
 
-- Rust 工具链（编译 attune-server-headless）
+- 已构建好的 K3/riscv64 Attune server deb；E2E runner 不在本机编译或启动 server。
 - Python 3（脚本用 stdlib urllib + sqlite3，无第三方依赖）
 - `memory_moat_chat_e2e.py` 是 legacy direct-Ollama 脚本，不再属于默认 runner；
   当前标准路径下本地模型应经 scheduler，云模型应经配置的 cloud/OpenAI-compatible
   endpoint。需要验证 chat 能力时优先使用 scheduler/cloud 长文本 gate。
 - 长文本 E2E 额外需要：可访问 GitHub，磁盘空间足够 materialize 所选 PDF；
-  edge scheduler 模式需 scheduler 在 loopback `:8090` 可用，或通过
-  `ATTUNE_E2E_LOCAL_SCHEDULER` 指到远端或本机 Windows/Linux x86 edge scheduler；
-  云端 LLM 可通过
-  `ATTUNE_E2E_LLM_*` 注入。Web UI 子门禁需要
+  edge scheduler 模式需 scheduler 在 K3 上可用，`ATTUNE_K3_SERVER_SCHEDULER_BASE`
+  指向 K3 机内 scheduler。Web UI 子门禁需要
   Python Playwright 和 Chrome/Chromium；或 Node.js、`node-playwright`/Playwright
   package，以及可通过 `ATTUNE_PLAYWRIGHT_EXECUTABLE` 指定的系统浏览器。
 
-## 单独运行某脚本
+## 单独调试某脚本
 
-```bash
-# 1. 起隔离 server
-XDG_DATA_HOME=/tmp/attune-e2e/data XDG_CONFIG_HOME=/tmp/attune-e2e/config \
-  rust/target/release/attune-server-headless --no-auth --port 18905 &
-# 2. setup vault（密码 e2e-pass-2026）— 见各脚本头部说明
-# 3. 跑脚本
-python3 tests/e2e/memory_moat_e2e.py
-```
-
-各脚本顶部 docstring 有独立的前置说明与期望结果。
+单脚本调试必须显式指向 K3 URL，例如 `ATTUNE_BASE_URL=http://192.168.100.233:18900`。
+本机 `localhost` 调试只能算 integration/debug，不得作为 E2E 结论或报告依据。
 
 ## 历史价值
 
